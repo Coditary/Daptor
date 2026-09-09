@@ -1,5 +1,8 @@
 #pragma once
 
+#include <tuinator/render/glyphs.hpp>
+#include <tuinator/render/scrollbar.hpp>
+#include <tuinator/widgets/containers/scroll_view.hpp>
 #include <tuinator/render/style.hpp>
 #include <tuinator/render/theme.hpp>
 
@@ -30,6 +33,9 @@ struct DapUiTheme {
     tuinator::Style control_stop{tuinator::style_fg_bg(tuinator::Rgb{220, 80, 80}, kBackground)};
     tuinator::Style control_restart{tuinator::style_fg_bg(tuinator::Rgb{255, 255, 0}, kBackground)};
     tuinator::Style control_disabled{tuinator::style_fg_bg(tuinator::Rgb{80, 80, 90}, kBackground)};
+
+    [[nodiscard]] tuinator::BorderGlyphs border_glyphs() const;
+    [[nodiscard]] tuinator::ScrollViewOptions scroll_view_options() const;
 
     void apply_to(tuinator::Theme& theme) const;
 };

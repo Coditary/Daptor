@@ -1,5 +1,6 @@
 #pragma once
 
+#include <tuinator/widgets/containers/scroll_view.hpp>
 #include <tuinator/render/style.hpp>
 
 #include <cstdint>
@@ -8,10 +9,13 @@
 #include <vector>
 
 namespace tuinator {
-class ListView;
-class Panel;
 class Widget;
-} // namespace tuinator
+}  // namespace tuinator
+
+namespace tui_debug_ui {
+class NavigableListView;
+class TitledScrollPane;
+}  // namespace tui_debug_ui
 
 namespace tui_debug_ui {
 
@@ -21,12 +25,11 @@ struct StackFrameRow {
     std::string path;
 };
 
-/// Stack frames list wrapped in a titled panel.
+/// Stack frames as a titled, scrollable list (no bordered panel frame).
 class StacksPanel {
   public:
-    StacksPanel(tuinator::Style border_style, tuinator::Style title_style, tuinator::Style item_style,
-                tuinator::Style selected_style, tuinator::Style row_background,
-                const std::string& title = "MainThread");
+    StacksPanel(tuinator::Style title_style, tuinator::Style item_style, tuinator::Style row_background,
+                tuinator::ScrollViewOptions scroll_options, const std::string& title = "MainThread");
 
     std::unique_ptr<tuinator::Widget> release_widget();
     void set_frames(std::vector<StackFrameRow> frames);
@@ -34,8 +37,8 @@ class StacksPanel {
     tuinator::Widget* list_widget() const;
 
   private:
-    std::unique_ptr<tuinator::Widget> panel_;
-    tuinator::ListView* list_ = nullptr;
+    std::unique_ptr<TitledScrollPane> pane_;
+    NavigableListView* list_ = nullptr;
 };
 
-} // namespace tui_debug_ui
+}  // namespace tui_debug_ui

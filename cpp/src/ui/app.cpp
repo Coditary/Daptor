@@ -11,6 +11,7 @@
 #include "tui_debug_ui/source_panel.hpp"
 #include "tui_debug_ui/navigable_list_view.hpp"
 #include "tui_debug_ui/stacks_panel.hpp"
+#include "tui_debug_ui/titled_scroll_pane.hpp"
 #include "tui_debug_ui/tty_setup.hpp"
 
 #include <tuinator/backend/terminal_backend.hpp>
@@ -305,13 +306,10 @@ std::unique_ptr<tuinator::Widget> make_repl_panel(const tui_debug_ui::DapUiTheme
     root->add_child(std::move(input));
     root->add_child(std::move(history));
 
-    auto filled_root =
-        std::make_unique<tui_debug_ui::BackgroundWidget>(std::move(root), theme.panel_background);
-
-    auto panel = std::make_unique<tuinator::Panel>("REPL", theme.border_normal, theme.title_normal);
-    panel->set_content(std::move(filled_root));
-    panel->set_flex(1);
-    return std::make_unique<tui_debug_ui::BackgroundWidget>(std::move(panel), theme.panel_background);
+    auto pane = std::make_unique<tui_debug_ui::TitledScrollPane>("REPL", std::move(root), theme.title_normal,
+                                                                 theme.panel_background, theme.scroll_view_options(),
+                                                                 false);
+    return pane->release_widget();
 }
 
 int sidebar_first_size(int terminal_width, std::uint16_t sidebar_pct) {
@@ -466,6 +464,12 @@ int DebugApp::run() {
     terminal_ready_for_session_ = true;
     // Initialize ncurses and build the widget tree before the first event-loop frame.
     app_->present();
+    // Re-apply after ncurses init so UTF-8 locale detection picks Unicode box glyphs.
+    {
+        tuinator::Theme theme = app_->theme();
+        dap_theme_.apply_to(theme);
+        app_->set_theme(theme);
+    }
     ensure_ui_built();
     return app_->run();
 }
@@ -501,10 +505,11 @@ void DebugApp::build_ui() {
     controls_bar_ = controls.get();
     controls->set_on_action([this](const std::string& op) { send_command(op.c_str()); });
 
-    scopes_panel_ = std::make_unique<ScopesPanel>(dap_theme_.border_normal, dap_theme_.title_normal, dap_theme_.label,
-                                                  dap_theme_.selection, dap_theme_.panel_background);
-    stacks_panel_ = std::make_unique<StacksPanel>(dap_theme_.border_normal, dap_theme_.title_normal, dap_theme_.label,
-                                                  dap_theme_.selection, dap_theme_.panel_background);
+    const auto scroll_options = dap_theme_.scroll_view_options();
+    scopes_panel_ = std::make_unique<ScopesPanel>(dap_theme_.title_normal, dap_theme_.label,
+                                                  dap_theme_.panel_background, scroll_options);
+    stacks_panel_ = std::make_unique<StacksPanel>(dap_theme_.title_normal, dap_theme_.label,
+                                                dap_theme_.panel_background, scroll_options);
 
     auto scopes_widget = scopes_panel_->release_widget();
     auto stacks_widget = stacks_panel_->release_widget();
@@ -544,12 +549,11 @@ void DebugApp::build_ui() {
         source_panel_->set_file_line_count(std::max(1, count_file_lines(read_file_or_empty(program_path_))));
     }
 
-    auto source_wrapper = std::make_unique<tuinator::Panel>(panel_title_from_path(model_.source_path),
-                                                            dap_theme_.border_normal, dap_theme_.title_normal);
-    source_panel_wrapper_ = source_wrapper.get();
-    source_wrapper->set_content(std::move(source_panel));
-    source_wrapper->set_flex(1);
-    auto source_shell = std::make_unique<BackgroundWidget>(std::move(source_wrapper), dap_theme_.panel_background);
+    source_section_ = std::make_unique<TitledScrollPane>(panel_title_from_path(model_.source_path),
+                                                         std::move(source_panel), dap_theme_.title_normal,
+                                                         dap_theme_.panel_background, scroll_options, false);
+    auto source_shell = source_section_->release_widget();
+    source_shell->set_flex(1);
 
     auto main_row = std::make_unique<ResizableSplitPane>(
         std::move(sidebar), std::move(source_shell),
@@ -577,11 +581,12 @@ void DebugApp::build_ui() {
     auto console_panel = std::make_unique<ConsolePanel>(dap_theme_.label, dap_theme_.panel_background);
     console_panel_ = console_panel.get();
 
-    auto console_wrapper = std::make_unique<tuinator::Panel>("Console", dap_theme_.border_normal,
-                                                             dap_theme_.title_normal);
-    console_wrapper->set_content(std::move(console_panel));
-    console_wrapper->set_flex(1);
-    auto console_shell = std::make_unique<BackgroundWidget>(std::move(console_wrapper), dap_theme_.panel_background);
+    auto console_section = std::make_unique<TitledScrollPane>("Console", std::move(console_panel),
+                                                              dap_theme_.title_normal, dap_theme_.panel_background,
+                                                              scroll_options);
+    console_scroll_view_ = console_section->scroll_view();
+    auto console_shell = console_section->release_widget();
+    console_shell->set_flex(1);
 
     auto bottom_tray = std::make_unique<ResizableSplitPane>(
         std::move(repl), std::move(console_shell),
@@ -720,6 +725,9 @@ void DebugApp::apply_console_json_payload(const std::string& json) {
         const std::vector<ConsoleLine> new_entries(model_.console_lines.begin() + static_cast<std::ptrdiff_t>(before),
                                                    model_.console_lines.end());
         console_panel_->append_lines(format_console_display_lines(new_entries));
+        if (console_scroll_view_ != nullptr) {
+            console_scroll_view_->scroll_to(0, console_scroll_view_->max_scroll_y());
+        }
     }
 }
 
@@ -903,11 +911,11 @@ void DebugApp::sync_ui_from_model() {
             stacks_panel_->set_lines(std::move(stack_lines));
         }
     }
-    if (source_panel_wrapper_ != nullptr) {
+    if (source_section_ != nullptr) {
         const std::string title = panel_title_from_path(model_.source_path);
         if (title != cached_source_title_) {
             cached_source_title_ = title;
-            source_panel_wrapper_->set_title(title);
+            source_section_->set_title(title);
         }
     }
     sync_breakpoints_to_panel();
@@ -927,6 +935,9 @@ void DebugApp::sync_ui_from_model() {
     }
     if (console_panel_ != nullptr && console_panel_->lines().empty() && !model_.console_lines.empty()) {
         console_panel_->append_lines(format_console_display_lines(model_.console_lines));
+        if (console_scroll_view_ != nullptr) {
+            console_scroll_view_->scroll_to(0, console_scroll_view_->max_scroll_y());
+        }
     }
 }
 

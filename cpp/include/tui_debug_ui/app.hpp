@@ -17,7 +17,7 @@
 
 namespace tuinator {
 class Application;
-class Panel;
+class ScrollView;
 class StatusBar;
 class TextInput;
 }  // namespace tuinator
@@ -30,6 +30,7 @@ class ScopesPanel;
 class ConsolePanel;
 class SourcePanel;
 class StacksPanel;
+class TitledScrollPane;
 
 /// Tuinator application wrapper for the tui-debug shell.
 class DebugApp {
@@ -114,12 +115,13 @@ class DebugApp {
     tuinator::StatusBar* status_bar_ = nullptr;
     std::unique_ptr<ScopesPanel> scopes_panel_;
     std::unique_ptr<StacksPanel> stacks_panel_;
-    tuinator::Panel* source_panel_wrapper_ = nullptr;
+    std::unique_ptr<TitledScrollPane> source_section_;
     SourcePanel* source_panel_ = nullptr;
     tuinator::TextInput* repl_input_ = nullptr;
     tuinator::ListView* repl_history_ = nullptr;
     std::vector<std::string> repl_history_lines_;
     ConsolePanel* console_panel_ = nullptr;
+    tuinator::ScrollView* console_scroll_view_ = nullptr;
     ResizableSplitPane* sidebar_split_ = nullptr;
     ResizableSplitPane* main_row_split_ = nullptr;
     ResizableSplitPane* bottom_tray_split_ = nullptr;

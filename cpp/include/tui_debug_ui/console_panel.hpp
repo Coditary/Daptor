@@ -31,14 +31,9 @@ class ConsolePanel : public tuinator::Widget {
     tuinator::Widget* hit_test_focusable(tuinator::Point point) override;
 
   private:
-    void clamp_scroll();
-    void scroll_to_bottom();
-    int max_scroll_y() const;
-
     tuinator::Style label_style_;
     tuinator::Style panel_background_;
     std::vector<std::string> lines_;
-    int scroll_y_ = 0;
 };
 
 /// Format stored console entries for display in the panel.

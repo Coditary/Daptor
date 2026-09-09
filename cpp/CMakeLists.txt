@@ -38,6 +38,7 @@ add_executable(tui-debug-ui
     src/ui/dap_ui_theme.cpp
     src/ui/controls_bar.cpp
     src/ui/navigable_list_view.cpp
+    src/ui/titled_scroll_pane.cpp
 )
 
 target_include_directories(tui-debug-ui
