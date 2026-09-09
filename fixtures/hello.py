@@ -173,7 +173,6 @@ def scroll_test_locals() -> int:
             _local_079,
         )
     )
-    breakpoint()
     return total
 
 

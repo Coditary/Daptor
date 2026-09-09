@@ -714,6 +714,12 @@ void DebugApp::handle_launch_complete() {
 
     reclaim_terminal_for_ui();
     sync_ui_from_model();
+
+    if (session_io_->is_active()) {
+        maybe_request_scope_variables();
+        maybe_request_source_highlight();
+        request_full_screen_refresh();
+    }
 }
 
 void DebugApp::apply_snapshot_json_payload(const std::string& json) {
