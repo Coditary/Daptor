@@ -2,6 +2,7 @@
 
 #include <tuinator/core/event.hpp>
 #include <tuinator/render/text.hpp>
+#include <tuinator/widgets/containers/scroll_view.hpp>
 
 #include <algorithm>
 #include <cstdio>
@@ -33,15 +34,52 @@ SourcePanel::SourcePanel(SyntaxTheme theme) : theme_(std::move(theme)) {
     theme_.execution_row.bold = true;
 }
 
+void SourcePanel::set_scroll_parent(tuinator::ScrollView* scroll_parent) { scroll_parent_ = scroll_parent; }
+
+int SourcePanel::scroll_offset() const {
+    return scroll_parent_ != nullptr ? scroll_parent_->scroll_y() : scroll_offset_;
+}
+
+int SourcePanel::viewport_height() const {
+    if (scroll_parent_ != nullptr) {
+        const int scroll_bounds = scroll_parent_->bounds().height;
+        if (scroll_bounds > 0) {
+            return scroll_bounds;
+        }
+
+        const int content_height = static_cast<int>(lines_.size());
+        const int max_scroll = scroll_parent_->max_scroll_y();
+        if (content_height > 0 && max_scroll < content_height) {
+            return content_height - max_scroll;
+        }
+
+        return 24;
+    }
+
+    return std::max(1, bounds_.height);
+}
+
 void SourcePanel::set_lines(std::vector<HighlightedLine> lines) {
     lines_ = std::move(lines);
-    clamp_scroll();
-    ensure_cursor_visible();
+    if (scroll_parent_ != nullptr) {
+        scroll_parent_->refresh_content();
+    } else {
+        clamp_scroll();
+    }
     mark_dirty();
 }
 
 void SourcePanel::set_scroll_offset(int offset) {
     offset = std::max(0, offset);
+    if (scroll_parent_ != nullptr) {
+        if (scroll_parent_->scroll_y() == offset) {
+            return;
+        }
+        scroll_parent_->scroll_to(0, offset);
+        mark_dirty();
+        return;
+    }
+
     if (scroll_offset_ == offset) {
         return;
     }
@@ -96,6 +134,14 @@ void SourcePanel::move_cursor_by(int delta) {
 }
 
 int SourcePanel::line_number_at_row(int row) const {
+    if (row >= 0 && row < static_cast<int>(lines_.size())) {
+        return lines_[static_cast<std::size_t>(row)].line_number;
+    }
+
+    if (scroll_parent_ != nullptr) {
+        return row + 1;
+    }
+
     const int index = scroll_offset_ + row;
     if (index >= 0 && index < static_cast<int>(lines_.size())) {
         return lines_[static_cast<std::size_t>(index)].line_number;
@@ -112,29 +158,44 @@ bool SourcePanel::is_gutter_click(int local_x) const {
 }
 
 void SourcePanel::ensure_cursor_visible() {
-    if (lines_.empty() || bounds_.height <= 0) {
+    if (lines_.empty()) {
         return;
     }
 
-    const int first_loaded = lines_.front().line_number;
-    const int last_loaded = lines_.back().line_number;
-    if (cursor_line_ < first_loaded || cursor_line_ > last_loaded) {
+    int line_index = -1;
+    for (int index = 0; index < static_cast<int>(lines_.size()); ++index) {
+        if (lines_[static_cast<std::size_t>(index)].line_number == cursor_line_) {
+            line_index = index;
+            break;
+        }
+    }
+
+    if (line_index < 0) {
         if (on_request_viewport_) {
             on_request_viewport_(cursor_line_);
         }
         return;
     }
 
-    for (int index = 0; index < static_cast<int>(lines_.size()); ++index) {
-        if (lines_[static_cast<std::size_t>(index)].line_number != cursor_line_) {
-            continue;
-        }
-        if (index < scroll_offset_) {
-            set_scroll_offset(index);
-        } else if (index >= scroll_offset_ + bounds_.height) {
-            set_scroll_offset(index - bounds_.height + 1);
+    const int viewport = viewport_height();
+    if (scroll_parent_ != nullptr) {
+        const int scroll_y = scroll_parent_->scroll_y();
+        if (line_index < scroll_y) {
+            set_scroll_offset(line_index);
+        } else if (line_index >= scroll_y + viewport) {
+            set_scroll_offset(line_index - viewport + 1);
         }
         return;
+    }
+
+    if (bounds_.height <= 0) {
+        return;
+    }
+
+    if (line_index < scroll_offset_) {
+        set_scroll_offset(line_index);
+    } else if (line_index >= scroll_offset_ + bounds_.height) {
+        set_scroll_offset(line_index - bounds_.height + 1);
     }
 }
 
@@ -177,6 +238,13 @@ void SourcePanel::paint(PaintContext& ctx) const {
         return;
     }
 
+    if (scroll_parent_ != nullptr) {
+        for (int index = 0; index < static_cast<int>(lines_.size()); ++index) {
+            paint_line(ctx, index, lines_[static_cast<std::size_t>(index)]);
+        }
+        return;
+    }
+
     const int visible_rows = bounds_.height;
     for (int row = 0; row < visible_rows; ++row) {
         const int index = scroll_offset_ + row;
@@ -191,6 +259,17 @@ bool SourcePanel::handle_event(const Event& event) {
     if (const auto* mouse = std::get_if<tuinator::MouseEvent>(&event)) {
         if (lines_.empty()) {
             return false;
+        }
+        if (scroll_parent_ != nullptr) {
+            switch (mouse->action) {
+            case tuinator::MouseAction::WheelUp:
+            case tuinator::MouseAction::WheelDown:
+            case tuinator::MouseAction::WheelLeft:
+            case tuinator::MouseAction::WheelRight:
+                return false;
+            default:
+                break;
+            }
         }
         if (mouse->action != tuinator::MouseAction::Click && mouse->action != tuinator::MouseAction::Release) {
             return false;
@@ -237,12 +316,13 @@ bool SourcePanel::handle_event(const Event& event) {
         move_cursor_by(-1);
         return true;
     }
+    const int page_step = std::max(1, viewport_height());
     if (key->key == Key::PageDown) {
-        move_cursor_by(std::max(1, bounds_.height));
+        move_cursor_by(page_step);
         return true;
     }
     if (key->key == Key::PageUp) {
-        move_cursor_by(-std::max(1, bounds_.height));
+        move_cursor_by(-page_step);
         return true;
     }
     if (key->character == 'g' && !key->ctrl) {
@@ -252,7 +332,7 @@ bool SourcePanel::handle_event(const Event& event) {
     }
     if (key->character == 'G' && !key->ctrl) {
         set_cursor_line(file_line_count_);
-        set_scroll_offset(std::max(0, file_line_count_ - bounds_.height));
+        set_scroll_offset(std::max(0, static_cast<int>(lines_.size()) - page_step));
         return true;
     }
 
@@ -264,10 +344,11 @@ void SourcePanel::clamp_scroll() {
 }
 
 int SourcePanel::max_scroll() const {
-    if (bounds_.height <= 0) {
+    const int viewport = viewport_height();
+    if (viewport <= 0) {
         return std::max(0, static_cast<int>(lines_.size()) - 1);
     }
-    return std::max(0, static_cast<int>(lines_.size()) - bounds_.height);
+    return std::max(0, static_cast<int>(lines_.size()) - viewport);
 }
 
 int SourcePanel::gutter_width() const {

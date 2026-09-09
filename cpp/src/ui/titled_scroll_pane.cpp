@@ -39,6 +39,12 @@ void TitledScrollPane::set_title(std::string title) {
     }
 }
 
+void TitledScrollPane::refresh_scroll_content() {
+    if (scroll_view_ != nullptr) {
+        scroll_view_->refresh_content();
+    }
+}
+
 std::unique_ptr<tuinator::Widget> TitledScrollPane::release_widget() { return std::move(root_); }
 
 }  // namespace tui_debug_ui

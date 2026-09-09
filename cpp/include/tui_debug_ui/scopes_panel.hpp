@@ -27,6 +27,7 @@ class ScopesPanel {
     std::unique_ptr<tuinator::Widget> release_widget();
     void set_scope_names(std::vector<std::string> names);
     tuinator::Widget* list_widget() const;
+    tuinator::ScrollView* scroll_view() const;
 
   private:
     std::unique_ptr<TitledScrollPane> pane_;

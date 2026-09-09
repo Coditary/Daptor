@@ -11,6 +11,9 @@ tuinator::BorderGlyphs DapUiTheme::border_glyphs() const {
 
 tuinator::ScrollViewOptions DapUiTheme::scroll_view_options() const {
     tuinator::ScrollViewOptions options;
+    // Tuinator defaults to 40x10; that breaks flex panes smaller than 10 rows.
+    options.width = 1;
+    options.height = 1;
     options.background = panel_background;
 
     tuinator::ScrollbarPreset preset =

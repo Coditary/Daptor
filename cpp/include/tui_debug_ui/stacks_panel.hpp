@@ -9,6 +9,7 @@
 #include <vector>
 
 namespace tuinator {
+class ScrollView;
 class Widget;
 }  // namespace tuinator
 
@@ -35,6 +36,7 @@ class StacksPanel {
     void set_frames(std::vector<StackFrameRow> frames);
     void set_lines(std::vector<std::string> lines);
     tuinator::Widget* list_widget() const;
+    tuinator::ScrollView* scroll_view() const;
 
   private:
     std::unique_ptr<TitledScrollPane> pane_;

@@ -2,6 +2,7 @@
 
 #include <tuinator/render/paint_context.hpp>
 #include <tuinator/render/text.hpp>
+#include <tuinator/widgets/containers/scroll_view.hpp>
 
 #include <algorithm>
 
@@ -12,11 +13,18 @@ NavigableListView::NavigableListView(tuinator::Style item_style, tuinator::Style
     : tuinator::ListView(std::move(item_style), std::move(selected_style)),
       row_background_(std::move(row_background)), item_style_(item_style), interactive_(interactive) {}
 
+void NavigableListView::set_scroll_parent(tuinator::ScrollView* scroll_parent) {
+    scroll_parent_ = scroll_parent;
+}
+
 void NavigableListView::assign_items(std::vector<std::string> items) {
     set_items(std::move(items));
     scroll_offset_ = 0;
     if (interactive_) {
         set_selected_index(0);
+    }
+    if (scroll_parent_ != nullptr) {
+        scroll_parent_->refresh_content();
     }
     mark_dirty();
 }

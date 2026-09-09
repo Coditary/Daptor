@@ -66,6 +66,8 @@ class DebugApp {
     void maybe_request_scope_variables();
     void maybe_request_source_highlight();
     void apply_instant_source_viewport(int first_line, int line_count);
+    int source_viewport_height() const;
+    bool uses_full_file_source() const;
     void sync_status_bar();
     void apply_scope_variables_payload(const std::string& signature, const std::string& json);
     void maybe_start_launch();
@@ -96,6 +98,7 @@ class DebugApp {
     void sync_controls_bar();
     bool is_session_stopped() const;
     void mark_all_panels_dirty();
+    void refresh_scroll_views();
 
     SessionMode mode_;
     std::string program_path_;
@@ -117,6 +120,7 @@ class DebugApp {
     std::unique_ptr<StacksPanel> stacks_panel_;
     std::unique_ptr<TitledScrollPane> source_section_;
     SourcePanel* source_panel_ = nullptr;
+    tuinator::ScrollView* source_scroll_view_ = nullptr;
     tuinator::TextInput* repl_input_ = nullptr;
     tuinator::ListView* repl_history_ = nullptr;
     std::vector<std::string> repl_history_lines_;
@@ -132,13 +136,13 @@ class DebugApp {
     std::string cached_status_bar_text_;
     std::vector<std::string> cached_scope_rows_;
     std::vector<std::string> cached_stack_lines_;
+    std::uint64_t cached_follow_generation_ = 0;
+    std::uint32_t cached_follow_line_ = 0;
     int cached_highlight_first_line_ = -1;
     int cached_highlight_line_count_ = -1;
     int highlight_request_first_line_ = -1;
     int highlight_request_line_count_ = -1;
     std::uint64_t snapshot_generation_ = 0;
-    std::uint64_t cached_follow_generation_ = 0;
-    std::uint32_t cached_follow_line_ = 0;
     std::string scope_variables_signature_;
     std::string scope_variables_fetch_signature_;
     bool scope_variables_fetch_pending_ = false;

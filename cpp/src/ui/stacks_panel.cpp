@@ -15,6 +15,9 @@ StacksPanel::StacksPanel(tuinator::Style title_style, tuinator::Style item_style
 
     pane_ = std::make_unique<TitledScrollPane>(title, std::move(list), title_style, row_background,
                                                std::move(scroll_options));
+    if (tuinator::ScrollView* scroll = pane_->scroll_view()) {
+        list_->set_scroll_parent(scroll);
+    }
 }
 
 std::unique_ptr<tuinator::Widget> StacksPanel::release_widget() { return pane_->release_widget(); }
@@ -43,5 +46,9 @@ void StacksPanel::set_lines(std::vector<std::string> lines) {
 }
 
 tuinator::Widget* StacksPanel::list_widget() const { return list_; }
+
+tuinator::ScrollView* StacksPanel::scroll_view() const {
+    return pane_ != nullptr ? pane_->scroll_view() : nullptr;
+}
 
 }  // namespace tui_debug_ui

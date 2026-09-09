@@ -14,6 +14,9 @@ ScopesPanel::ScopesPanel(tuinator::Style title_style, tuinator::Style item_style
 
     pane_ = std::make_unique<TitledScrollPane>(title, std::move(list), title_style, row_background,
                                                std::move(scroll_options));
+    if (tuinator::ScrollView* scroll = pane_->scroll_view()) {
+        list_->set_scroll_parent(scroll);
+    }
 }
 
 std::unique_ptr<tuinator::Widget> ScopesPanel::release_widget() { return pane_->release_widget(); }
@@ -25,5 +28,9 @@ void ScopesPanel::set_scope_names(std::vector<std::string> names) {
 }
 
 tuinator::Widget* ScopesPanel::list_widget() const { return list_; }
+
+tuinator::ScrollView* ScopesPanel::scroll_view() const {
+    return pane_ != nullptr ? pane_->scroll_view() : nullptr;
+}
 
 }  // namespace tui_debug_ui

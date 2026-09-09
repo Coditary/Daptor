@@ -11,7 +11,7 @@ namespace tui_debug_ui {
 namespace {
 
 constexpr int kDividerThickness = 1;
-constexpr int kGrabPadding = 1;
+constexpr int kGrabPadding = 0;
 constexpr int kMinPaneSize = 6;
 
 }  // namespace
@@ -186,16 +186,16 @@ tuinator::Widget* ResizableSplitPane::hit_test(tuinator::Point point) {
         return nullptr;
     }
 
-    if (is_on_divider(point)) {
-        return this;
-    }
-
     for (tuinator::Widget* pane : {second_.get(), first_.get()}) {
         if (pane != nullptr) {
             if (tuinator::Widget* hit = pane->hit_test(point)) {
                 return hit;
             }
         }
+    }
+
+    if (is_on_divider(point)) {
+        return this;
     }
 
     return this;
@@ -208,15 +208,23 @@ bool ResizableSplitPane::handle_event(const tuinator::Event& event) {
         const bool release = mouse->action == tuinator::MouseAction::Release;
         const bool move = mouse->action == tuinator::MouseAction::Move;
 
-        if (press && is_on_divider(mouse->position)) {
-            if (!dragging_divider_) {
-                dragging_divider_ = true;
-                if (on_drag_state_changed_) {
-                    on_drag_state_changed_(true);
+        if (press) {
+            for (tuinator::Widget* pane : {first_.get(), second_.get()}) {
+                if (pane != nullptr && pane->bounds().contains(mouse->position) && pane->handle_event(event)) {
+                    return true;
                 }
             }
-            apply_drag_position(mouse->position);
-            return true;
+
+            if (is_on_divider(mouse->position)) {
+                if (!dragging_divider_) {
+                    dragging_divider_ = true;
+                    if (on_drag_state_changed_) {
+                        on_drag_state_changed_(true);
+                    }
+                }
+                apply_drag_position(mouse->position);
+                return true;
+            }
         }
 
         if (dragging_divider_ && move && mouse->left_pressed) {

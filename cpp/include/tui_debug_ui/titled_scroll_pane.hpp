@@ -21,6 +21,8 @@ class TitledScrollPane {
     tuinator::Widget* content_widget() const { return content_widget_; }
     tuinator::ScrollView* scroll_view() const { return scroll_view_; }
 
+    void refresh_scroll_content();
+
     std::unique_ptr<tuinator::Widget> release_widget();
 
   private:

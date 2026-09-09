@@ -9,6 +9,10 @@
 #include <unordered_set>
 #include <vector>
 
+namespace tuinator {
+class ScrollView;
+}  // namespace tuinator
+
 namespace tui_debug_ui {
 
 struct HighlightSpan {
@@ -29,7 +33,7 @@ class SourcePanel : public tuinator::Widget {
     const std::vector<HighlightedLine>& lines() const { return lines_; }
     void set_lines(std::vector<HighlightedLine> lines);
 
-    int scroll_offset() const { return scroll_offset_; }
+    int scroll_offset() const;
     void set_scroll_offset(int offset);
 
     int execution_line() const { return execution_line_; }
@@ -41,7 +45,12 @@ class SourcePanel : public tuinator::Widget {
     const std::unordered_set<int>& breakpoint_lines() const { return breakpoint_lines_; }
     void set_breakpoint_lines(std::unordered_set<int> lines);
 
+    int file_line_count() const { return file_line_count_; }
     void set_file_line_count(int count);
+
+    void set_scroll_parent(tuinator::ScrollView* scroll_parent);
+    int viewport_height() const;
+    void ensure_cursor_visible();
     void move_cursor_by(int delta);
     int line_number_at_row(int row) const;
 
@@ -69,7 +78,6 @@ class SourcePanel : public tuinator::Widget {
     void paint_line(tuinator::PaintContext& ctx, int row, const HighlightedLine& line) const;
     int code_start_x() const;
     bool is_gutter_click(int local_x) const;
-    void ensure_cursor_visible();
 
     SyntaxTheme theme_;
     BreakpointToggleCallback on_toggle_breakpoint_;
@@ -77,6 +85,7 @@ class SourcePanel : public tuinator::Widget {
     std::vector<HighlightedLine> lines_;
     std::unordered_set<int> breakpoint_lines_;
     int scroll_offset_ = 0;
+    tuinator::ScrollView* scroll_parent_ = nullptr;
     int execution_line_ = 0;
     int cursor_line_ = 1;
     int file_line_count_ = 1;

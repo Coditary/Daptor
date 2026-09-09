@@ -42,6 +42,7 @@ namespace {
 constexpr int kControlsBarRows = 1;
 constexpr int kStatusBarRows = 1;
 constexpr int kSplitDividerRows = 1;
+constexpr int kFullFileSourceLineThreshold = 500;
 
 bool scope_rows_include_variables(const std::vector<std::string>& rows) {
     for (const std::string& row : rows) {
@@ -551,7 +552,11 @@ void DebugApp::build_ui() {
 
     source_section_ = std::make_unique<TitledScrollPane>(panel_title_from_path(model_.source_path),
                                                          std::move(source_panel), dap_theme_.title_normal,
-                                                         dap_theme_.panel_background, scroll_options, false);
+                                                         dap_theme_.panel_background, scroll_options);
+    source_scroll_view_ = source_section_->scroll_view();
+    if (source_panel_ != nullptr && source_scroll_view_ != nullptr) {
+        source_panel_->set_scroll_parent(source_scroll_view_);
+    }
     auto source_shell = source_section_->release_widget();
     source_shell->set_flex(1);
 
@@ -641,7 +646,25 @@ void DebugApp::build_ui() {
     }
     sync_ui_from_model();
     sync_controls_bar();
+    refresh_scroll_views();
     request_full_screen_refresh();
+}
+
+void DebugApp::refresh_scroll_views() {
+    auto refresh = [](tuinator::ScrollView* scroll) {
+        if (scroll != nullptr) {
+            scroll->refresh_content();
+        }
+    };
+
+    if (scopes_panel_ != nullptr) {
+        refresh(scopes_panel_->scroll_view());
+    }
+    if (stacks_panel_ != nullptr) {
+        refresh(stacks_panel_->scroll_view());
+    }
+    refresh(source_scroll_view_);
+    refresh(console_scroll_view_);
 }
 
 void DebugApp::maybe_start_launch() {
@@ -726,6 +749,7 @@ void DebugApp::apply_console_json_payload(const std::string& json) {
                                                    model_.console_lines.end());
         console_panel_->append_lines(format_console_display_lines(new_entries));
         if (console_scroll_view_ != nullptr) {
+            console_scroll_view_->refresh_content();
             console_scroll_view_->scroll_to(0, console_scroll_view_->max_scroll_y());
         }
     }
@@ -776,7 +800,11 @@ void DebugApp::handle_session_event(const SessionIoEvent& event) {
                 const auto lines = parse_highlight_json(event.payload);
                 if (!lines.empty()) {
                     source_panel_->set_lines(std::move(lines));
-                    source_panel_->set_scroll_offset(0);
+                    if (!uses_full_file_source()) {
+                        source_panel_->set_scroll_offset(0);
+                    } else if (source_scroll_view_ != nullptr) {
+                        source_scroll_view_->refresh_content();
+                    }
                 }
             } catch (const std::exception&) {
                 break;
@@ -927,15 +955,14 @@ void DebugApp::sync_ui_from_model() {
                 model_.current_line != cached_follow_line_) {
                 cached_follow_generation_ = snapshot_generation_;
                 cached_follow_line_ = model_.current_line;
-                const int visible = std::max(1, source_panel_->bounds().height);
-                const int target_scroll = static_cast<int>(model_.current_line) - visible / 2;
-                source_panel_->set_scroll_offset(std::max(0, target_scroll));
+                source_panel_->ensure_cursor_visible();
             }
         }
     }
     if (console_panel_ != nullptr && console_panel_->lines().empty() && !model_.console_lines.empty()) {
         console_panel_->append_lines(format_console_display_lines(model_.console_lines));
         if (console_scroll_view_ != nullptr) {
+            console_scroll_view_->refresh_content();
             console_scroll_view_->scroll_to(0, console_scroll_view_->max_scroll_y());
         }
     }
@@ -952,6 +979,21 @@ void DebugApp::sync_status_bar() {
     }
 }
 
+int DebugApp::source_viewport_height() const {
+    if (source_panel_ != nullptr) {
+        return source_panel_->viewport_height();
+    }
+    if (source_scroll_view_ != nullptr && source_scroll_view_->bounds().height > 0) {
+        return source_scroll_view_->bounds().height;
+    }
+    return 24;
+}
+
+bool DebugApp::uses_full_file_source() const {
+    return source_panel_ != nullptr && source_panel_->file_line_count() > 0 &&
+           source_panel_->file_line_count() <= kFullFileSourceLineThreshold;
+}
+
 void DebugApp::apply_instant_source_viewport(int first_line, int line_count) {
     if (source_panel_ == nullptr || cached_source_text_.empty() || line_count <= 0 || first_line < 1) {
         return;
@@ -963,7 +1005,11 @@ void DebugApp::apply_instant_source_viewport(int first_line, int line_count) {
     }
 
     source_panel_->set_lines(lines);
-    source_panel_->set_scroll_offset(0);
+    if (!uses_full_file_source()) {
+        source_panel_->set_scroll_offset(0);
+    } else if (source_scroll_view_ != nullptr) {
+        source_scroll_view_->refresh_content();
+    }
 }
 
 void DebugApp::invalidate_scope_variables() {
@@ -1036,18 +1082,25 @@ void DebugApp::maybe_request_source_highlight() {
         return;
     }
 
-    const int line_count = std::max(1, source_panel_->bounds().height);
-    int first_line = std::max(1, source_panel_->cursor_line() - line_count / 2);
-    const auto& visible_lines = source_panel_->lines();
-    if (!visible_lines.empty()) {
-        const int scroll = source_panel_->scroll_offset();
-        if (scroll >= 0 && scroll < static_cast<int>(visible_lines.size())) {
-            first_line = visible_lines[static_cast<std::size_t>(scroll)].line_number;
+    const int viewport_height = source_viewport_height();
+    const int file_lines = source_panel_->file_line_count();
+    const bool full_file = uses_full_file_source();
+    const int line_count = full_file ? file_lines : std::max(1, viewport_height);
+
+    int first_line = 1;
+    if (!full_file) {
+        first_line = std::max(1, source_panel_->cursor_line() - line_count / 2);
+        const auto& visible_lines = source_panel_->lines();
+        if (!visible_lines.empty()) {
+            const int scroll = source_panel_->scroll_offset();
+            if (scroll >= 0 && scroll < static_cast<int>(visible_lines.size())) {
+                first_line = visible_lines[static_cast<std::size_t>(scroll)].line_number;
+            }
         }
-    }
-    const int cursor_line = source_panel_->cursor_line();
-    if (cursor_line < first_line || cursor_line >= first_line + line_count) {
-        first_line = std::max(1, cursor_line - line_count / 2);
+        const int cursor_line = source_panel_->cursor_line();
+        if (cursor_line < first_line || cursor_line >= first_line + line_count) {
+            first_line = std::max(1, cursor_line - line_count / 2);
+        }
     }
     if (first_line == cached_highlight_first_line_ && line_count == cached_highlight_line_count_ &&
         cached_source_path_ == model_.source_path) {
@@ -1146,6 +1199,7 @@ void DebugApp::request_full_screen_refresh() {
 
 void DebugApp::on_split_drag_ended() {
     apply_focus();
+    refresh_scroll_views();
     cached_highlight_first_line_ = -1;
     cached_highlight_line_count_ = -1;
     highlight_request_first_line_ = -1;
@@ -1480,9 +1534,14 @@ void DebugApp::mark_all_panels_dirty() {
     if (source_panel_ != nullptr) {
         source_panel_->mark_dirty();
     }
+    if (source_scroll_view_ != nullptr) {
+        source_scroll_view_->refresh_content();
+        source_scroll_view_->mark_dirty();
+    }
     if (scopes_panel_ != nullptr && scopes_panel_->list_widget() != nullptr) {
         scopes_panel_->list_widget()->mark_dirty();
     }
+    refresh_scroll_views();
     if (stacks_panel_ != nullptr && stacks_panel_->list_widget() != nullptr) {
         stacks_panel_->list_widget()->mark_dirty();
     }
@@ -1587,8 +1646,9 @@ void DebugApp::toggle_breakpoint_at_line(int line) {
     source_panel_->set_breakpoint_lines(lines);
 
     if (source_panel_->lines().empty() && !cached_source_text_.empty()) {
-        const int line_count = std::max(1, source_panel_->bounds().height);
-        const int first_line = std::max(1, line - line_count / 2);
+        const int line_count =
+            uses_full_file_source() ? source_panel_->file_line_count() : std::max(1, source_viewport_height());
+        const int first_line = uses_full_file_source() ? 1 : std::max(1, line - line_count / 2);
         apply_instant_source_viewport(first_line, line_count);
     }
 

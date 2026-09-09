@@ -34,6 +34,20 @@ std::string escape_json(const std::string& value) {
     return out;
 }
 
+std::string mock_variables_json(const char* prefix, int count, int value_offset = 0) {
+    std::ostringstream json;
+    json << '[';
+    for (int index = 0; index < count; ++index) {
+        if (index > 0) {
+            json << ',';
+        }
+        const int value = index + value_offset;
+        json << R"({"name":")" << prefix << index << R"(","value":")" << value << R"(","variablesReference":0})";
+    }
+    json << ']';
+    return json.str();
+}
+
 }  // namespace
 
 class MockSessionBackend final : public SessionBackend {
@@ -205,11 +219,10 @@ class MockSessionBackend final : public SessionBackend {
             return std::nullopt;
         }
         if (variables_reference == 3) {
-            return R"([{"name":"name","value":"'debugger'","variablesReference":0},{"name":"step","value":")"
-                   + std::to_string(step_index_) + R"(","variablesReference":0}])";
+            return mock_variables_json("local_", 80, 1);
         }
         if (variables_reference == 4) {
-            return R"([{"name":"__name__","value":"'__main__'","variablesReference":0}])";
+            return mock_variables_json("global_", 40, 100);
         }
         return "[]";
     }
