@@ -1,0 +1,63 @@
+cmake_minimum_required(VERSION 3.20)
+project(tui-debug-ui VERSION 0.1.0 LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+# /tmp is often quota-limited; keep compiler temporaries in the repo tree.
+set(TUI_DEBUG_TMPDIR "${CMAKE_SOURCE_DIR}/.tmp")
+file(MAKE_DIRECTORY "${TUI_DEBUG_TMPDIR}")
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    add_compile_options(-pipe)
+endif()
+
+
+
+include(cmake/Tuinator.cmake)
+include(cmake/Corrosion.cmake)
+
+set(TUI_DEBUG_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../include")
+
+add_executable(tui-debug-ui
+    src/main.cpp
+    src/ui/app.cpp
+    src/ui/debug_ui_model.cpp
+    src/ui/snapshot_parser.cpp
+    src/ui/scopes_panel.cpp
+    src/ui/stacks_panel.cpp
+    src/ui/source_panel.cpp
+    src/ui/console_panel.cpp
+    src/ui/tty_setup.cpp
+    src/ui/session_backend.cpp
+    src/ui/session_io_thread.cpp
+    src/ui/rust_session_backend.cpp
+    src/ui/mock_session_backend.cpp
+    src/ui/resizable_split_pane.cpp
+    src/ui/background_widget.cpp
+    src/ui/dap_ui_theme.cpp
+    src/ui/controls_bar.cpp
+    src/ui/navigable_list_view.cpp
+)
+
+target_include_directories(tui-debug-ui
+    PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        "${TUI_DEBUG_INCLUDE_DIR}"
+)
+
+target_link_libraries(tui-debug-ui
+    PRIVATE
+        tuinator::tuinator
+        tui_debug_core
+        ${TUI_DEBUG_NCURSES_LIBRARIES}
+)
+
+target_include_directories(tui-debug-ui
+    PRIVATE
+        ${TUI_DEBUG_NCURSES_INCLUDE_DIRS}
+)
+
+if(TARGET nlohmann_json::nlohmann_json)
+    target_link_libraries(tui-debug-ui PRIVATE nlohmann_json::nlohmann_json)
+endif()

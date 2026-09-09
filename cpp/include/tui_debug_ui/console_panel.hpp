@@ -1,0 +1,47 @@
+#pragma once
+
+#include <tuinator/render/style.hpp>
+#include <tuinator/widgets/widget.hpp>
+
+#include <functional>
+#include <string>
+#include <vector>
+
+namespace tui_debug_ui {
+
+struct ConsoleLine;
+
+/// Scrollable read-only console output panel (left-aligned lines).
+class ConsolePanel : public tuinator::Widget {
+  public:
+    explicit ConsolePanel(tuinator::Style label_style = {}, tuinator::Style panel_background = {});
+
+    const std::vector<std::string>& lines() const { return lines_; }
+
+    void set_text(std::string text);
+    void append_lines(std::vector<std::string> lines);
+
+    tuinator::Size preferred_size() const override;
+    void layout(tuinator::Rect bounds) override;
+    void paint(tuinator::PaintContext& ctx) const override;
+    bool handle_event(const tuinator::Event& event) override;
+    bool is_focusable() const override { return true; }
+    void collect_focusable(std::vector<tuinator::Widget*>& out) override;
+    tuinator::Widget* hit_test(tuinator::Point point) override;
+    tuinator::Widget* hit_test_focusable(tuinator::Point point) override;
+
+  private:
+    void clamp_scroll();
+    void scroll_to_bottom();
+    int max_scroll_y() const;
+
+    tuinator::Style label_style_;
+    tuinator::Style panel_background_;
+    std::vector<std::string> lines_;
+    int scroll_y_ = 0;
+};
+
+/// Format stored console entries for display in the panel.
+std::vector<std::string> format_console_display_lines(const std::vector<ConsoleLine>& entries);
+
+} // namespace tui_debug_ui

@@ -1,0 +1,101 @@
+#pragma once
+
+#include <cstdint>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+namespace tui_debug_ui {
+
+enum class ConnectionState {
+    Connecting,
+    Connected,
+    Failed,
+};
+
+enum class Focus {
+    Source,
+    Scopes,
+    Breakpoints,
+    Stacks,
+    Watches,
+    Repl,
+    Console,
+};
+
+struct LayoutConfig {
+    std::uint16_t sidebar_pct = 25;
+    std::uint16_t bottom_pct = 35;
+    std::uint16_t repl_pct = 30;
+    std::uint16_t scopes_pct = 55;
+
+    void widen_sidebar();
+    void narrow_sidebar();
+    void grow_bottom();
+    void shrink_bottom();
+    void widen_repl();
+    void narrow_repl();
+    void grow_scopes();
+    void shrink_scopes();
+};
+
+struct ThreadInfo {
+    std::int64_t id = 0;
+    std::string name;
+};
+
+struct StackFrameInfo {
+    std::int64_t id = 0;
+    std::string name;
+    std::int64_t line = 0;
+    std::string path;
+};
+
+struct ScopeInfo {
+    std::string name;
+    std::int64_t variables_reference = 0;
+};
+
+struct VariableInfo {
+    std::string name;
+    std::string value;
+
+    friend bool operator==(const VariableInfo& lhs, const VariableInfo& rhs) {
+        return lhs.name == rhs.name && lhs.value == rhs.value;
+    }
+};
+
+struct ConsoleLine {
+    std::string category;
+    std::string text;
+};
+
+/// View model mirroring debugger state for the Tuinator UI layer.
+class DebugUiModel {
+  public:
+    ConnectionState connection_state = ConnectionState::Connecting;
+    Focus focus = Focus::Source;
+    LayoutConfig layout{};
+
+    std::string source_path;
+    std::uint32_t current_line = 0;
+    std::string status_message = "Connecting to debugpy…";
+
+    std::string session_state;
+    std::string stop_reason;
+    std::vector<ThreadInfo> threads;
+    std::vector<StackFrameInfo> stack_frames;
+    std::vector<ScopeInfo> scopes;
+    std::vector<VariableInfo> variables;
+    /// Variables keyed by DAP `variablesReference` (lazy-loaded per scope).
+    std::unordered_map<std::int64_t, std::vector<VariableInfo>> scope_variables;
+    std::vector<ConsoleLine> console_lines;
+
+    /// Apply a JSON snapshot from the Rust session.
+    void apply_snapshot_json(const std::string& json);
+
+    std::string connection_label() const;
+    std::string focus_label() const;
+};
+
+}  // namespace tui_debug_ui

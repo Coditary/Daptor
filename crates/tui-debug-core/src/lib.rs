@@ -1,0 +1,6 @@
+pub mod c_api;
+pub mod dap;
+pub mod highlight;
+pub mod session;
+
+pub use session::{DebugSession, SessionSnapshot, SessionState, print_snapshot};
