@@ -47,15 +47,22 @@ pub fn apply_snapshot(state: &mut AppState, snapshot: &SessionSnapshot, session:
 
     if let Some(frame) = snapshot.stack_frames.first() {
         state.current_line = frame.line.max(1) as u32;
-        if let Some(path) = frame
-            .source
-            .as_ref()
-            .and_then(|s| s.path.as_ref())
-            .map(std::path::PathBuf::from)
-        {
-            state.execution_path = Some(path.clone());
-            load_source(state, &path);
-            state.source_cursor_line = state.current_line;
+        if let Some(source) = frame.source.as_ref() {
+            if let Some(path) = source.path.as_ref().map(std::path::PathBuf::from) {
+                state.execution_path = Some(path.clone());
+                load_source(state, &path);
+                state.source_cursor_line = state.current_line;
+            } else if let Some(source_reference) = source.source_reference.filter(|reference| *reference > 0) {
+                if let Ok(content) = session.fetch_source(source_reference) {
+                    state.execution_path = Some(std::path::PathBuf::from(format!(
+                        "dap:source:{source_reference}"
+                    )));
+                    state.source_path = state.execution_path.clone();
+                    state.source_lines = content.lines().map(str::to_string).collect();
+                    state.source_cursor_line = state.current_line;
+                    state.source_scroll = 0;
+                }
+            }
         }
     }
 

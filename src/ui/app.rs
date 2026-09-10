@@ -648,9 +648,18 @@ fn apply_action(action: PanelAction, state: &mut AppState, session: &mut DebugSe
             state.status_message = "Running".into();
         }
         PanelAction::PlayPause => {
-            session.dispatch_play_pause()?;
-            state.session_state = SessionState::Running;
-            state.status_message = "Running".into();
+            match &state.session_state {
+                SessionState::Stopped { .. } => {
+                    session.dispatch_continue()?;
+                    state.session_state = SessionState::Running;
+                    state.status_message = "Running".into();
+                }
+                SessionState::Running => {
+                    session.dispatch_pause()?;
+                    state.status_message = "Pausing…".into();
+                }
+                _ => {}
+            }
         }
         PanelAction::Pause => {
             session.dispatch_pause()?;

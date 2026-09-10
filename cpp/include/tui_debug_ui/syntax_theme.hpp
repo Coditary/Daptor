@@ -62,6 +62,7 @@ struct SyntaxTheme {
 
     tuinator::Style line_number{tuinator::style_fg_bg(tuinator::Rgb{100, 100, 110}, kBackground)};
     tuinator::Style breakpoint_marker{tuinator::style_fg_bg(tuinator::Rgb{220, 60, 60}, kBackground)};
+    tuinator::Style breakpoint_conditional_marker{tuinator::style_fg_bg(tuinator::Rgb{255, 200, 80}, kBackground)};
     tuinator::Style execution_row{tuinator::style_fg_bg(tuinator::Rgb{255, 255, 255}, tuinator::Rgb{28, 80, 48})};
     tuinator::Style cursor_row{tuinator::style_fg_bg(tuinator::Rgb{255, 255, 255}, tuinator::Rgb{45, 45, 55})};
     tuinator::Style panel_background{tuinator::style_bg(tuinator::Rgb{30, 30, 36})};

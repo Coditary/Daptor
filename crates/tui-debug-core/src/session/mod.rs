@@ -10,6 +10,20 @@ use crate::dap::protocol::{InboundMessage, OutputEventBody, Scope, StackFrame, S
 use crate::dap::{DapTransport, spawn_debugpy_adapter};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const WATCH_EVAL_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// When true, the debug adapter may stop/step into library / runtime source the adapter
+/// exposes (e.g. debugpy `justMyCode: false` for Python stdlib). Adapter-specific launch
+/// keys belong in [`Self::adapter_launch_extras`].
+pub(crate) fn debuggee_includes_library_sources() -> bool {
+    true
+}
+
+fn adapter_launch_extras() -> serde_json::Value {
+    json!({
+        "justMyCode": !debuggee_includes_library_sources(),
+    })
+}
 
 /// High-level debug session state exposed to the TUI layer.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -21,12 +35,28 @@ pub enum SessionState {
     Exited,
 }
 
+/// Stack frames for a single thread (nvim-dap-ui fetches one trace per thread).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThreadStackTrace {
+    pub thread_id: i64,
+    pub stack_frames: Vec<StackFrame>,
+}
+
+/// One source breakpoint sent to the debug adapter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceBreakpoint {
+    pub line: u32,
+    pub condition: Option<String>,
+}
+
 /// Snapshot of debugger state at a stop point.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionSnapshot {
     pub state: SessionState,
     pub threads: Vec<Thread>,
     pub stack_frames: Vec<StackFrame>,
+    #[serde(default)]
+    pub thread_stacks: Vec<ThreadStackTrace>,
     pub scopes: Vec<Scope>,
     pub variables: Vec<Variable>,
 }
@@ -90,6 +120,7 @@ impl DebugSession {
                 "columnsStartAt1": true,
                 "supportsVariableType": true,
                 "supportsVariablePaging": false,
+                "supportsSetVariable": true,
                 "supportsRunInTerminalRequest": false,
             }),
         )?;
@@ -98,18 +129,21 @@ impl DebugSession {
 
         // debugpy expects launch in-flight before configurationDone; initialized may
         // arrive before or after configurationDone and is queued for later handling.
-        let launch_seq = self.transport.send_request(
-            "launch",
-            json!({
-                "type": "debugpy",
-                "request": "launch",
-                "program": self.program.to_string_lossy(),
-                "console": "internalConsole",
-                "redirectOutput": true,
-                "stopOnEntry": true,
-                "justMyCode": true,
-            }),
-        )?;
+        let mut launch_args = json!({
+            "type": "debugpy",
+            "request": "launch",
+            "program": self.program.to_string_lossy(),
+            "console": "internalConsole",
+            "redirectOutput": true,
+            "stopOnEntry": true,
+        });
+        if let Some(extras) = adapter_launch_extras().as_object() {
+            launch_args
+                .as_object_mut()
+                .expect("launch payload object")
+                .extend(extras.clone());
+        }
+        let launch_seq = self.transport.send_request("launch", launch_args)?;
 
         let cfg_seq = self.transport.send_request("configurationDone", json!({}))?;
         self.transport.wait_response(cfg_seq, REQUEST_TIMEOUT)?;
@@ -148,9 +182,24 @@ impl DebugSession {
             state,
             threads: vec![],
             stack_frames: vec![],
+            thread_stacks: vec![],
             scopes: vec![],
             variables: vec![],
         }
+    }
+
+    fn stack_traces_for_threads(&self, threads: &[Thread]) -> Vec<ThreadStackTrace> {
+        threads
+            .iter()
+            .filter_map(|thread| {
+                self.stack_trace(thread.id)
+                    .ok()
+                    .map(|stack_frames| ThreadStackTrace {
+                        thread_id: thread.id,
+                        stack_frames,
+                    })
+            })
+            .collect()
     }
 
     /// True when a `terminated` event is part of a DAP restart rather than a final exit.
@@ -311,7 +360,12 @@ impl DebugSession {
             .context("no active thread — session is not stopped")?;
 
         let threads = self.threads()?;
-        let stack_frames = self.stack_trace(thread_id)?;
+        let thread_stacks = self.stack_traces_for_threads(&threads);
+        let stack_frames = thread_stacks
+            .iter()
+            .find(|trace| trace.thread_id == thread_id)
+            .map(|trace| trace.stack_frames.clone())
+            .unwrap_or_default();
         let frame_id = stack_frames
             .first()
             .map(|frame| frame.id)
@@ -330,6 +384,7 @@ impl DebugSession {
             state: self.state.clone(),
             threads,
             stack_frames,
+            thread_stacks,
             scopes,
             variables,
         })
@@ -456,15 +511,74 @@ impl DebugSession {
         Ok(parsed.variables)
     }
 
+    pub fn set_variable(&self, variables_reference: i64, name: &str, value: &str) -> Result<Variable> {
+        if !matches!(self.state, SessionState::Stopped { .. }) {
+            bail!("cannot set variable while program is running");
+        }
+
+        let seq = self.transport.send_request(
+            "setVariable",
+            json!({
+                "variablesReference": variables_reference,
+                "name": name,
+                "value": value,
+            }),
+        )?;
+        let body = self.transport.wait_response(seq, REQUEST_TIMEOUT)?;
+
+        #[derive(Deserialize)]
+        struct SetVariableBody {
+            name: Option<String>,
+            value: String,
+            #[serde(rename = "type")]
+            type_name: Option<String>,
+            #[serde(rename = "variablesReference")]
+            variables_reference: i64,
+        }
+
+        let parsed = serde_json::from_value::<SetVariableBody>(body).context("invalid setVariable response")?;
+        Ok(Variable {
+            name: parsed.name.unwrap_or_else(|| name.to_string()),
+            value: parsed.value,
+            type_name: parsed.type_name,
+            variables_reference: parsed.variables_reference,
+        })
+    }
+
+    /// Fetch source text for a DAP `sourceReference` (adapter-provided buffer).
+    pub fn fetch_source(&self, source_reference: i64) -> Result<String> {
+        let seq = self.transport.send_request(
+            "source",
+            json!({ "sourceReference": source_reference }),
+        )?;
+        let body = self.transport.wait_response(seq, REQUEST_TIMEOUT)?;
+
+        #[derive(Deserialize)]
+        struct SourceBody {
+            content: String,
+        }
+
+        let parsed = serde_json::from_value::<SourceBody>(body).context("invalid source response")?;
+        Ok(parsed.content)
+    }
+
     /// Push UI breakpoints for one source file to the debug adapter.
     pub fn set_source_breakpoints(
         &self,
         path: &std::path::Path,
-        lines: &[u32],
+        breakpoints: &[SourceBreakpoint],
     ) -> Result<Vec<(u32, bool)>> {
-        let breakpoints: Vec<serde_json::Value> = lines
+        let breakpoints: Vec<serde_json::Value> = breakpoints
             .iter()
-            .map(|line| json!({ "line": line }))
+            .map(|breakpoint| {
+                let mut payload = json!({ "line": breakpoint.line });
+                if let Some(condition) = &breakpoint.condition {
+                    if !condition.is_empty() {
+                        payload["condition"] = json!(condition);
+                    }
+                }
+                payload
+            })
             .collect();
 
         let seq = self.transport.send_request(
@@ -534,6 +648,10 @@ impl DebugSession {
     }
 
     pub fn evaluate(&self, expression: &str, frame_id: i64, context: &str) -> Result<String> {
+        if !matches!(self.state, SessionState::Stopped { .. }) {
+            bail!("cannot evaluate while program is running");
+        }
+
         let seq = self.transport.send_request(
             "evaluate",
             json!({
@@ -542,7 +660,12 @@ impl DebugSession {
                 "context": context,
             }),
         )?;
-        let body = self.transport.wait_response(seq, REQUEST_TIMEOUT)?;
+        let timeout = if context == "watch" {
+            WATCH_EVAL_TIMEOUT
+        } else {
+            REQUEST_TIMEOUT
+        };
+        let body = self.transport.wait_response(seq, timeout)?;
 
         #[derive(Deserialize)]
         struct EvalBody {
@@ -679,6 +802,61 @@ pub fn print_snapshot(snapshot: &SessionSnapshot) {
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn library_sources_enabled_in_launch_payload() {
+        assert!(debuggee_includes_library_sources());
+        let extras = adapter_launch_extras();
+        assert_eq!(extras.get("justMyCode"), Some(&json!(false)));
+    }
+
+    #[test]
+    fn step_into_python_stdlib_source() {
+        let program = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/stdlib_step.py")
+            .canonicalize()
+            .expect("stdlib_step.py fixture");
+
+        let mut session = DebugSession::launch_python(&program).expect("launch");
+        session
+            .set_source_breakpoints(
+                &program,
+                &[SourceBreakpoint {
+                    line: 20,
+                    condition: None,
+                }],
+            )
+            .expect("set breakpoint on json.dumps line");
+
+        let at_bp = session
+            .continue_execution()
+            .expect("continue to breakpoint")
+            .expect("snapshot at breakpoint");
+        assert!(
+            matches!(at_bp.state, SessionState::Stopped { .. }),
+            "expected stopped at breakpoint, got {:?}",
+            at_bp.state
+        );
+
+        session.dispatch_step("stepIn").expect("step into json.dumps");
+        let stepped = session.refresh_snapshot().expect("snapshot in stdlib");
+        let top = stepped
+            .stack_frames
+            .first()
+            .expect("stack frame after step into");
+        let path = top
+            .source
+            .as_ref()
+            .and_then(|source| source.path.as_deref())
+            .unwrap_or("");
+        assert!(
+            path.contains("/json/") && path.ends_with(".py"),
+            "expected Python stdlib json source, got: {path}"
+        );
+
+        session.shutdown().expect("shutdown");
+    }
 
     #[test]
     fn restart_while_running() {
@@ -729,6 +907,52 @@ mod lifecycle_tests {
         assert_eq!(restarted_line, before_line);
         assert!(matches!(restarted.state, SessionState::Stopped { .. }));
 
+        session.shutdown().expect("shutdown");
+    }
+
+    #[test]
+    fn evaluate_watch_then_continue_with_breakpoint() {
+        let program = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/hello.py")
+            .canonicalize()
+            .expect("hello.py fixture");
+
+        let mut session = DebugSession::launch_python(&program).expect("launch");
+        session
+            .set_source_breakpoints(
+                &program,
+                &[SourceBreakpoint {
+                    line: 10,
+                    condition: None,
+                }],
+            )
+            .expect("set breakpoint");
+
+        let snapshot = session.refresh_snapshot().expect("initial snapshot");
+        let frame_id = snapshot
+            .stack_frames
+            .first()
+            .map(|frame| frame.id)
+            .expect("frame id");
+        session
+            .evaluate("1 + 1", frame_id, "watch")
+            .expect("watch evaluate");
+
+        session.dispatch_continue().expect("continue");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut reached_breakpoint = false;
+        while std::time::Instant::now() < deadline {
+            if let Ok(Some(snapshot)) = session.poll_events() {
+                if matches!(snapshot.state, SessionState::Stopped { .. }) {
+                    reached_breakpoint = true;
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        assert!(reached_breakpoint, "expected to stop at breakpoint after continue");
         session.shutdown().expect("shutdown");
     }
 

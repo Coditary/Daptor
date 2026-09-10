@@ -10,11 +10,12 @@
 namespace tui_debug_ui {
 
 struct ConsoleLine;
+struct DapUiTheme;
 
 /// Scrollable read-only console output panel (left-aligned lines).
 class ConsolePanel : public tuinator::Widget {
   public:
-    explicit ConsolePanel(tuinator::Style label_style = {}, tuinator::Style panel_background = {});
+    explicit ConsolePanel(const DapUiTheme& theme);
 
     const std::vector<std::string>& lines() const { return lines_; }
 
@@ -33,6 +34,9 @@ class ConsolePanel : public tuinator::Widget {
   private:
     tuinator::Style label_style_;
     tuinator::Style panel_background_;
+    tuinator::Style console_stderr_;
+    tuinator::Style console_stdout_;
+    tuinator::Style console_event_;
     std::vector<std::string> lines_;
 };
 

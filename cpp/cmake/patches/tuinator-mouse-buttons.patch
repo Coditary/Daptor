@@ -1,0 +1,105 @@
+--- a/src/backend/curses_backend.cpp
++++ b/src/backend/curses_backend.cpp
+@@ -207,16 +207,56 @@ void debug_mouse_event(int ch, const MEVENT& mouse) {
+     }
+ }
+ 
++MouseButton mouse_button_from_state(mmask_t state) {
++#ifdef BUTTON3_PRESSED
++    if (state & (BUTTON3_PRESSED | BUTTON3_RELEASED | BUTTON3_CLICKED | BUTTON3_DOUBLE_CLICKED |
++                 BUTTON3_TRIPLE_CLICKED)) {
++        return MouseButton::Right;
++    }
++#endif
++
++#ifdef BUTTON2_PRESSED
++    if (state & (BUTTON2_PRESSED | BUTTON2_RELEASED | BUTTON2_CLICKED | BUTTON2_DOUBLE_CLICKED |
++                 BUTTON2_TRIPLE_CLICKED)) {
++        return MouseButton::Middle;
++    }
++#endif
++
++    return MouseButton::Left;
++}
++
+ MouseAction mouse_action_from_state(mmask_t state) {
+-    if (state & BUTTON1_CLICKED) {
++    const mmask_t clicked = BUTTON1_CLICKED
++#ifdef BUTTON2_CLICKED
++                            | BUTTON2_CLICKED
++#endif
++#ifdef BUTTON3_CLICKED
++                            | BUTTON3_CLICKED
++#endif
++        ;
++    if (state & clicked) {
+         return MouseAction::Click;
+     }
+ 
+-    if (state & BUTTON1_RELEASED) {
++    const mmask_t released = BUTTON1_RELEASED
++#ifdef BUTTON2_RELEASED
++                             | BUTTON2_RELEASED
++#endif
++#ifdef BUTTON3_RELEASED
++                             | BUTTON3_RELEASED
++#endif
++        ;
++    if (state & released) {
+         return MouseAction::Release;
+     }
+ 
+ #ifdef BUTTON4_PRESSED
+     if (state & (BUTTON4_PRESSED | BUTTON4_RELEASED | BUTTON4_CLICKED)) {
+         return MouseAction::WheelUp;
+     }
+ #endif
+ 
+ #ifdef BUTTON5_PRESSED
+     if (state & (BUTTON5_PRESSED | BUTTON5_RELEASED | BUTTON5_CLICKED)) {
+         return MouseAction::WheelDown;
+     }
+ #endif
+ 
+ #ifdef BUTTON6_PRESSED
+     if (state & (BUTTON6_PRESSED | BUTTON6_RELEASED | BUTTON6_CLICKED)) {
+         return MouseAction::WheelLeft;
+     }
+ #endif
+ 
+ #ifdef BUTTON7_PRESSED
+     if (state & (BUTTON7_PRESSED | BUTTON7_RELEASED | BUTTON7_CLICKED)) {
+         return MouseAction::WheelRight;
+     }
+ #endif
+ 
+-    if (state & (BUTTON1_PRESSED | BUTTON1_DOUBLE_CLICKED | BUTTON1_TRIPLE_CLICKED)) {
++    const mmask_t pressed = BUTTON1_PRESSED | BUTTON1_DOUBLE_CLICKED | BUTTON1_TRIPLE_CLICKED
++#ifdef BUTTON2_PRESSED
++                            | BUTTON2_PRESSED | BUTTON2_DOUBLE_CLICKED | BUTTON2_TRIPLE_CLICKED
++#endif
++#ifdef BUTTON3_PRESSED
++                            | BUTTON3_PRESSED | BUTTON3_DOUBLE_CLICKED | BUTTON3_TRIPLE_CLICKED
++#endif
++        ;
++    if (state & pressed) {
+         if (state & REPORT_MOUSE_POSITION) {
+             return MouseAction::Move;
+         }
+         return MouseAction::Press;
+     }
+ 
+     if (state & REPORT_MOUSE_POSITION) {
+         return MouseAction::Move;
+     }
+ 
+     return MouseAction::Move;
+ }
+@@ -659,6 +699,7 @@ std::optional<Event> CursesBackend::read_event(bool block) {
+         MouseEvent event{};
+         event.position = {mouse.x, mouse.y};
+         event.action = mouse_action_from_state(state);
++        event.button = mouse_button_from_state(state);
+         event.left_pressed = left_button_down_;
+         last_mouse_position_ = event.position;
+         return event;

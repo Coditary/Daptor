@@ -26,14 +26,18 @@ pub fn highlight_viewport(
         return Vec::new();
     }
 
-    let viewport_lines = &lines[start_idx..end_idx];
-    let viewport_text = viewport_lines.join("\n");
-
-    if let Some(spans) = tree_sitter::highlight_source(language, &viewport_text) {
-        return spans_to_lines(spans, first_line, viewport_lines.len());
+    // Parse/highlight the full source so tree-sitter sees matching delimiters (e.g. a
+    // viewport that starts inside a triple-quoted docstring). Slice the per-line
+    // result to the requested window.
+    if let Some(spans) = tree_sitter::highlight_source(language, source) {
+        let all_lines = spans_to_lines(spans, 1, lines.len());
+        return all_lines
+            .into_iter()
+            .filter(|line| line.line_number >= first_line && line.line_number < first_line + line_count)
+            .collect();
     }
 
-    viewport_lines
+    lines[start_idx..end_idx]
         .iter()
         .enumerate()
         .map(|(offset, line)| HighlightedLine {
@@ -110,21 +114,11 @@ fn push_span(spans: &mut Vec<StyledSpan>, text: &str, kind: HighlightKind) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::highlight::register_language_static;
-
-    fn register_python_from_dev_dep() {
-        let _ = register_language_static(
-            "python",
-            tree_sitter_python::LANGUAGE.into(),
-            tree_sitter_python::HIGHLIGHTS_QUERY,
-            "",
-            "",
-        );
-    }
+    use crate::highlight::init;
 
     #[test]
     fn highlights_python_viewport_keywords() {
-        register_python_from_dev_dep();
+        init();
         let source = "def main():\n    if True:\n        return 1\n";
         let lines = highlight_viewport("python", source, 1, 3);
 
@@ -139,6 +133,20 @@ mod tests {
             .spans
             .iter()
             .any(|span| span.text.contains("return")));
+    }
+
+    #[test]
+    fn highlights_mid_file_viewport_with_surrounding_context() {
+        init();
+        let source = "def f():\n    x = 1\n\n'''doc\nmore\n'''\n    return x\n";
+        let lines = highlight_viewport("python", source, 4, 2);
+
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].line_number, 4);
+        assert!(lines[0]
+            .spans
+            .iter()
+            .any(|span| span.kind == HighlightKind::String));
     }
 
     #[test]

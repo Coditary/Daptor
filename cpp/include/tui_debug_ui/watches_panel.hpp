@@ -22,25 +22,26 @@ namespace tui_debug_ui {
 
 struct DapUiTheme;
 
-/// Locals / scope variables as a titled, scrollable list.
-class ScopesPanel {
+/// Watch expressions with an input row for adding new entries.
+class WatchesPanel {
   public:
-    ScopesPanel(const DapUiTheme& theme, tuinator::ScrollViewOptions scroll_options,
-                const std::string& title = "Locals");
+    using SubmitCallback = std::function<void(const std::string& expression)>;
+    using ChangeCallback = std::function<void(const std::string& expression)>;
+    using RemoveCallback = std::function<void(int index)>;
+    using EditCallback = std::function<void(int index)>;
+
+    WatchesPanel(const DapUiTheme& theme, tuinator::ScrollViewOptions scroll_options);
 
     std::unique_ptr<tuinator::Widget> release_widget();
-    void set_scope_names(std::vector<std::string> names);
-    using WatchCallback = std::function<void(const std::string& variable_name)>;
-    using EditVariableCallback = std::function<void(const std::string& variable_name)>;
-    using SubmitCallback = std::function<void(const std::string& value)>;
-    using ChangeCallback = std::function<void(const std::string& value)>;
-    void set_on_watch(WatchCallback callback);
-    void set_on_edit_variable(EditVariableCallback callback);
+    void set_lines(std::vector<std::string> lines);
     void set_on_submit(SubmitCallback callback);
     void set_on_change(ChangeCallback callback);
+    void set_on_remove(RemoveCallback callback);
+    void set_on_edit(EditCallback callback);
     void set_input_value(std::string value);
     [[nodiscard]] std::string input_value() const;
     void focus_input();
+    [[nodiscard]] int selected_index() const;
     tuinator::Widget* list_widget() const;
     tuinator::TextInput* input_widget() const;
     tuinator::ScrollView* scroll_view() const;
@@ -49,10 +50,10 @@ class ScopesPanel {
     std::unique_ptr<TitledScrollPane> pane_;
     NavigableListView* list_ = nullptr;
     tuinator::TextInput* input_ = nullptr;
-    WatchCallback on_watch_;
-    EditVariableCallback on_edit_variable_;
     SubmitCallback on_submit_;
     ChangeCallback on_change_;
+    RemoveCallback on_remove_;
+    EditCallback on_edit_;
 };
 
 }  // namespace tui_debug_ui

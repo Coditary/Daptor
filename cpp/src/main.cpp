@@ -2,6 +2,10 @@
 #include "tui_debug_ui/session_backend.hpp"
 #include "tui_debug_ui/tty_setup.hpp"
 
+extern "C" {
+#include "tui_debug.h"
+}
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -57,6 +61,10 @@ int main(int argc, char* argv[]) {
     tui_debug_ui::claim_terminal_for_ui();
     tui_debug_ui::install_sigint_quit_handler();
     tui_debug_ui::sync_terminal_size_from_tty();
+
+    if (mode == tui_debug_ui::SessionMode::Rust) {
+        tui_debug_init();
+    }
 
     tui_debug_ui::DebugApp app(program_path, mode);
     return app.run();

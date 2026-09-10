@@ -66,8 +66,14 @@ std::string status_message_for_state(const std::string& session_state, const std
 
 void apply_snapshot_object(DebugUiModel& model, const Json& snapshot) {
     if (snapshot.contains("state")) {
-        parse_session_state(snapshot.at("state"), model.session_state, model.stop_reason);
+        const Json& state = snapshot.at("state");
+        parse_session_state(state, model.session_state, model.stop_reason);
         model.status_message = status_message_for_state(model.session_state, model.stop_reason);
+        if (state.is_object() && state.contains("Stopped") && state.at("Stopped").is_object()) {
+            model.stopped_thread_id = state.at("Stopped").value("thread_id", static_cast<std::int64_t>(0));
+        } else if (model.session_state != "stopped") {
+            model.stopped_thread_id = 0;
+        }
     }
 
     model.threads.clear();
@@ -80,20 +86,38 @@ void apply_snapshot_object(DebugUiModel& model, const Json& snapshot) {
         }
     }
 
+    auto parse_stack_frame = [](const Json& frame) {
+        StackFrameInfo info{};
+        info.id = frame.value("id", static_cast<std::int64_t>(0));
+        info.name = frame.value("name", std::string{});
+        info.line = frame.value("line", static_cast<std::int64_t>(0));
+
+        if (frame.contains("source") && frame.at("source").is_object()) {
+            const Json& source = frame.at("source");
+            info.path = source.value("path", std::string{});
+            info.source_reference = source.value("sourceReference", static_cast<std::int64_t>(0));
+        }
+        return info;
+    };
+
     model.stack_frames.clear();
     if (snapshot.contains("stack_frames") && snapshot.at("stack_frames").is_array()) {
         for (const Json& frame : snapshot.at("stack_frames")) {
-            StackFrameInfo info{};
-            info.id = frame.value("id", static_cast<std::int64_t>(0));
-            info.name = frame.value("name", std::string{});
-            info.line = frame.value("line", static_cast<std::int64_t>(0));
+            model.stack_frames.push_back(parse_stack_frame(frame));
+        }
+    }
 
-            if (frame.contains("source") && frame.at("source").is_object()) {
-                const Json& source = frame.at("source");
-                info.path = source.value("path", std::string{});
+    model.thread_stacks.clear();
+    if (snapshot.contains("thread_stacks") && snapshot.at("thread_stacks").is_array()) {
+        for (const Json& entry : snapshot.at("thread_stacks")) {
+            ThreadStackInfo stack{};
+            stack.thread_id = entry.value("thread_id", static_cast<std::int64_t>(0));
+            if (entry.contains("stack_frames") && entry.at("stack_frames").is_array()) {
+                for (const Json& frame : entry.at("stack_frames")) {
+                    stack.frames.push_back(parse_stack_frame(frame));
+                }
             }
-
-            model.stack_frames.push_back(std::move(info));
+            model.thread_stacks.push_back(std::move(stack));
         }
     }
 
@@ -130,10 +154,13 @@ void apply_snapshot_object(DebugUiModel& model, const Json& snapshot) {
     if (!model.stack_frames.empty()) {
         const StackFrameInfo& frame = model.stack_frames.front();
         if (!frame.path.empty()) {
-            model.source_path = frame.path;
+            model.execution_path = frame.path;
+        } else if (frame.source_reference > 0) {
+            model.execution_path = "dap:source:" + std::to_string(frame.source_reference);
         }
+        model.execution_source_reference = frame.source_reference;
         if (frame.line > 0) {
-            model.current_line = static_cast<std::uint32_t>(frame.line);
+            model.execution_line = static_cast<std::uint32_t>(frame.line);
         }
     }
 
@@ -287,14 +314,32 @@ bool manual_apply_poll_json(DebugUiModel& model, const std::string& json) {
             }
         }
 
+        const std::string source_ref_needle = "\"sourceReference\":";
+        const std::size_t source_ref_pos = snapshot_json.find(source_ref_needle, frames_pos);
+        if (source_ref_pos != std::string_view::npos) {
+            std::size_t cursor = source_ref_pos + source_ref_needle.size();
+            while (cursor < snapshot_json.size() &&
+                   std::isspace(static_cast<unsigned char>(snapshot_json[cursor])) != 0) {
+                ++cursor;
+            }
+            frame.source_reference = 0;
+            while (cursor < snapshot_json.size() && std::isdigit(static_cast<unsigned char>(snapshot_json[cursor])) != 0) {
+                frame.source_reference =
+                    frame.source_reference * 10 + (snapshot_json[cursor++] - '0');
+            }
+        }
+
         model.stack_frames.push_back(std::move(frame));
         if (!model.stack_frames.empty()) {
             const StackFrameInfo& top = model.stack_frames.front();
             if (!top.path.empty()) {
-                model.source_path = top.path;
+                model.execution_path = top.path;
+            } else if (top.source_reference > 0) {
+                model.execution_path = "dap:source:" + std::to_string(top.source_reference);
             }
+            model.execution_source_reference = top.source_reference;
             if (top.line > 0) {
-                model.current_line = static_cast<std::uint32_t>(top.line);
+                model.execution_line = static_cast<std::uint32_t>(top.line);
             }
         }
     }

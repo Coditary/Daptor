@@ -26,6 +26,9 @@ add_executable(tui-debug-ui
     src/ui/snapshot_parser.cpp
     src/ui/scopes_panel.cpp
     src/ui/stacks_panel.cpp
+    src/ui/breakpoints_panel.cpp
+    src/ui/context_menu.cpp
+    src/ui/watches_panel.cpp
     src/ui/source_panel.cpp
     src/ui/console_panel.cpp
     src/ui/tty_setup.cpp

@@ -4,6 +4,7 @@
 #include <tuinator/render/style.hpp>
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -24,23 +25,43 @@ struct StackFrameRow {
     std::string name;
     std::uint32_t line = 0;
     std::string path;
+    std::int64_t source_reference = 0;
 };
 
-/// Stack frames as a titled, scrollable list (no bordered panel frame).
+struct ThreadStackContent {
+    std::int64_t id = 0;
+    std::string name;
+    bool stopped = false;
+    std::vector<StackFrameRow> frames;
+};
+
+struct DapUiTheme;
+
+/// Threads and stack frames (nvim-dap-ui stacks element).
 class StacksPanel {
   public:
-    StacksPanel(tuinator::Style title_style, tuinator::Style item_style, tuinator::Style row_background,
-                tuinator::ScrollViewOptions scroll_options, const std::string& title = "MainThread");
+    StacksPanel(const DapUiTheme& theme, tuinator::ScrollViewOptions scroll_options,
+                const std::string& title = "Threads");
+
+    using ActivateCallback = std::function<void(const StackFrameRow&)>;
 
     std::unique_ptr<tuinator::Widget> release_widget();
-    void set_frames(std::vector<StackFrameRow> frames);
+    void set_thread_stacks(std::vector<ThreadStackContent> threads);
     void set_lines(std::vector<std::string> lines);
+    void set_on_activate(ActivateCallback callback);
+    void set_on_continue(std::function<void()> callback);
     tuinator::Widget* list_widget() const;
     tuinator::ScrollView* scroll_view() const;
 
   private:
+    [[nodiscard]] const StackFrameRow* frame_at_display_index(int index) const;
+
     std::unique_ptr<TitledScrollPane> pane_;
     NavigableListView* list_ = nullptr;
+    std::vector<StackFrameRow> frames_;
+    std::vector<int> display_to_frame_;
+    ActivateCallback on_activate_;
+    std::function<void()> on_continue_;
 };
 
 }  // namespace tui_debug_ui

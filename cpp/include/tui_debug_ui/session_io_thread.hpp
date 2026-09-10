@@ -23,10 +23,18 @@ enum class SessionIoEventKind {
     PollJson,
     ConsoleJson,
     ScopeVariablesReady,
+    SourceReady,
     HighlightReady,
     CommandFinished,
     EvaluateFinished,
+    SetVariableFinished,
     BreakpointsFinished,
+};
+
+struct PendingSetVariable {
+    std::int64_t variables_reference = 0;
+    std::string name;
+    std::string value;
 };
 
 struct SessionIoEvent {
@@ -35,6 +43,7 @@ struct SessionIoEvent {
     std::string payload;
     std::string detail;
     std::int64_t scope_ref = 0;
+    std::int64_t source_reference = 0;
     int highlight_first_line = 0;
     int highlight_line_count = 0;
 };
@@ -55,12 +64,15 @@ class SessionIoThread {
 
     void post_command(const std::string& op);
     void post_evaluate(const std::string& expression, std::int64_t frame_id, const std::string& context);
+    void post_set_variable(std::int64_t variables_reference, const std::string& name, const std::string& value);
     void post_set_breakpoints(const std::string& path, const std::string& lines_json);
     void request_scope_variables(const std::string& signature,
                                  const std::vector<std::pair<std::int64_t, std::string>>& scopes);
     void request_highlight(const std::string& language, const std::string& source, int first_line, int line_count);
+    void request_source_fetch(std::int64_t source_reference, const std::string& cache_key);
 
     bool try_pop_event(SessionIoEvent& out);
+    [[nodiscard]] bool has_pending_execution_command() const;
 
   private:
     struct HighlightRequest {
@@ -73,23 +85,31 @@ class SessionIoThread {
     void thread_main();
     void push_event(SessionIoEvent event);
     void run_poll_cycle();
+    void process_preempting_commands();
     void process_pending_command();
     void process_pending_breakpoints();
+    void dispatch_command(const std::string& op);
     void process_scope_fetch();
     void process_highlight_request();
+    void process_source_fetch();
+    void maybe_begin_launch();
+    void join_launch_worker();
     void sync_initial_state();
     void clear_pending_adapter_work();
     bool has_pending_command() const;
     static bool command_needs_snapshot(const std::string& op);
+    static bool command_syncs_snapshot(const std::string& op);
     static bool command_preempts_background_work(const std::string& op);
 
     std::unique_ptr<SessionBackend> backend_;
     std::thread thread_;
+    std::thread launch_worker_;
     std::atomic<bool> stop_{false};
     std::atomic<bool> launch_started_{false};
     std::atomic<bool> launch_finished_{false};
     std::atomic<bool> backend_active_{false};
     std::atomic<bool> adapter_live_{false};
+    std::atomic<bool> scope_fetch_aborted_{false};
 
     mutable std::mutex mutex_;
     std::condition_variable cv_;
@@ -99,6 +119,7 @@ class SessionIoThread {
     std::optional<std::string> pending_evaluate_;
     std::int64_t pending_evaluate_frame_ = 0;
     std::string pending_evaluate_context_;
+    std::optional<PendingSetVariable> pending_set_variable_;
     std::optional<std::string> pending_breakpoints_path_;
     std::optional<std::string> pending_breakpoints_json_;
     std::chrono::steady_clock::time_point breakpoints_posted_at_{};
@@ -106,6 +127,8 @@ class SessionIoThread {
     std::vector<std::pair<std::int64_t, std::string>> scope_fetch_scopes_;
     bool scope_fetch_pending_ = false;
     std::optional<HighlightRequest> highlight_request_;
+    std::optional<std::int64_t> source_fetch_reference_;
+    std::string source_fetch_cache_key_;
 
     std::mutex events_mutex_;
     std::deque<SessionIoEvent> events_;

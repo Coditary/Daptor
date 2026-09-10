@@ -5,6 +5,7 @@
 #include <tuinator/widgets/containers/scroll_view.hpp>
 #include <tuinator/widgets/widget.hpp>
 
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -17,6 +18,7 @@ class TitledScrollPane {
                      tuinator::Style background, tuinator::ScrollViewOptions scroll_options, bool scrollable = true);
 
     void set_title(std::string title);
+    void set_title_action(std::string symbol, tuinator::Style style, std::function<void()> callback);
 
     tuinator::Widget* content_widget() const { return content_widget_; }
     tuinator::ScrollView* scroll_view() const { return scroll_view_; }

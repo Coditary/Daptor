@@ -88,6 +88,8 @@ pub struct StackFrame {
 pub struct Source {
     pub name: Option<String>,
     pub path: Option<String>,
+    #[serde(rename = "sourceReference")]
+    pub source_reference: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

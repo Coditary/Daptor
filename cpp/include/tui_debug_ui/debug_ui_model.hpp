@@ -19,22 +19,21 @@ enum class Focus {
     Breakpoints,
     Stacks,
     Watches,
-    Repl,
     Console,
 };
 
 struct LayoutConfig {
     std::uint16_t sidebar_pct = 25;
     std::uint16_t bottom_pct = 35;
-    std::uint16_t repl_pct = 30;
+    std::uint16_t watches_pct = 30;
     std::uint16_t scopes_pct = 55;
 
     void widen_sidebar();
     void narrow_sidebar();
     void grow_bottom();
     void shrink_bottom();
-    void widen_repl();
-    void narrow_repl();
+    void widen_watches();
+    void narrow_watches();
     void grow_scopes();
     void shrink_scopes();
 };
@@ -49,6 +48,13 @@ struct StackFrameInfo {
     std::string name;
     std::int64_t line = 0;
     std::string path;
+    /// DAP `sourceReference` when the adapter serves source without a disk path.
+    std::int64_t source_reference = 0;
+};
+
+struct ThreadStackInfo {
+    std::int64_t thread_id = 0;
+    std::vector<StackFrameInfo> frames;
 };
 
 struct ScopeInfo {
@@ -70,6 +76,13 @@ struct ConsoleLine {
     std::string text;
 };
 
+struct WatchEntry {
+    std::uint64_t id = 0;
+    std::string expression;
+    std::string value;
+    std::string error;
+};
+
 /// View model mirroring debugger state for the Tuinator UI layer.
 class DebugUiModel {
   public:
@@ -78,18 +91,26 @@ class DebugUiModel {
     LayoutConfig layout{};
 
     std::string source_path;
+    std::int64_t source_reference = 0;
+    std::string execution_path;
+    std::int64_t execution_source_reference = 0;
+    std::uint32_t execution_line = 0;
     std::uint32_t current_line = 0;
     std::string status_message = "Connecting to debugpy…";
 
     std::string session_state;
     std::string stop_reason;
+    std::int64_t stopped_thread_id = 0;
     std::vector<ThreadInfo> threads;
     std::vector<StackFrameInfo> stack_frames;
+    std::vector<ThreadStackInfo> thread_stacks;
     std::vector<ScopeInfo> scopes;
     std::vector<VariableInfo> variables;
     /// Variables keyed by DAP `variablesReference` (lazy-loaded per scope).
     std::unordered_map<std::int64_t, std::vector<VariableInfo>> scope_variables;
     std::vector<ConsoleLine> console_lines;
+    std::vector<WatchEntry> watches;
+    std::uint64_t next_watch_id = 1;
 
     /// Apply a JSON snapshot from the Rust session.
     void apply_snapshot_json(const std::string& json);

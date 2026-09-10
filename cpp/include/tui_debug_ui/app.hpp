@@ -1,7 +1,10 @@
 #pragma once
 
+#include "tui_debug_ui/breakpoint_info.hpp"
+#include "tui_debug_ui/context_menu.hpp"
 #include "tui_debug_ui/dap_ui_theme.hpp"
 #include "tui_debug_ui/debug_ui_model.hpp"
+#include "tui_debug_ui/source_panel.hpp"
 #include "tui_debug_ui/session_backend.hpp"
 #include "tui_debug_ui/session_io_thread.hpp"
 
@@ -10,6 +13,7 @@
 
 #include <chrono>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -30,6 +34,8 @@ class ScopesPanel;
 class ConsolePanel;
 class SourcePanel;
 class StacksPanel;
+class BreakpointsPanel;
+class WatchesPanel;
 class TitledScrollPane;
 
 /// Tuinator application wrapper for the tui-debug shell.
@@ -46,9 +52,6 @@ class DebugApp {
     /// Global debugger / navigation keys routed from DebugRoot.
     bool handle_global_key(const tuinator::KeyPress& key);
 
-    /// Evaluate a REPL expression against the current stack frame.
-    void submit_repl(const std::string& expression);
-
     /// Re-layout after terminal resize (called from DebugRoot).
     void on_terminal_resize();
 
@@ -57,6 +60,16 @@ class DebugApp {
 
     /// Periodic session/event pump (called from the root widget idle hook).
     void poll_session();
+    void maybe_refresh_source_highlight_for_scroll();
+    [[nodiscard]] bool context_menu_open() const;
+    bool handle_overlay_event(const tuinator::Event& event);
+    void paint_overlay(tuinator::PaintContext& ctx) const;
+
+    [[nodiscard]] bool is_watch_input_focused() const;
+    [[nodiscard]] bool is_scope_input_focused() const;
+    [[nodiscard]] bool should_block_app_quit_key(const tuinator::KeyPress& key) const;
+    void blur_watch_input();
+    void blur_scope_input();
 
   private:
     void ensure_ui_built();
@@ -65,6 +78,12 @@ class DebugApp {
     void send_command(const char* op);
     void maybe_request_scope_variables();
     void maybe_request_source_highlight();
+    void prefetch_program_source_highlight();
+    void apply_highlight_payload(int first_line, int line_count, const std::string& json);
+    void scroll_source_to_line(int line);
+    void ensure_source_plain_lines();
+    int highlight_line_count() const;
+    int highlight_first_line() const;
     void apply_instant_source_viewport(int first_line, int line_count);
     int source_viewport_height() const;
     bool uses_full_file_source() const;
@@ -75,6 +94,8 @@ class DebugApp {
     bool update_connecting_spinner();
     void sync_ui_from_model();
     void invalidate_scope_variables();
+    void request_scope_variables_refresh();
+    void patch_local_variable_value(const std::string& name, const std::string& value);
     std::string build_scope_variables_signature() const;
     void apply_console_json_payload(const std::string& json);
     void apply_snapshot_json_payload(const std::string& json);
@@ -82,9 +103,33 @@ class DebugApp {
     void apply_focus();
     void toggle_breakpoint();
     void toggle_breakpoint_at_line(int line);
+    void toggle_breakpoint_at(const std::string& path, int line);
+    void remove_breakpoint_at(const std::string& path, int line);
+    void set_breakpoint_condition(const std::string& path, int line, const std::string& condition);
+    void begin_edit_breakpoint_condition(const std::string& path, int line);
+    void submit_breakpoint_condition(const std::string& condition);
+    void capture_breakpoint_input_state();
+    void restore_breakpoint_input_state();
+    [[nodiscard]] bool is_breakpoint_input_focused() const;
+    void begin_edit_variable(const std::string& variable_name);
+    void submit_variable_value(const std::string& value);
+    void capture_scope_input_state();
+    void restore_scope_input_state();
+    void begin_watch_expression(const std::string& seed);
+    void show_breakpoint_context_menu(const std::string& path, int line, tuinator::Point anchor,
+                                      const std::optional<std::string>& seed_identifier);
+    [[nodiscard]] std::optional<std::string> identifier_at_line_column(const std::string& line_text,
+                                                                     int column) const;
+    [[nodiscard]] tuinator::Rect overlay_clip_bounds() const;
     std::string effective_source_path() const;
     void sync_breakpoints_to_panel();
     void push_breakpoints_to_session(const std::string& path);
+    void flush_breakpoints_to_session();
+    std::string normalize_source_path(const std::string& path) const;
+    void normalize_breakpoint_path_keys();
+    void open_source_file(const std::string& path, int line, bool pin, std::int64_t source_reference = 0);
+    void maybe_follow_execution();
+    void sync_breakpoints_list_panel();
     void apply_execution_command_started(const char* op);
     bool has_active_session() const;
     bool handle_layout_resize_key(const tuinator::KeyPress& key);
@@ -99,6 +144,15 @@ class DebugApp {
     bool is_session_stopped() const;
     void mark_all_panels_dirty();
     void refresh_scroll_views();
+    void add_watch(const std::string& expression);
+    void submit_watch_expression(const std::string& expression);
+    void begin_edit_watch_at(int index);
+    void remove_watch_at(std::size_t index);
+    void sync_watches_panel();
+    void resolve_watches_from_locals();
+    void capture_watch_input_state();
+    void restore_watch_input_state();
+    void finish_watch_input();
 
     SessionMode mode_;
     std::string program_path_;
@@ -118,20 +172,34 @@ class DebugApp {
     tuinator::StatusBar* status_bar_ = nullptr;
     std::unique_ptr<ScopesPanel> scopes_panel_;
     std::unique_ptr<StacksPanel> stacks_panel_;
+    std::unique_ptr<BreakpointsPanel> breakpoints_panel_;
+    std::unique_ptr<WatchesPanel> watches_panel_;
+    std::unique_ptr<ContextMenu> context_menu_;
     std::unique_ptr<TitledScrollPane> source_section_;
     SourcePanel* source_panel_ = nullptr;
     tuinator::ScrollView* source_scroll_view_ = nullptr;
-    tuinator::TextInput* repl_input_ = nullptr;
-    tuinator::ListView* repl_history_ = nullptr;
-    std::vector<std::string> repl_history_lines_;
     ConsolePanel* console_panel_ = nullptr;
     tuinator::ScrollView* console_scroll_view_ = nullptr;
     ResizableSplitPane* sidebar_split_ = nullptr;
     ResizableSplitPane* main_row_split_ = nullptr;
     ResizableSplitPane* bottom_tray_split_ = nullptr;
     ResizableSplitPane* content_split_ = nullptr;
+    std::string watch_input_draft_;
+    bool watch_input_focused_ = false;
+    int editing_watch_index_ = -1;
+    std::string breakpoint_input_draft_;
+    bool breakpoint_input_focused_ = false;
+    std::string editing_breakpoint_path_;
+    int editing_breakpoint_line_ = 0;
+    std::string scope_input_draft_;
+    bool scope_input_focused_ = false;
+    std::string editing_variable_name_;
+    std::int64_t editing_variables_reference_ = 0;
+    std::string pending_variable_value_;
     std::string cached_source_path_;
+    std::int64_t cached_source_reference_ = 0;
     std::string cached_source_text_;
+    std::string pending_source_fetch_key_;
     std::string cached_source_title_;
     std::string cached_status_bar_text_;
     std::vector<std::string> cached_scope_rows_;
@@ -142,12 +210,17 @@ class DebugApp {
     int cached_highlight_line_count_ = -1;
     int highlight_request_first_line_ = -1;
     int highlight_request_line_count_ = -1;
+    int cached_highlight_scroll_y_ = -1;
+    int highlight_request_scroll_y_ = -1;
     std::uint64_t snapshot_generation_ = 0;
     std::string scope_variables_signature_;
     std::string scope_variables_fetch_signature_;
     bool scope_variables_fetch_pending_ = false;
     bool restart_pending_ = false;
-    std::unordered_map<std::string, std::unordered_set<int>> breakpoints_by_path_;
+    bool breakpoints_flushed_after_launch_ = false;
+    bool follow_execution_ = true;
+    std::unordered_map<std::string, std::vector<HighlightedLine>> source_plain_lines_cache_;
+    BreakpointsByPath breakpoints_by_path_;
     std::chrono::steady_clock::time_point last_spinner_update_{};
 };
 

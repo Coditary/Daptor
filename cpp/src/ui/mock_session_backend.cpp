@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <fstream>
 #include <sstream>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -189,6 +190,22 @@ class MockSessionBackend final : public SessionBackend {
         return true;
     }
 
+    bool set_variable(std::int64_t variables_reference, const std::string& name, const std::string& value,
+                      std::string& result_out, std::string& error_out) override {
+        if (!launched_) {
+            error_out = "mock session not launched";
+            return false;
+        }
+        if (!stopped_) {
+            error_out = "cannot set variable while program is running";
+            return false;
+        }
+        variable_overrides_[mock_variable_key(variables_reference, name)] = value;
+        result_out = R"({"name":")" + escape_json(name) + R"(","value":")" + escape_json(value) +
+                     R"(","variablesReference":0})";
+        return true;
+    }
+
     bool set_breakpoints(const std::string& path, const std::string& lines_json,
                          std::string& error_out) override {
         (void)path;
@@ -214,15 +231,22 @@ class MockSessionBackend final : public SessionBackend {
         return true;
     }
 
+    std::optional<std::string> fetch_source(std::int64_t source_reference) override {
+        if (!launched_ || source_reference <= 0) {
+            return std::nullopt;
+        }
+        return "# mock adapter source\nimport json\n\ndef encode(obj):\n    return json.dumps(obj)\n";
+    }
+
     std::optional<std::string> fetch_variables_json(std::int64_t variables_reference) override {
         if (!launched_) {
             return std::nullopt;
         }
         if (variables_reference == 3) {
-            return mock_variables_json("local_", 80, 1);
+            return apply_variable_overrides(variables_reference, mock_variables_json("local_", 80, 1));
         }
         if (variables_reference == 4) {
-            return mock_variables_json("global_", 40, 100);
+            return apply_variable_overrides(variables_reference, mock_variables_json("global_", 40, 100));
         }
         return "[]";
     }
@@ -261,6 +285,37 @@ class MockSessionBackend final : public SessionBackend {
     }
 
   private:
+    static std::string mock_variable_key(std::int64_t variables_reference, const std::string& name) {
+        return std::to_string(variables_reference) + ':' + name;
+    }
+
+    std::string apply_variable_overrides(std::int64_t variables_reference, const std::string& json) const {
+        std::string patched = json;
+        for (const auto& [key, value] : variable_overrides_) {
+            const std::string prefix = std::to_string(variables_reference) + ':';
+            if (key.rfind(prefix, 0) != 0) {
+                continue;
+            }
+            const std::string name = key.substr(prefix.size());
+            const std::string needle = R"("name":")" + name + R"(")";
+            const std::size_t name_pos = patched.find(needle);
+            if (name_pos == std::string::npos) {
+                continue;
+            }
+            const std::size_t value_key = patched.find(R"("value":")", name_pos);
+            if (value_key == std::string::npos) {
+                continue;
+            }
+            const std::size_t value_start = value_key + 9;
+            const std::size_t value_end = patched.find('"', value_start);
+            if (value_end == std::string::npos) {
+                continue;
+            }
+            patched.replace(value_start, value_end - value_start, escape_json(value));
+        }
+        return patched;
+    }
+
     std::string build_snapshot() const {
         std::ostringstream json;
         json << R"({"type":"snapshot","snapshot":{)";
@@ -273,8 +328,10 @@ class MockSessionBackend final : public SessionBackend {
             return json.str();
         }
         if (stopped_) {
-            json << R"("state":{"Stopped":{"thread_id":1,"reason":"entry"}},"threads":[{"id":1,"name":"MainThread"}],"stack_frames":[{"id":2,"name":"<module>","line":)"
-                 << current_line_ << R"(,"source":{"path":")" << escape_json(program_path_) << R"("}}],"scopes":[{"name":"Locals","variablesReference":3,"expensive":false},{"name":"Globals","variablesReference":4,"expensive":false}],"variables":[{"name":"name","value":"'debugger'"},{"name":"step","value":")"
+            json << R"("state":{"Stopped":{"thread_id":1,"reason":"entry"}},"threads":[{"id":1,"name":"MainThread"},{"id":2,"name":"WorkerThread"}],"stack_frames":[{"id":2,"name":"<module>","line":)"
+                 << current_line_ << R"(,"source":{"path":")" << escape_json(program_path_) << R"("}}],"thread_stacks":[{"thread_id":1,"stack_frames":[{"id":2,"name":"<module>","line":)"
+                 << current_line_ << R"(,"source":{"path":")" << escape_json(program_path_) << R"("}}]},{"thread_id":2,"stack_frames":[{"id":10,"name":"worker_target","line":1,"source":{"path":")"
+                 << escape_json(program_path_) << R"("}}]}],"scopes":[{"name":"Locals","variablesReference":3,"expensive":false},{"name":"Globals","variablesReference":4,"expensive":false}],"variables":[{"name":"name","value":"'debugger'"},{"name":"step","value":")"
                  << step_index_ << R"("}]}})";
         } else {
             json << R"("state":"Running","threads":[{"id":1,"name":"MainThread"}],"stack_frames":[],"scopes":[],"variables":[]}})";
@@ -290,6 +347,7 @@ class MockSessionBackend final : public SessionBackend {
     int current_line_ = 1;
     int step_index_ = 0;
     std::unordered_set<int> breakpoints_;
+    std::unordered_map<std::string, std::string> variable_overrides_;
     std::vector<std::string> console_pending_;
 };
 

@@ -21,6 +21,12 @@ fn next_seq() -> i64 {
     SEQ.fetch_add(1, Ordering::SeqCst)
 }
 
+#[derive(Debug, Clone)]
+enum PendingResponse {
+    Success(Value),
+    Failure { command: String, message: String },
+}
+
 /// Spawn `python3 -m debugpy.adapter` and return the child process.
 pub fn spawn_debugpy_adapter() -> Result<Child> {
     let mut command = Command::new("python3");
@@ -55,7 +61,7 @@ pub fn spawn_debugpy_adapter() -> Result<Child> {
 /// Low-level DAP transport bound to a child process stdio.
 pub struct DapTransport {
     writer: Mutex<BufWriter<ChildStdin>>,
-    pending: Arc<Mutex<HashMap<i64, Value>>>,
+    pending: Arc<Mutex<HashMap<i64, PendingResponse>>>,
     output_buffer: Arc<Mutex<Vec<OutputEventBody>>>,
     event_backlog: Arc<Mutex<VecDeque<InboundMessage>>>,
     inbound: Receiver<InboundMessage>,
@@ -76,7 +82,8 @@ impl DapTransport {
             .context("debugpy adapter missing stdout")?;
 
         let writer = Mutex::new(BufWriter::new(stdin));
-        let pending: Arc<Mutex<HashMap<i64, Value>>> = Arc::new(Mutex::new(HashMap::new()));
+        let pending: Arc<Mutex<HashMap<i64, PendingResponse>>> =
+            Arc::new(Mutex::new(HashMap::new()));
         let output_buffer: Arc<Mutex<Vec<OutputEventBody>>> = Arc::new(Mutex::new(Vec::new()));
         let (inbound_tx, inbound_rx) = unbounded();
 
@@ -95,18 +102,20 @@ impl DapTransport {
                                 body,
                                 message,
                             }) => {
-                                if success {
-                                    pending_reader
-                                        .lock()
-                                        .expect("pending lock poisoned")
-                                        .insert(request_seq, body);
+                                let response = if success {
+                                    PendingResponse::Success(body)
                                 } else {
-                                    error!(
-                                        "DAP response error for {}: {}",
+                                    let message = message.unwrap_or_default();
+                                    error!("DAP response error for {}: {}", command, message);
+                                    PendingResponse::Failure {
                                         command,
-                                        message.unwrap_or_default()
-                                    );
-                                }
+                                        message,
+                                    }
+                                };
+                                pending_reader
+                                    .lock()
+                                    .expect("pending lock poisoned")
+                                    .insert(request_seq, response);
                             }
                             Ok(event) => {
                                 if inbound_tx.send(event).is_err() {
@@ -202,13 +211,18 @@ impl DapTransport {
         let deadline = std::time::Instant::now() + timeout;
 
         while std::time::Instant::now() < deadline {
-            if let Some(body) = self
+            if let Some(response) = self
                 .pending
                 .lock()
                 .expect("pending lock poisoned")
                 .remove(&request_seq)
             {
-                return Ok(body);
+                return match response {
+                    PendingResponse::Success(body) => Ok(body),
+                    PendingResponse::Failure { command, message } => {
+                        bail!("DAP {command} failed: {message}");
+                    }
+                };
             }
 
             // Do not drain inbound events here — they must survive until the

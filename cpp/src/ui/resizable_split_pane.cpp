@@ -14,6 +14,22 @@ constexpr int kDividerThickness = 1;
 constexpr int kGrabPadding = 0;
 constexpr int kMinPaneSize = 6;
 
+bool is_wheel_action(tuinator::MouseAction action) {
+    return action == tuinator::MouseAction::WheelUp || action == tuinator::MouseAction::WheelDown ||
+           action == tuinator::MouseAction::WheelLeft || action == tuinator::MouseAction::WheelRight;
+}
+
+bool dispatch_wheel_to_pane_under_cursor(tuinator::Widget* first, tuinator::Widget* second,
+                                         const tuinator::Event& event, const tuinator::MouseEvent& mouse) {
+    // Prefer the second pane when both bounds overlap (e.g. on a divider).
+    for (tuinator::Widget* pane : {second, first}) {
+        if (pane != nullptr && pane->bounds().contains(mouse.position)) {
+            return pane->handle_event(event);
+        }
+    }
+    return false;
+}
+
 }  // namespace
 
 ResizableSplitPane::ResizableSplitPane(std::unique_ptr<tuinator::Widget> first,
@@ -244,19 +260,24 @@ bool ResizableSplitPane::handle_event(const tuinator::Event& event) {
             }
             return true;
         }
+
+        if (is_wheel_action(mouse->action)) {
+            return dispatch_wheel_to_pane_under_cursor(first_.get(), second_.get(), event, *mouse);
+        }
+
+        if (bounds_.contains(mouse->position)) {
+            for (tuinator::Widget* pane : {second_.get(), first_.get()}) {
+                if (pane != nullptr && pane->bounds().contains(mouse->position)) {
+                    return pane->handle_event(event);
+                }
+            }
+        }
+        return false;
     }
 
     for (tuinator::Widget* pane : {first_.get(), second_.get()}) {
         if (pane != nullptr && pane->has_focused_descendant() && pane->handle_event(event)) {
             return true;
-        }
-    }
-
-    if (const auto* mouse = std::get_if<tuinator::MouseEvent>(&event)) {
-        for (tuinator::Widget* pane : {first_.get(), second_.get()}) {
-            if (pane != nullptr && pane->bounds().contains(mouse->position)) {
-                return pane->handle_event(event);
-            }
         }
     }
 

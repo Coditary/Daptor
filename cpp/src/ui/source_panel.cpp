@@ -1,4 +1,5 @@
 #include <tui_debug_ui/source_panel.hpp>
+#include <tui_debug_ui/highlight_bridge.hpp>
 
 #include <tuinator/core/event.hpp>
 #include <tuinator/render/text.hpp>
@@ -23,6 +24,7 @@ namespace tui_debug_ui {
 namespace {
 
 constexpr const char* kBreakpointGlyph = "\u{eaff}"; // codicon breakpoint
+constexpr const char* kConditionalBreakpointGlyph = "\u{25c6}"; // ◆
 constexpr const char* kExecutionGlyph = "\u{eaf0}";  // codicon current frame
 constexpr const char* kEmptyMessage = "No source loaded \u2014 press p to open a file";
 
@@ -31,6 +33,7 @@ constexpr const char* kEmptyMessage = "No source loaded \u2014 press p to open a
 SourcePanel::SourcePanel(SyntaxTheme theme) : theme_(std::move(theme)) {
     theme_.keyword.bold = true;
     theme_.breakpoint_marker.bold = true;
+    theme_.breakpoint_conditional_marker.bold = true;
     theme_.execution_row.bold = true;
 }
 
@@ -66,6 +69,41 @@ void SourcePanel::set_lines(std::vector<HighlightedLine> lines) {
     } else {
         clamp_scroll();
     }
+    mark_dirty();
+}
+
+void SourcePanel::reset_plain_spans_for_line_range(int first_line, int line_count,
+                                                  const std::string& source_text) {
+    if (first_line < 1 || line_count <= 0 || source_text.empty()) {
+        return;
+    }
+
+    const auto plain_lines = build_plain_viewport_lines(source_text, first_line, line_count);
+    for (const HighlightedLine& plain_line : plain_lines) {
+        for (HighlightedLine& existing : lines_) {
+            if (existing.line_number == plain_line.line_number) {
+                existing.spans = plain_line.spans;
+                break;
+            }
+        }
+    }
+    mark_dirty();
+}
+
+void SourcePanel::merge_highlighted_lines(const std::vector<HighlightedLine>& highlighted) {
+    if (highlighted.empty()) {
+        return;
+    }
+
+    for (const HighlightedLine& incoming : highlighted) {
+        for (HighlightedLine& existing : lines_) {
+            if (existing.line_number == incoming.line_number) {
+                existing.spans = incoming.spans;
+                break;
+            }
+        }
+    }
+
     mark_dirty();
 }
 
@@ -106,8 +144,8 @@ void SourcePanel::set_cursor_line(int line) {
     mark_dirty();
 }
 
-void SourcePanel::set_breakpoint_lines(std::unordered_set<int> lines) {
-    breakpoint_lines_ = std::move(lines);
+void SourcePanel::set_breakpoints(std::unordered_map<int, std::string> breakpoints) {
+    breakpoints_ = std::move(breakpoints);
     mark_dirty();
 }
 
@@ -119,6 +157,15 @@ void SourcePanel::set_file_line_count(int count) {
 
 void SourcePanel::set_on_toggle_breakpoint(BreakpointToggleCallback callback) {
     on_toggle_breakpoint_ = std::move(callback);
+}
+
+void SourcePanel::set_on_breakpoint_context(BreakpointContextCallback callback) {
+    on_breakpoint_context_ = std::move(callback);
+}
+
+int SourcePanel::code_column_from_local_x(int local_x) const {
+    const int start = code_start_x();
+    return std::max(0, local_x - start);
 }
 
 void SourcePanel::set_on_request_viewport(ViewportRequestCallback callback) {
@@ -203,6 +250,7 @@ void SourcePanel::set_syntax_theme(SyntaxTheme theme) {
     theme_ = std::move(theme);
     theme_.keyword.bold = true;
     theme_.breakpoint_marker.bold = true;
+    theme_.breakpoint_conditional_marker.bold = true;
     theme_.execution_row.bold = true;
     mark_dirty();
 }
@@ -271,7 +319,10 @@ bool SourcePanel::handle_event(const Event& event) {
                 break;
             }
         }
-        if (mouse->action != tuinator::MouseAction::Click && mouse->action != tuinator::MouseAction::Release) {
+        const bool right_click = mouse->button == tuinator::MouseButton::Right;
+        const bool pointer_pick = mouse->action == tuinator::MouseAction::Click ||
+                                  mouse->action == tuinator::MouseAction::Release;
+        if (!pointer_pick) {
             return false;
         }
 
@@ -282,8 +333,16 @@ bool SourcePanel::handle_event(const Event& event) {
 
         const int line = line_number_at_row(local.y);
         const bool gutter = is_gutter_click(local.x);
+        const bool has_breakpoint = breakpoints_.contains(line);
 
-        if (gutter && on_toggle_breakpoint_) {
+        if ((gutter || has_breakpoint) && right_click && on_breakpoint_context_) {
+            set_focused(true);
+            set_cursor_line(line);
+            on_breakpoint_context_(line, code_column_from_local_x(local.x), mouse->position);
+            return true;
+        }
+
+        if (gutter && !right_click && on_toggle_breakpoint_) {
             set_focused(true);
             set_cursor_line(line);
             on_toggle_breakpoint_(line);
@@ -389,13 +448,21 @@ void SourcePanel::paint_line(PaintContext& ctx, int row, const HighlightedLine& 
     const Style row_style = row_style_for_line(line.line_number);
     int x = 0;
 
-    const bool has_breakpoint = breakpoint_lines_.contains(line.line_number);
+    const auto breakpoint_it = breakpoints_.find(line.line_number);
+    const bool has_breakpoint = breakpoint_it != breakpoints_.end();
+    const bool is_conditional =
+        has_breakpoint && !breakpoint_it->second.empty();
     const bool is_execution = execution_line_ > 0 && line.line_number == execution_line_;
     const bool is_cursor = line.line_number == cursor_line_;
 
-    const std::string breakpoint_text = has_breakpoint ? std::string(kBreakpointGlyph) + " " : "  ";
-    canvas.draw_text({x, row}, breakpoint_text,
-                     has_breakpoint ? theme_.breakpoint_marker : theme_.line_number);
+    std::string breakpoint_text = "  ";
+    tuinator::Style breakpoint_style = theme_.line_number;
+    if (has_breakpoint) {
+        breakpoint_text = (is_conditional ? kConditionalBreakpointGlyph : kBreakpointGlyph);
+        breakpoint_text += " ";
+        breakpoint_style = is_conditional ? theme_.breakpoint_conditional_marker : theme_.breakpoint_marker;
+    }
+    canvas.draw_text({x, row}, breakpoint_text, breakpoint_style);
     x += 2;
 
     std::string marker = "  ";

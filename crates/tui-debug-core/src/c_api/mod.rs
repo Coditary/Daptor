@@ -10,6 +10,7 @@ use std::sync::{LazyLock, Mutex};
 use serde_json::Value;
 
 use session::CSession;
+use crate::session::SourceBreakpoint;
 
 static LAST_ERROR: LazyLock<Mutex<CString>> =
     LazyLock::new(|| Mutex::new(CString::new("").expect("empty string has no NUL")));
@@ -328,7 +329,8 @@ pub extern "C" fn tui_debug_evaluate(
     }
 }
 
-/// Set breakpoints for `path`. `lines_json` must be a JSON array of line numbers, e.g. `[1,5]`.
+/// Set breakpoints for `path`. `lines_json` is a JSON array of line numbers (`[1,5]`) or
+/// breakpoint objects (`[{"line":24,"condition":"x > 1"}]`).
 #[no_mangle]
 pub extern "C" fn tui_debug_set_breakpoints(
     session: *mut c_void,
@@ -365,18 +367,35 @@ pub extern "C" fn tui_debug_set_breakpoints(
         }
     };
 
-    let lines: Vec<u32> = match parsed {
+    let breakpoints: Vec<SourceBreakpoint> = match parsed {
         Value::Array(items) => items
             .into_iter()
-            .filter_map(|item| item.as_u64().map(|line| line as u32))
+            .filter_map(|item| {
+                if let Some(line) = item.as_u64() {
+                    return Some(SourceBreakpoint {
+                        line: line as u32,
+                        condition: None,
+                    });
+                }
+                if !item.is_object() {
+                    return None;
+                }
+                let line = item.get("line").and_then(|value| value.as_u64())? as u32;
+                let condition = item
+                    .get("condition")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+                    .filter(|value| !value.is_empty());
+                Some(SourceBreakpoint { line, condition })
+            })
             .collect(),
         _ => {
-            set_last_error("lines_json must be a JSON array of line numbers");
+            set_last_error("lines_json must be a JSON array of line numbers or breakpoint objects");
             return -1;
         }
     };
 
-    match session.set_breakpoints(path, &lines) {
+    match session.set_breakpoints(path, &breakpoints) {
         Ok(()) => 0,
         Err(err) => {
             set_last_error(err.to_string());
@@ -401,6 +420,82 @@ pub extern "C" fn tui_debug_fetch_variables(
 
     match session.fetch_variables_json(variables_reference) {
         Ok(json) => match write_json_to_buffer(&json, json_out, cap) {
+            Ok(()) => 0,
+            Err(err) => {
+                set_last_error(err);
+                -1
+            }
+        },
+        Err(err) => {
+            set_last_error(err.to_string());
+            -1
+        }
+    }
+}
+
+/// Set a variable value in the given scope (`variablesReference`).
+#[no_mangle]
+pub extern "C" fn tui_debug_set_variable(
+    session: *mut c_void,
+    variables_reference: i64,
+    name: *const c_char,
+    value: *const c_char,
+    result_out: *mut c_char,
+    cap: usize,
+) -> c_int {
+    clear_last_error();
+
+    let Some(session) = session_from_ptr(session) else {
+        return -1;
+    };
+
+    let name = match c_str_to_rust(name, "name") {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err);
+            return -1;
+        }
+    };
+
+    let value = match c_str_to_rust(value, "value") {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err);
+            return -1;
+        }
+    };
+
+    match session.set_variable(variables_reference, name, value) {
+        Ok(json) => match write_json_to_buffer(&json, result_out, cap) {
+            Ok(()) => 0,
+            Err(err) => {
+                set_last_error(err);
+                -1
+            }
+        },
+        Err(err) => {
+            set_last_error(err.to_string());
+            -1
+        }
+    }
+}
+
+/// Fetch source text for a DAP `sourceReference` into `source_out`.
+#[no_mangle]
+pub extern "C" fn tui_debug_fetch_source(
+    session: *mut c_void,
+    source_reference: i64,
+    source_out: *mut c_char,
+    cap: usize,
+) -> c_int {
+    clear_last_error();
+
+    let Some(session) = session_from_ptr(session) else {
+        return -1;
+    };
+
+    match session.fetch_source(source_reference) {
+        Ok(source) => match write_json_to_buffer(&source, source_out, cap) {
             Ok(()) => 0,
             Err(err) => {
                 set_last_error(err);

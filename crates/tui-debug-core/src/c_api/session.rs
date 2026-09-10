@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::session::{DebugSession, SessionSnapshot};
+use crate::session::{DebugSession, SessionSnapshot, SessionState, SourceBreakpoint};
 
 /// C-visible session handle wrapping the Rust debug session.
 pub struct CSession {
@@ -61,8 +61,12 @@ impl CSession {
             "step_into" | "step_in" => self.inner.dispatch_step("stepIn"),
             "step_out" => self.inner.dispatch_step("stepOut"),
             "step_back" => self.inner.step_back().map(|_| ()),
-            "pause" => self.inner.dispatch_pause(),
-            "play_pause" => self.inner.dispatch_play_pause(),
+            "pause" => self.inner.pause().map(|_| ()),
+            "play_pause" => match self.inner.state() {
+                SessionState::Running => self.inner.pause().map(|_| ()),
+                SessionState::Stopped { .. } => self.inner.dispatch_continue(),
+                _ => Ok(()),
+            },
             "terminate" => self.inner.terminate(),
             "disconnect" => self.inner.disconnect(),
             "restart" => self.inner.restart(),
@@ -74,15 +78,24 @@ impl CSession {
         self.inner.evaluate(expression, frame_id, context)
     }
 
-    pub fn set_breakpoints(&self, path: &str, lines: &[u32]) -> Result<()> {
+    pub fn set_breakpoints(&self, path: &str, breakpoints: &[SourceBreakpoint]) -> Result<()> {
         self.inner
-            .set_source_breakpoints(Path::new(path), lines)
+            .set_source_breakpoints(Path::new(path), breakpoints)
             .map(|_| ())
     }
 
     pub fn fetch_variables_json(&self, variables_reference: i64) -> Result<String> {
         let variables = self.inner.variables(variables_reference)?;
         serde_json::to_string(&variables).context("failed to serialize variables")
+    }
+
+    pub fn set_variable(&self, variables_reference: i64, name: &str, value: &str) -> Result<String> {
+        let variable = self.inner.set_variable(variables_reference, name, value)?;
+        serde_json::to_string(&variable).context("failed to serialize setVariable result")
+    }
+
+    pub fn fetch_source(&self, source_reference: i64) -> Result<String> {
+        self.inner.fetch_source(source_reference)
     }
 }
 
@@ -119,6 +132,7 @@ mod tests {
             },
             threads: vec![],
             stack_frames: vec![],
+            thread_stacks: vec![],
             scopes: vec![],
             variables: vec![],
         };

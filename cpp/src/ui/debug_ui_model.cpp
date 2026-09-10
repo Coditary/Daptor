@@ -23,8 +23,8 @@ void LayoutConfig::widen_sidebar() { sidebar_pct = std::min<std::uint16_t>(45, s
 void LayoutConfig::narrow_sidebar() { sidebar_pct = std::max<std::uint16_t>(15, sidebar_pct - 2); }
 void LayoutConfig::grow_bottom() { bottom_pct = std::min<std::uint16_t>(50, bottom_pct + 2); }
 void LayoutConfig::shrink_bottom() { bottom_pct = std::max<std::uint16_t>(15, bottom_pct - 2); }
-void LayoutConfig::widen_repl() { repl_pct = std::min<std::uint16_t>(60, repl_pct + 2); }
-void LayoutConfig::narrow_repl() { repl_pct = std::max<std::uint16_t>(20, repl_pct - 2); }
+void LayoutConfig::widen_watches() { watches_pct = std::min<std::uint16_t>(60, watches_pct + 2); }
+void LayoutConfig::narrow_watches() { watches_pct = std::max<std::uint16_t>(20, watches_pct - 2); }
 void LayoutConfig::grow_scopes() { scopes_pct = std::min<std::uint16_t>(80, scopes_pct + 3); }
 void LayoutConfig::shrink_scopes() { scopes_pct = std::max<std::uint16_t>(30, scopes_pct - 3); }
 
@@ -37,11 +37,9 @@ std::string DebugUiModel::focus_label() const {
     case Focus::Breakpoints:
         return "breakpoints";
     case Focus::Stacks:
-        return "stacks";
+        return "threads";
     case Focus::Watches:
         return "watches";
-    case Focus::Repl:
-        return "repl";
     case Focus::Console:
         return "console";
     }

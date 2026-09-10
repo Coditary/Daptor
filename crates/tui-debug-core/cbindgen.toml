@@ -11,6 +11,9 @@ parse_deps = false
 
 [export]
 include = [
+    "tui_debug_init",
+    "tui_debug_language_is_loaded",
+    "tui_debug_try_load_language",
     "tui_debug_last_error",
     "tui_debug_session_launch",
     "tui_debug_session_free",
@@ -21,6 +24,8 @@ include = [
     "tui_debug_evaluate",
     "tui_debug_set_breakpoints",
     "tui_debug_fetch_variables",
+    "tui_debug_set_variable",
+    "tui_debug_fetch_source",
     "tui_debug_highlight_viewport",
 ]
 

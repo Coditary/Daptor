@@ -10,7 +10,10 @@
 #include "tui_debug_ui/snapshot_parser.hpp"
 #include "tui_debug_ui/source_panel.hpp"
 #include "tui_debug_ui/navigable_list_view.hpp"
+#include "tui_debug_ui/breakpoints_panel.hpp"
+#include "tui_debug_ui/context_menu.hpp"
 #include "tui_debug_ui/stacks_panel.hpp"
+#include "tui_debug_ui/watches_panel.hpp"
 #include "tui_debug_ui/titled_scroll_pane.hpp"
 #include "tui_debug_ui/tty_setup.hpp"
 
@@ -19,13 +22,16 @@
 #include <tuinator/render/paint_context.hpp>
 #include <tuinator/render/text.hpp>
 #include <tuinator/tuinator.hpp>
+#include <tuinator/widgets/containers/scroll_view.hpp>
 
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <unordered_set>
@@ -43,6 +49,148 @@ constexpr int kControlsBarRows = 1;
 constexpr int kStatusBarRows = 1;
 constexpr int kSplitDividerRows = 1;
 constexpr int kFullFileSourceLineThreshold = 500;
+constexpr int kHighlightLineMargin = 12;
+constexpr int kMaxHighlightLinesPerRequest = 128;
+
+bool is_execution_control_command(const char* op) {
+    if (op == nullptr) {
+        return false;
+    }
+    return std::strcmp(op, "continue") == 0 || std::strcmp(op, "play_pause") == 0 ||
+           std::strcmp(op, "pause") == 0 || std::strcmp(op, "step_over") == 0 ||
+           std::strcmp(op, "next") == 0 || std::strcmp(op, "step_into") == 0 ||
+           std::strcmp(op, "step_in") == 0 || std::strcmp(op, "step_out") == 0 ||
+           std::strcmp(op, "step_back") == 0;
+}
+
+std::string trim_watch_text(const std::string& text) {
+    std::size_t begin = 0;
+    while (begin < text.size() && std::isspace(static_cast<unsigned char>(text[begin]))) {
+        ++begin;
+    }
+    std::size_t end = text.size();
+    while (end > begin && std::isspace(static_cast<unsigned char>(text[end - 1]))) {
+        --end;
+    }
+    return text.substr(begin, end - begin);
+}
+
+bool is_simple_watch_identifier(const std::string& expression) {
+    if (expression.empty()) {
+        return false;
+    }
+    unsigned char first = static_cast<unsigned char>(expression.front());
+    if (first != '_' && !std::isalpha(first)) {
+        return false;
+    }
+    for (std::size_t i = 1; i < expression.size(); ++i) {
+        const unsigned char ch = static_cast<unsigned char>(expression[i]);
+        if (ch != '_' && !std::isalnum(ch)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::string normalize_watch_expression(std::string expression) {
+    expression = trim_watch_text(std::move(expression));
+    const std::size_t eq = expression.find('=');
+    if (eq == std::string::npos) {
+        return expression;
+    }
+    if (eq + 1 < expression.size() && expression[eq + 1] == '=') {
+        return expression;
+    }
+
+    const std::string lhs = trim_watch_text(expression.substr(0, eq));
+    if (is_simple_watch_identifier(lhs)) {
+        return lhs;
+    }
+    return expression;
+}
+
+std::optional<std::string> try_resolve_watch_from_model(const tui_debug_ui::DebugUiModel& model,
+                                                        const std::string& expression) {
+    const std::string key = normalize_watch_expression(expression);
+    if (!is_simple_watch_identifier(key)) {
+        return std::nullopt;
+    }
+
+    for (const tui_debug_ui::VariableInfo& variable : model.variables) {
+        if (variable.name == key) {
+            return variable.value;
+        }
+    }
+
+    for (const auto& [_, variables] : model.scope_variables) {
+        for (const tui_debug_ui::VariableInfo& variable : variables) {
+            if (variable.name == key) {
+                return variable.value;
+            }
+        }
+    }
+
+    return std::nullopt;
+}
+
+std::optional<std::string> try_resolve_watch_from_scope_rows(const std::vector<std::string>& rows,
+                                                             const std::string& expression) {
+    const std::string key = normalize_watch_expression(expression);
+    if (!is_simple_watch_identifier(key)) {
+        return std::nullopt;
+    }
+
+    const std::string prefix = "  " + key + " = ";
+    for (const std::string& row : rows) {
+        if (row.rfind(prefix, 0) == 0) {
+            return row.substr(prefix.size());
+        }
+    }
+
+    return std::nullopt;
+}
+
+std::string escape_json_string(const std::string& value) {
+    std::string escaped;
+    escaped.reserve(value.size());
+    for (const char ch : value) {
+        switch (ch) {
+        case '\\':
+            escaped += "\\\\";
+            break;
+        case '"':
+            escaped += "\\\"";
+            break;
+        case '\n':
+            escaped += "\\n";
+            break;
+        case '\r':
+            escaped += "\\r";
+            break;
+        case '\t':
+            escaped += "\\t";
+            break;
+        default:
+            escaped.push_back(ch);
+            break;
+        }
+    }
+    return escaped;
+}
+
+std::string trim_breakpoint_condition(std::string value) {
+    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front()))) {
+        value.erase(value.begin());
+    }
+    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back()))) {
+        value.pop_back();
+    }
+    return value;
+}
+
+bool is_locals_scope_name(const std::string& name) {
+    return name == "Locals" || (name.size() >= 6 && name.compare(0, 6, "Locals") == 0);
+}
 
 bool scope_rows_include_variables(const std::vector<std::string>& rows) {
     for (const std::string& row : rows) {
@@ -51,6 +199,27 @@ bool scope_rows_include_variables(const std::vector<std::string>& rows) {
         }
     }
     return false;
+}
+
+struct VariableEditTarget {
+    std::int64_t variables_reference = 0;
+    std::string value;
+};
+
+std::optional<VariableEditTarget> find_variable_for_edit(const tui_debug_ui::DebugUiModel& model,
+                                                           const std::string& name) {
+    for (const tui_debug_ui::ScopeInfo& scope : model.scopes) {
+        const auto vars_it = model.scope_variables.find(scope.variables_reference);
+        if (vars_it == model.scope_variables.end()) {
+            continue;
+        }
+        for (const tui_debug_ui::VariableInfo& variable : vars_it->second) {
+            if (variable.name == name) {
+                return VariableEditTarget{scope.variables_reference, variable.value};
+            }
+        }
+    }
+    return std::nullopt;
 }
 
 std::vector<std::string> build_scope_rows(const tui_debug_ui::DebugUiModel& model) {
@@ -90,6 +259,32 @@ tuinator::Rect status_row_rect(const tuinator::Rect& root) {
     return {root.x, root.y + root.height - kStatusBarRows, root.width, kStatusBarRows};
 }
 
+bool is_wheel_action(tuinator::MouseAction action) {
+    return action == tuinator::MouseAction::WheelUp || action == tuinator::MouseAction::WheelDown ||
+           action == tuinator::MouseAction::WheelLeft || action == tuinator::MouseAction::WheelRight;
+}
+
+bool is_mouse_position_tracking_action(tuinator::MouseAction action) {
+    return action == tuinator::MouseAction::Move || action == tuinator::MouseAction::Press ||
+           action == tuinator::MouseAction::Release || action == tuinator::MouseAction::Click;
+}
+
+bool is_plausible_mouse_position(tuinator::Point point, const tuinator::Rect& bounds) {
+    return bounds.contains(point) && !(point.x == 0 && point.y == 0);
+}
+
+tuinator::Point wheel_routing_position(const tuinator::MouseEvent& mouse,
+                                       const std::optional<tuinator::Point>& last_mouse_position,
+                                       const tuinator::Rect& root_bounds) {
+    if (is_plausible_mouse_position(mouse.position, root_bounds)) {
+        return mouse.position;
+    }
+    if (last_mouse_position.has_value() && is_plausible_mouse_position(*last_mouse_position, root_bounds)) {
+        return *last_mouse_position;
+    }
+    return mouse.position;
+}
+
 /// Root shell with fixed chrome rows: controls (top), content (middle), status (bottom).
 class DebugChromeRoot : public tuinator::Widget {
   public:
@@ -105,6 +300,7 @@ class DebugChromeRoot : public tuinator::Widget {
     void on_idle() override {
         if (debug_app_ != nullptr) {
             debug_app_->poll_session();
+            debug_app_->maybe_refresh_source_highlight_for_scroll();
         }
     }
 
@@ -151,9 +347,17 @@ class DebugChromeRoot : public tuinator::Widget {
         paint_child(controls_.get());
         paint_child(content_.get());
         paint_child(status_.get());
+
+        if (debug_app_ != nullptr) {
+            debug_app_->paint_overlay(ctx);
+        }
     }
 
     bool handle_event(const tuinator::Event& event) override {
+        if (debug_app_ != nullptr && debug_app_->context_menu_open() && debug_app_->handle_overlay_event(event)) {
+            return true;
+        }
+
         if (std::holds_alternative<tuinator::Resize>(event)) {
             if (debug_app_ != nullptr) {
                 debug_app_->on_terminal_resize();
@@ -168,11 +372,24 @@ class DebugChromeRoot : public tuinator::Widget {
                 }
                 return true;
             }
-            if (key->key == tuinator::Key::Escape || key->character == 'q' || key->character == 'Q') {
+            const bool block_quit =
+                debug_app_ != nullptr && debug_app_->should_block_app_quit_key(*key);
+            if (!block_quit &&
+                (key->key == tuinator::Key::Escape || key->character == 'q' || key->character == 'Q')) {
                 if (app_ != nullptr) {
                     app_->quit();
                 }
                 return true;
+            }
+            if (block_quit && key->key == tuinator::Key::Escape && debug_app_ != nullptr) {
+                if (debug_app_->is_watch_input_focused()) {
+                    debug_app_->blur_watch_input();
+                    return true;
+                }
+                if (debug_app_->is_scope_input_focused()) {
+                    debug_app_->blur_scope_input();
+                    return true;
+                }
             }
             if (debug_app_ != nullptr && debug_app_->handle_global_key(*key)) {
                 return true;
@@ -180,6 +397,22 @@ class DebugChromeRoot : public tuinator::Widget {
         }
 
         if (const auto* mouse = std::get_if<tuinator::MouseEvent>(&event)) {
+            if (is_mouse_position_tracking_action(mouse->action) && bounds_.contains(mouse->position)) {
+                last_mouse_position_ = mouse->position;
+            }
+
+            if (is_wheel_action(mouse->action)) {
+                tuinator::MouseEvent routed = *mouse;
+                routed.position = wheel_routing_position(*mouse, last_mouse_position_, bounds_);
+
+                for (tuinator::Widget* child : {controls_.get(), status_.get(), content_.get()}) {
+                    if (child != nullptr && child->bounds().contains(routed.position)) {
+                        return child->handle_event(routed);
+                    }
+                }
+                return false;
+            }
+
             // Status row before content so the bottom chrome row is not shadowed by content hit tests.
             bool handled = false;
             for (tuinator::Widget* child : {controls_.get(), status_.get(), content_.get()}) {
@@ -277,49 +510,16 @@ class DebugChromeRoot : public tuinator::Widget {
     std::unique_ptr<tuinator::Widget> content_;
     std::unique_ptr<tuinator::Widget> status_;
     tuinator::Style chrome_background_;
+    std::optional<tuinator::Point> last_mouse_position_;
 };
-
-std::unique_ptr<tuinator::Widget> make_repl_panel(const tui_debug_ui::DapUiTheme& theme,
-                                                  tui_debug_ui::DebugApp* debug_app, tuinator::TextInput** input_out,
-                                                  tuinator::ListView** history_out) {
-    auto root = std::make_unique<tuinator::VBox>(tuinator::BoxOptions{.gap = 0, .padding = 0});
-
-    auto input = std::make_unique<tuinator::TextInput>(tuinator::TextInputOptions{.placeholder = "> expression"},
-                                                       theme.label, theme.selection);
-    input->set_on_submit([debug_app](const std::string& value) {
-        if (debug_app != nullptr) {
-            debug_app->submit_repl(value);
-        }
-    });
-    input->set_flex(0);
-
-    auto history = std::make_unique<tui_debug_ui::NavigableListView>(theme.label, theme.selection, theme.panel_background);
-    history->set_items({});
-    history->set_flex(1);
-
-    if (input_out != nullptr) {
-        *input_out = input.get();
-    }
-    if (history_out != nullptr) {
-        *history_out = history.get();
-    }
-
-    root->add_child(std::move(input));
-    root->add_child(std::move(history));
-
-    auto pane = std::make_unique<tui_debug_ui::TitledScrollPane>("REPL", std::move(root), theme.title_normal,
-                                                                 theme.panel_background, theme.scroll_view_options(),
-                                                                 false);
-    return pane->release_widget();
-}
 
 int sidebar_first_size(int terminal_width, std::uint16_t sidebar_pct) {
     const int pct = static_cast<int>(sidebar_pct);
     return std::max(24, terminal_width * pct / 100);
 }
 
-int repl_first_size(int terminal_width, std::uint16_t repl_pct) {
-    const int pct = static_cast<int>(repl_pct);
+int watches_first_size(int terminal_width, std::uint16_t watches_pct) {
+    const int pct = static_cast<int>(watches_pct);
     return std::max(16, terminal_width * pct / 100);
 }
 
@@ -336,15 +536,34 @@ int main_area_height(int terminal_height, int bottom_tray_height) {
     return std::max(8, content_area_height(terminal_height) - bottom_tray_height - kSplitDividerRows);
 }
 
+std::string source_cache_key(const std::string& path, std::int64_t source_reference) {
+    if (!path.empty()) {
+        return path;
+    }
+    if (source_reference > 0) {
+        return "dap:source:" + std::to_string(source_reference);
+    }
+    return {};
+}
+
 std::string panel_title_from_path(const std::string& path) {
     if (path.empty()) {
         return "Source";
+    }
+    constexpr std::string_view kAdapterPrefix = "dap:source:";
+    if (path.rfind(kAdapterPrefix, 0) == 0) {
+        return "adapter source #" + path.substr(kAdapterPrefix.size());
     }
     const std::size_t slash = path.find_last_of("/\\");
     if (slash == std::string::npos) {
         return path;
     }
     return path.substr(slash + 1);
+}
+
+bool viewing_same_source(const std::string& left_path, std::int64_t left_reference,
+                         const std::string& right_path, std::int64_t right_reference) {
+    return source_cache_key(left_path, left_reference) == source_cache_key(right_path, right_reference);
 }
 
 std::string read_file_or_empty(const std::string& path) {
@@ -389,6 +608,16 @@ std::string line_text_at(const std::string& text, int line_number) {
     return {};
 }
 
+std::string trimmed_line_text_at(const std::string& text, int line_number) {
+    std::string line = line_text_at(text, line_number);
+    const std::size_t start = line.find_first_not_of(" \t\r");
+    if (start == std::string::npos) {
+        return {};
+    }
+    const std::size_t end = line.find_last_not_of(" \t\r");
+    return line.substr(start, end - start + 1);
+}
+
 bool is_blank_source_line(const std::string& line) {
     for (unsigned char ch : line) {
         if (!std::isspace(ch)) {
@@ -423,12 +652,15 @@ bool is_breakpointable_line(const tui_debug_ui::SourcePanel* panel, const std::s
 }
 
 std::string language_from_path(const std::string& path) {
+    if (path.size() >= 3 && path.compare(path.size() - 3, 3, ".py") == 0) {
+        return "python";
+    }
     const std::size_t dot = path.find_last_of('.');
     if (dot == std::string::npos || dot + 1 >= path.size()) {
         return "python";
     }
     const std::string ext = path.substr(dot + 1);
-    if (ext == "py") {
+    if (ext == "py" || ext == "pyw") {
         return "python";
     }
     if (ext == "rs") {
@@ -491,6 +723,10 @@ void DebugApp::on_terminal_resize() {
 }
 
 void DebugApp::build_ui() {
+    capture_watch_input_state();
+    capture_scope_input_state();
+    capture_breakpoint_input_state();
+
     cached_status_bar_text_.clear();
     cached_scope_rows_.clear();
     cached_stack_lines_.clear();
@@ -507,18 +743,89 @@ void DebugApp::build_ui() {
     controls->set_on_action([this](const std::string& op) { send_command(op.c_str()); });
 
     const auto scroll_options = dap_theme_.scroll_view_options();
-    scopes_panel_ = std::make_unique<ScopesPanel>(dap_theme_.title_normal, dap_theme_.label,
-                                                  dap_theme_.panel_background, scroll_options);
-    stacks_panel_ = std::make_unique<StacksPanel>(dap_theme_.title_normal, dap_theme_.label,
-                                                dap_theme_.panel_background, scroll_options);
+    scopes_panel_ = std::make_unique<ScopesPanel>(dap_theme_, scroll_options);
+    scopes_panel_->set_on_watch([this](const std::string& variable_name) { add_watch(variable_name); });
+    scopes_panel_->set_on_edit_variable([this](const std::string& variable_name) {
+        begin_edit_variable(variable_name);
+    });
+    scopes_panel_->set_on_submit([this](const std::string& value) { submit_variable_value(value); });
+    scopes_panel_->set_on_change([this](const std::string& value) {
+        scope_input_draft_ = value;
+        scope_input_focused_ = true;
+        model_.focus = Focus::Scopes;
+    });
+    if (!scope_input_draft_.empty()) {
+        scopes_panel_->set_input_value(scope_input_draft_);
+    }
+    stacks_panel_ = std::make_unique<StacksPanel>(dap_theme_, scroll_options);
+    breakpoints_panel_ = std::make_unique<BreakpointsPanel>(dap_theme_, scroll_options);
+    const auto jump_to_stack_frame = [this](const StackFrameRow& frame) {
+        std::string path = frame.path;
+        std::int64_t source_reference = frame.source_reference;
+        if (path.rfind("dap:source:", 0) == 0) {
+            path.clear();
+        }
+        if (path.empty() && source_reference <= 0) {
+            return;
+        }
+        open_source_file(path, std::max(1, static_cast<int>(frame.line)), true, source_reference);
+        model_.status_message = "Jumped to " + frame.name;
+        sync_status_bar();
+    };
+    stacks_panel_->set_on_continue([this]() { send_command("continue"); });
+    stacks_panel_->set_on_activate(jump_to_stack_frame);
+    breakpoints_panel_->set_on_activate([this](const BreakpointRow& row) {
+        open_source_file(row.path, row.line, true);
+        model_.status_message =
+            "Opened " + panel_title_from_path(row.path) + ":" + std::to_string(row.line);
+        sync_status_bar();
+    });
+    breakpoints_panel_->set_on_remove([this](const BreakpointRow& row) { remove_breakpoint_at(row.path, row.line); });
+    breakpoints_panel_->set_on_add_condition([this](const BreakpointRow& row) {
+        begin_edit_breakpoint_condition(row.path, row.line);
+    });
+    breakpoints_panel_->set_on_submit([this](const std::string& condition) { submit_breakpoint_condition(condition); });
+    breakpoints_panel_->set_on_change([this](const std::string& condition) {
+        breakpoint_input_draft_ = condition;
+        breakpoint_input_focused_ = true;
+        model_.focus = Focus::Breakpoints;
+    });
+    if (!breakpoint_input_draft_.empty()) {
+        breakpoints_panel_->set_input_value(breakpoint_input_draft_);
+    }
+
+    watches_panel_ = std::make_unique<WatchesPanel>(dap_theme_, scroll_options);
+    watches_panel_->set_on_submit([this](const std::string& expression) { submit_watch_expression(expression); });
+    watches_panel_->set_on_change([this](const std::string& expression) {
+        watch_input_draft_ = expression;
+        watch_input_focused_ = true;
+        model_.focus = Focus::Watches;
+    });
+    watches_panel_->set_on_remove([this](int index) { remove_watch_at(static_cast<std::size_t>(index)); });
+    watches_panel_->set_on_edit([this](int index) { begin_edit_watch_at(index); });
+    if (!watch_input_draft_.empty()) {
+        watches_panel_->set_input_value(watch_input_draft_);
+    }
 
     auto scopes_widget = scopes_panel_->release_widget();
     auto stacks_widget = stacks_panel_->release_widget();
+    auto breakpoints_widget = breakpoints_panel_->release_widget();
 
     const int scopes_first = std::max(6, main_h * model_.layout.scopes_pct / 100);
+    const int lower_half = std::max(6, (main_h - scopes_first) / 2);
+
+    auto stacks_breakpoints = std::make_unique<ResizableSplitPane>(
+        std::move(stacks_widget), std::move(breakpoints_widget),
+        tuinator::SplitPaneOptions{
+            .orientation = tuinator::SplitOrientation::Vertical,
+            .first_size = lower_half,
+            .divider_style = dap_theme_.divider,
+        },
+        dap_theme_.panel_background);
+    bind_split_pane(stacks_breakpoints.get());
 
     auto sidebar = std::make_unique<ResizableSplitPane>(
-        std::move(scopes_widget), std::move(stacks_widget),
+        std::move(scopes_widget), std::move(stacks_breakpoints),
         tuinator::SplitPaneOptions{
             .orientation = tuinator::SplitOrientation::Vertical,
             .first_size = scopes_first,
@@ -539,19 +846,38 @@ void DebugApp::build_ui() {
 
     auto source_panel = std::make_unique<SourcePanel>();
     source_panel_ = source_panel.get();
+    context_menu_ = std::make_unique<ContextMenu>(dap_theme_.panel_background, dap_theme_.label, dap_theme_.selection,
+                                                  dap_theme_.border_focused);
+
     source_panel_->set_on_toggle_breakpoint([this](int line) { toggle_breakpoint_at_line(line); });
+    source_panel_->set_on_breakpoint_context([this](int line, int code_column, tuinator::Point anchor) {
+        const std::string path = effective_source_path();
+        std::optional<std::string> seed;
+        if (!path.empty()) {
+            if (cached_source_path_ != path) {
+                cached_source_path_ = path;
+                cached_source_text_ = read_file_or_empty(path);
+            }
+            const std::string line_text =
+                cached_source_text_.empty() ? highlighted_line_text(source_panel_, line)
+                                            : line_text_at(cached_source_text_, line);
+            seed = identifier_at_line_column(line_text, code_column);
+        }
+        show_breakpoint_context_menu(path, line, anchor, seed);
+    });
     source_panel_->set_on_request_viewport([this](int /*center_line*/) {
         cached_highlight_first_line_ = -1;
         cached_highlight_line_count_ = -1;
         highlight_request_first_line_ = -1;
         highlight_request_line_count_ = -1;
+        maybe_request_source_highlight();
     });
     if (!program_path_.empty()) {
         source_panel_->set_file_line_count(std::max(1, count_file_lines(read_file_or_empty(program_path_))));
     }
 
     source_section_ = std::make_unique<TitledScrollPane>(panel_title_from_path(model_.source_path),
-                                                         std::move(source_panel), dap_theme_.title_normal,
+                                                         std::move(source_panel), dap_theme_.title_source,
                                                          dap_theme_.panel_background, scroll_options);
     source_scroll_view_ = source_section_->scroll_view();
     if (source_panel_ != nullptr && source_scroll_view_ != nullptr) {
@@ -581,32 +907,33 @@ void DebugApp::build_ui() {
     });
     main_row->set_flex(1);
 
-    auto repl = make_repl_panel(dap_theme_, this, &repl_input_, &repl_history_);
+    auto watches_widget = watches_panel_->release_widget();
+    watches_widget->set_flex(0);
 
-    auto console_panel = std::make_unique<ConsolePanel>(dap_theme_.label, dap_theme_.panel_background);
+    auto console_panel = std::make_unique<ConsolePanel>(dap_theme_);
     console_panel_ = console_panel.get();
 
     auto console_section = std::make_unique<TitledScrollPane>("Console", std::move(console_panel),
-                                                              dap_theme_.title_normal, dap_theme_.panel_background,
+                                                              dap_theme_.title_console, dap_theme_.panel_background,
                                                               scroll_options);
     console_scroll_view_ = console_section->scroll_view();
     auto console_shell = console_section->release_widget();
     console_shell->set_flex(1);
 
     auto bottom_tray = std::make_unique<ResizableSplitPane>(
-        std::move(repl), std::move(console_shell),
+        std::move(watches_widget), std::move(console_shell),
         tuinator::SplitPaneOptions{
             .orientation = tuinator::SplitOrientation::Horizontal,
-            .first_size = repl_first_size(term_size.width, model_.layout.repl_pct),
+            .first_size = watches_first_size(term_size.width, model_.layout.watches_pct),
             .divider_style = dap_theme_.divider,
         },
         dap_theme_.panel_background);
     bottom_tray_split_ = bottom_tray.get();
     bind_split_pane(bottom_tray_split_);
     bottom_tray_split_->set_on_first_size_changed([this](int /*first*/) {
-        persist_split_size_as_pct(bottom_tray_split_, model_.layout.repl_pct, true);
+        persist_split_size_as_pct(bottom_tray_split_, model_.layout.watches_pct, true);
         if (!divider_drag_active_) {
-            model_.status_message = "REPL " + std::to_string(model_.layout.repl_pct) + "%";
+            model_.status_message = "Watches " + std::to_string(model_.layout.watches_pct) + "%";
             if (status_bar_ != nullptr) {
                 status_bar_->set_text(format_status_bar_text());
             }
@@ -639,14 +966,19 @@ void DebugApp::build_ui() {
                                                   std::move(status), dap_theme_.panel_background);
 
     app_->set_root(std::move(root));
-    app_->refresh_focus();
-    apply_focus();
-    if (repl_history_ != nullptr && !repl_history_lines_.empty()) {
-        repl_history_->set_items(repl_history_lines_);
-    }
     sync_ui_from_model();
     sync_controls_bar();
+    sync_breakpoints_list_panel();
+    if (!program_path_.empty()) {
+        open_source_file(program_path_, 1, false);
+        if (!launch_posted_) {
+            prefetch_program_source_highlight();
+        }
+    }
     refresh_scroll_views();
+    restore_watch_input_state();
+    restore_breakpoint_input_state();
+    restore_scope_input_state();
     request_full_screen_refresh();
 }
 
@@ -663,6 +995,12 @@ void DebugApp::refresh_scroll_views() {
     if (stacks_panel_ != nullptr) {
         refresh(stacks_panel_->scroll_view());
     }
+    if (breakpoints_panel_ != nullptr) {
+        refresh(breakpoints_panel_->scroll_view());
+    }
+    if (watches_panel_ != nullptr) {
+        refresh(watches_panel_->scroll_view());
+    }
     refresh(source_scroll_view_);
     refresh(console_scroll_view_);
 }
@@ -675,7 +1013,31 @@ void DebugApp::maybe_start_launch() {
         return;
     }
     launch_posted_ = true;
+    prefetch_program_source_highlight();
     session_io_->start_launch(program_path_);
+}
+
+void DebugApp::prefetch_program_source_highlight() {
+    if (program_path_.empty() || session_io_ == nullptr) {
+        return;
+    }
+
+    const std::string text = read_file_or_empty(program_path_);
+    if (text.empty()) {
+        return;
+    }
+
+    if (cached_source_text_.empty()) {
+        cached_source_path_ = program_path_;
+        cached_source_text_ = text;
+        if (source_panel_ != nullptr) {
+            source_panel_->set_file_line_count(std::max(1, count_file_lines(text)));
+            ensure_source_plain_lines();
+        }
+    }
+
+    const int line_count = std::min(kMaxHighlightLinesPerRequest, kHighlightLineMargin + 24);
+    session_io_->request_highlight(language_from_path(program_path_), text, 1, line_count);
 }
 
 bool DebugApp::update_connecting_spinner() {
@@ -700,9 +1062,6 @@ void DebugApp::handle_launch_complete() {
 
     if (session_io_->is_active()) {
         model_.connection_state = ConnectionState::Connected;
-        if (model_.source_path.empty() && !program_path_.empty()) {
-            model_.source_path = program_path_;
-        }
         if (model_.connection_state == ConnectionState::Connected && model_.session_state.empty()) {
             model_.status_message =
                 mode_ == SessionMode::Mock ? "Mock session ready" : "Connected";
@@ -716,8 +1075,19 @@ void DebugApp::handle_launch_complete() {
     sync_ui_from_model();
 
     if (session_io_->is_active()) {
+        if (model_.source_path.empty() && !program_path_.empty()) {
+            open_source_file(program_path_, 1, false);
+        }
+        maybe_follow_execution();
         maybe_request_scope_variables();
         maybe_request_source_highlight();
+        normalize_breakpoint_path_keys();
+        flush_breakpoints_to_session();
+        breakpoints_flushed_after_launch_ = true;
+        sync_breakpoints_list_panel();
+        sync_breakpoints_to_panel();
+        resolve_watches_from_locals();
+        restore_watch_input_state();
         request_full_screen_refresh();
     }
 }
@@ -728,19 +1098,26 @@ void DebugApp::apply_snapshot_json_payload(const std::string& json) {
     ++snapshot_generation_;
     scope_variables_fetch_pending_ = false;
     scope_variables_fetch_signature_.clear();
-    if (model_.source_path.empty() && !program_path_.empty()) {
-        model_.source_path = program_path_;
+    scope_variables_signature_.clear();
+    if (model_.source_path.empty() && !program_path_.empty() && model_.execution_path.empty()) {
+        open_source_file(program_path_, 1, false);
     }
+    if (is_session_stopped()) {
+        maybe_follow_execution();
+    }
+    sync_breakpoints_list_panel();
     if (previous_state == "disconnected" && is_session_stopped()) {
         reclaim_terminal_for_ui();
     }
-    if (is_session_stopped() &&
-        (restart_pending_ || previous_state == "exited" || previous_state == "disconnected" ||
-         previous_state == "running" || previous_state == "stopped" || previous_state.empty())) {
-        push_breakpoints_to_session(effective_source_path());
-    }
-    if (restart_pending_ && is_session_stopped()) {
+    if (is_session_stopped() && restart_pending_) {
+        normalize_breakpoint_path_keys();
+        flush_breakpoints_to_session();
+        breakpoints_flushed_after_launch_ = true;
         restart_pending_ = false;
+    } else if (is_session_stopped() && launch_complete_handled_ && !breakpoints_flushed_after_launch_) {
+        normalize_breakpoint_path_keys();
+        flush_breakpoints_to_session();
+        breakpoints_flushed_after_launch_ = true;
     }
 }
 
@@ -769,6 +1146,8 @@ void DebugApp::apply_scope_variables_payload(const std::string& signature, const
     scope_variables_signature_ = signature;
     scope_variables_fetch_signature_ = signature;
     scope_variables_fetch_pending_ = false;
+    sync_ui_from_model();
+    resolve_watches_from_locals();
 }
 
 void DebugApp::handle_session_event(const SessionIoEvent& event) {
@@ -800,23 +1179,39 @@ void DebugApp::handle_session_event(const SessionIoEvent& event) {
             scope_variables_fetch_pending_ = false;
         }
         break;
-    case SessionIoEventKind::HighlightReady:
-        if (event.success && source_panel_ != nullptr) {
-            try {
-                const auto lines = parse_highlight_json(event.payload);
-                if (!lines.empty()) {
-                    source_panel_->set_lines(std::move(lines));
-                    if (!uses_full_file_source()) {
-                        source_panel_->set_scroll_offset(0);
-                    } else if (source_scroll_view_ != nullptr) {
-                        source_scroll_view_->refresh_content();
-                    }
+    case SessionIoEventKind::SourceReady:
+        if (event.success && event.detail == pending_source_fetch_key_) {
+            cached_source_text_ = event.payload;
+            pending_source_fetch_key_.clear();
+            if (source_panel_ != nullptr) {
+                source_panel_->set_file_line_count(std::max(1, count_file_lines(cached_source_text_)));
+                const int line = source_panel_->cursor_line() > 0 ? source_panel_->cursor_line() : 1;
+                if (source_panel_->lines().empty()) {
+                    const int line_count =
+                        uses_full_file_source() ? source_panel_->file_line_count()
+                                                : std::max(1, source_viewport_height());
+                    const int first_line = uses_full_file_source() ? 1 : std::max(1, line - line_count / 2);
+                    apply_instant_source_viewport(first_line, line_count);
                 }
-            } catch (const std::exception&) {
-                break;
+                if (launch_complete_handled_) {
+                    maybe_request_source_highlight();
+                }
+                source_panel_->mark_dirty();
             }
-            cached_highlight_first_line_ = event.highlight_first_line;
-            cached_highlight_line_count_ = event.highlight_line_count;
+            if (source_scroll_view_ != nullptr) {
+                source_scroll_view_->refresh_content();
+                source_scroll_view_->mark_dirty();
+            }
+            sync_status_bar();
+        } else if (!event.success) {
+            pending_source_fetch_key_.clear();
+            model_.status_message = "Failed to load adapter source";
+            sync_status_bar();
+        }
+        break;
+    case SessionIoEventKind::HighlightReady:
+        if (event.success) {
+            apply_highlight_payload(event.highlight_first_line, event.highlight_line_count, event.payload);
         }
         highlight_request_first_line_ = -1;
         highlight_request_line_count_ = -1;
@@ -824,6 +1219,9 @@ void DebugApp::handle_session_event(const SessionIoEvent& event) {
     case SessionIoEventKind::CommandFinished:
         if (!event.success) {
             model_.status_message = event.detail.empty() ? "Command failed" : event.detail;
+            if (is_execution_control_command(event.payload.c_str()) && model_.session_state == "running") {
+                model_.session_state = "stopped";
+            }
             if (std::strcmp(event.payload.c_str(), "restart") == 0) {
                 restart_pending_ = false;
             }
@@ -841,21 +1239,52 @@ void DebugApp::handle_session_event(const SessionIoEvent& event) {
             }
         } else if (std::strcmp(event.payload.c_str(), "disconnect") == 0) {
             reclaim_terminal_for_ui();
+        } else if (std::strcmp(event.payload.c_str(), "play_pause") == 0 ||
+                   std::strcmp(event.payload.c_str(), "continue") == 0 ||
+                   std::strcmp(event.payload.c_str(), "pause") == 0) {
+            // SnapshotJson already refreshed session_state/status_message.
         } else {
+            const std::string status = command_status_message(event.payload.c_str());
             apply_execution_command_started(event.payload.c_str());
-            model_.status_message = command_status_message(event.payload.c_str());
+            model_.status_message = status;
         }
         break;
     case SessionIoEventKind::EvaluateFinished:
-        if (event.success) {
-            repl_history_lines_.push_back("> " + event.detail + " => " + event.payload);
-            if (repl_history_ != nullptr) {
-                repl_history_->set_items(repl_history_lines_);
-            }
-            model_.status_message = "REPL ok";
+        if (is_session_stopped()) {
+            resolve_watches_from_locals();
         } else {
-            model_.status_message = event.payload.empty() ? "REPL failed" : event.payload;
+            sync_watches_panel();
         }
+        break;
+    case SessionIoEventKind::SetVariableFinished:
+        if (event.success) {
+            if (!event.detail.empty() && !pending_variable_value_.empty()) {
+                patch_local_variable_value(event.detail, pending_variable_value_);
+            }
+            request_scope_variables_refresh();
+            resolve_watches_from_locals();
+            model_.status_message = event.detail.empty() ? "Variable updated" : "Updated " + event.detail;
+        } else {
+            model_.status_message =
+                event.payload.empty() ? "Failed to set variable" : "Set variable failed: " + event.payload;
+        }
+        editing_variable_name_.clear();
+        editing_variables_reference_ = 0;
+        pending_variable_value_.clear();
+        scope_input_draft_.clear();
+        scope_input_focused_ = false;
+        if (scopes_panel_ != nullptr) {
+            if (scopes_panel_->input_widget() != nullptr) {
+                scopes_panel_->input_widget()->set_value("");
+                scopes_panel_->input_widget()->set_focused(false);
+            }
+            if (scopes_panel_->list_widget() != nullptr) {
+                scopes_panel_->list_widget()->set_focused(true);
+            }
+        }
+        model_.focus = Focus::Scopes;
+        apply_focus();
+        sync_status_bar();
         break;
     case SessionIoEventKind::BreakpointsFinished:
         model_.status_message =
@@ -895,6 +1324,9 @@ void DebugApp::poll_session() {
         }
         if (needs_sync) {
             sync_ui_from_model();
+            if (watch_input_focused_) {
+                restore_watch_input_state();
+            }
         }
         return;
     }
@@ -905,17 +1337,19 @@ void DebugApp::poll_session() {
 
     if (model_.connection_state == ConnectionState::Connected) {
         maybe_request_scope_variables();
-        maybe_request_source_highlight();
     }
 
     sync_ui_from_model();
+    if (watch_input_focused_) {
+        restore_watch_input_state();
+    }
 }
 
 void DebugApp::sync_ui_from_model() {
     sync_controls_bar();
     sync_status_bar();
     if (scopes_panel_ != nullptr) {
-        const std::vector<std::string> scope_rows = build_scope_rows(model_);
+        std::vector<std::string> scope_rows = build_scope_rows(model_);
         const bool next_has_values = scope_rows_include_variables(scope_rows);
         const bool cached_has_values = scope_rows_include_variables(cached_scope_rows_);
         const bool keep_stale_values =
@@ -928,22 +1362,74 @@ void DebugApp::sync_ui_from_model() {
         }
     }
     if (stacks_panel_ != nullptr) {
-        std::vector<std::string> stack_lines;
-        stack_lines.reserve(model_.threads.size() + model_.stack_frames.size());
+        auto to_stack_frame_row = [this](const StackFrameInfo& frame) {
+            StackFrameRow row{};
+            row.name = frame.name;
+            row.line = static_cast<std::uint32_t>(std::max<std::int64_t>(0, frame.line));
+            row.path = frame.path;
+            row.source_reference = frame.source_reference;
+            if (row.path.empty() && frame.source_reference > 0) {
+                row.path = "dap:source:" + std::to_string(frame.source_reference);
+            } else if (row.path.empty() && !model_.execution_path.empty()) {
+                row.path = model_.execution_path;
+                row.source_reference = model_.execution_source_reference;
+            }
+            return row;
+        };
+
+        std::unordered_map<std::int64_t, std::vector<StackFrameRow>> stacks_by_thread;
+        for (const ThreadStackInfo& stack : model_.thread_stacks) {
+            std::vector<StackFrameRow> rows;
+            rows.reserve(stack.frames.size());
+            for (const StackFrameInfo& frame : stack.frames) {
+                rows.push_back(to_stack_frame_row(frame));
+            }
+            stacks_by_thread[stack.thread_id] = std::move(rows);
+        }
+        if (stacks_by_thread.empty() && !model_.stack_frames.empty() && model_.stopped_thread_id > 0) {
+            std::vector<StackFrameRow> rows;
+            rows.reserve(model_.stack_frames.size());
+            for (const StackFrameInfo& frame : model_.stack_frames) {
+                rows.push_back(to_stack_frame_row(frame));
+            }
+            stacks_by_thread[model_.stopped_thread_id] = std::move(rows);
+        }
+
+        const bool preserve_stopped_thread =
+            model_.stopped_thread_id > 0 &&
+            (is_session_stopped() || model_.session_state == "running");
+
+        std::vector<ThreadStackContent> thread_contents;
+        thread_contents.reserve(model_.threads.size());
         for (const ThreadInfo& thread : model_.threads) {
-            stack_lines.push_back("[" + std::to_string(thread.id) + "] " + thread.name);
+            ThreadStackContent content{};
+            content.id = thread.id;
+            content.name = thread.name.empty() ? ("Thread " + std::to_string(thread.id)) : thread.name;
+            content.stopped = preserve_stopped_thread && thread.id == model_.stopped_thread_id;
+            const auto frames_it = stacks_by_thread.find(thread.id);
+            if (frames_it != stacks_by_thread.end()) {
+                content.frames = frames_it->second;
+            }
+            thread_contents.push_back(std::move(content));
         }
-        for (std::size_t index = 0; index < model_.stack_frames.size(); ++index) {
-            const StackFrameInfo& frame = model_.stack_frames[index];
-            const std::string marker = index == 0 ? "\u{eaf0} " : "  ";
-            const std::string path = frame.path.empty() ? panel_title_from_path(model_.source_path) : frame.path;
-            stack_lines.push_back(marker + "#" + std::to_string(frame.id) + " " + frame.name + " @ " + path + ":" +
-                                  std::to_string(std::max<std::int64_t>(0, frame.line)));
+
+        if (thread_contents.empty() && !model_.stack_frames.empty()) {
+            ThreadStackContent content{};
+            content.id = model_.stopped_thread_id > 0 ? model_.stopped_thread_id : 1;
+            content.name = "MainThread";
+            content.stopped = preserve_stopped_thread || model_.stopped_thread_id <= 0;
+            for (const StackFrameInfo& frame : model_.stack_frames) {
+                content.frames.push_back(to_stack_frame_row(frame));
+            }
+            thread_contents.push_back(std::move(content));
         }
-        if (stack_lines != cached_stack_lines_) {
-            cached_stack_lines_ = stack_lines;
-            stacks_panel_->set_lines(std::move(stack_lines));
-        }
+
+        stacks_panel_->set_thread_stacks(std::move(thread_contents));
+    }
+    if (is_session_stopped() && !model_.watches.empty()) {
+        resolve_watches_from_locals();
+    } else {
+        sync_watches_panel();
     }
     if (source_section_ != nullptr) {
         const std::string title = panel_title_from_path(model_.source_path);
@@ -954,14 +1440,22 @@ void DebugApp::sync_ui_from_model() {
     }
     sync_breakpoints_to_panel();
     if (source_panel_ != nullptr) {
-        source_panel_->set_execution_line(static_cast<int>(model_.current_line));
-        if (model_.current_line > 0) {
-            source_panel_->set_cursor_line(static_cast<int>(model_.current_line));
-            if (snapshot_generation_ != cached_follow_generation_ ||
-                model_.current_line != cached_follow_line_) {
-                cached_follow_generation_ = snapshot_generation_;
-                cached_follow_line_ = model_.current_line;
-                source_panel_->ensure_cursor_visible();
+        const bool viewing_execution =
+            !model_.execution_path.empty() &&
+            viewing_same_source(model_.source_path, model_.source_reference, model_.execution_path,
+                                model_.execution_source_reference);
+        source_panel_->set_execution_line(viewing_execution && model_.execution_line > 0
+                                               ? static_cast<int>(model_.execution_line)
+                                               : 0);
+        if (viewing_execution && model_.execution_line > 0 &&
+            model_.execution_line != cached_follow_line_) {
+            cached_follow_line_ = model_.execution_line;
+            source_panel_->set_execution_line(static_cast<int>(model_.execution_line));
+            if (follow_execution_) {
+                scroll_source_to_line(static_cast<int>(model_.execution_line));
+                cached_highlight_first_line_ = -1;
+                highlight_request_first_line_ = -1;
+                maybe_request_source_highlight();
             }
         }
     }
@@ -1026,6 +1520,28 @@ void DebugApp::invalidate_scope_variables() {
     cached_scope_rows_.clear();
 }
 
+void DebugApp::request_scope_variables_refresh() {
+    scope_variables_signature_.clear();
+    scope_variables_fetch_signature_.clear();
+    scope_variables_fetch_pending_ = false;
+    maybe_request_scope_variables();
+}
+
+void DebugApp::patch_local_variable_value(const std::string& name, const std::string& value) {
+    for (auto& [_, variables] : model_.scope_variables) {
+        for (VariableInfo& variable : variables) {
+            if (variable.name == name) {
+                variable.value = value;
+            }
+        }
+    }
+
+    cached_scope_rows_ = build_scope_rows(model_);
+    if (scopes_panel_ != nullptr) {
+        scopes_panel_->set_scope_names(cached_scope_rows_);
+    }
+}
+
 std::string DebugApp::build_scope_variables_signature() const {
     std::string signature = std::to_string(snapshot_generation_);
     signature += '|';
@@ -1054,11 +1570,167 @@ void DebugApp::maybe_request_scope_variables() {
     std::vector<std::pair<std::int64_t, std::string>> scopes;
     scopes.reserve(model_.scopes.size());
     for (const ScopeInfo& scope : model_.scopes) {
+        if (!is_locals_scope_name(scope.name) || scope.variables_reference <= 0) {
+            continue;
+        }
         scopes.emplace_back(scope.variables_reference, scope.name);
+    }
+    if (scopes.empty()) {
+        for (const ScopeInfo& scope : model_.scopes) {
+            if (scope.variables_reference > 0) {
+                scopes.emplace_back(scope.variables_reference, scope.name);
+                break;
+            }
+        }
     }
 
     scope_variables_fetch_pending_ = true;
     session_io_->request_scope_variables(signature, scopes);
+}
+
+int DebugApp::highlight_line_count() const {
+    const int viewport = std::max(1, source_viewport_height());
+    return std::min(kMaxHighlightLinesPerRequest, viewport + kHighlightLineMargin);
+}
+
+void DebugApp::apply_highlight_payload(int first_line, int line_count, const std::string& json) {
+    if (source_panel_ == nullptr || json.empty()) {
+        return;
+    }
+
+    try {
+        if (uses_full_file_source() && source_scroll_view_ != nullptr && highlight_request_scroll_y_ >= 0 &&
+            source_scroll_view_->scroll_y() != highlight_request_scroll_y_) {
+            highlight_request_first_line_ = -1;
+            cached_highlight_first_line_ = -1;
+            maybe_request_source_highlight();
+            return;
+        }
+
+        const auto lines = parse_highlight_json(json);
+        if (lines.empty()) {
+            return;
+        }
+
+        if (uses_full_file_source()) {
+            ensure_source_plain_lines();
+            source_panel_->merge_highlighted_lines(lines);
+        } else {
+            source_panel_->set_lines(lines);
+            source_panel_->set_scroll_offset(0);
+            if (source_scroll_view_ != nullptr) {
+                source_scroll_view_->refresh_content();
+            }
+        }
+
+        source_panel_->mark_dirty();
+        if (source_scroll_view_ != nullptr) {
+            source_scroll_view_->mark_dirty();
+            cached_highlight_scroll_y_ = source_scroll_view_->scroll_y();
+        }
+        cached_highlight_first_line_ = first_line;
+        cached_highlight_line_count_ = line_count;
+        if (!divider_drag_active_) {
+            request_full_screen_refresh();
+        }
+    } catch (const std::exception&) {
+    }
+}
+
+void DebugApp::scroll_source_to_line(int line) {
+    if (source_panel_ == nullptr || line <= 0) {
+        return;
+    }
+
+    source_panel_->set_cursor_line(line);
+    if (source_scroll_view_ != nullptr) {
+        const int viewport = std::max(1, source_viewport_height());
+        const int scroll_y = std::max(0, line - viewport / 2 - 1);
+        source_scroll_view_->scroll_to(0, scroll_y);
+        source_scroll_view_->refresh_content();
+        cached_highlight_scroll_y_ = scroll_y;
+    } else {
+        source_panel_->ensure_cursor_visible();
+    }
+}
+
+void DebugApp::maybe_refresh_source_highlight_for_scroll() {
+    if (divider_drag_active_ || source_scroll_view_ == nullptr || !uses_full_file_source()) {
+        return;
+    }
+
+    const int scroll_y = source_scroll_view_->scroll_y();
+    if (scroll_y == cached_highlight_scroll_y_) {
+        return;
+    }
+
+    cached_highlight_scroll_y_ = scroll_y;
+    cached_highlight_first_line_ = -1;
+    highlight_request_first_line_ = -1;
+    highlight_request_scroll_y_ = -1;
+
+    if (source_panel_ != nullptr && !cached_source_text_.empty()) {
+        const int first_line = std::max(1, scroll_y + 1);
+        const int line_count = highlight_line_count();
+        source_panel_->reset_plain_spans_for_line_range(first_line, line_count, cached_source_text_);
+    }
+
+    maybe_request_source_highlight();
+}
+
+int DebugApp::highlight_first_line() const {
+    const int line_budget = highlight_line_count();
+    if (source_panel_ == nullptr) {
+        return 1;
+    }
+
+    if (uses_full_file_source()) {
+        if (source_scroll_view_ != nullptr) {
+            return std::max(1, source_scroll_view_->scroll_y() + 1);
+        }
+        const int cursor = std::max(1, source_panel_->cursor_line());
+        return std::max(1, cursor - line_budget / 2);
+    }
+
+    int first_line = std::max(1, source_panel_->cursor_line() - line_budget / 2);
+    const auto& visible_lines = source_panel_->lines();
+    if (!visible_lines.empty()) {
+        const int scroll = source_panel_->scroll_offset();
+        if (scroll >= 0 && scroll < static_cast<int>(visible_lines.size())) {
+            first_line = visible_lines[static_cast<std::size_t>(scroll)].line_number;
+        }
+    }
+    const int cursor_line = source_panel_->cursor_line();
+    if (cursor_line < first_line || cursor_line >= first_line + line_budget) {
+        first_line = std::max(1, cursor_line - line_budget / 2);
+    }
+    return first_line;
+}
+
+void DebugApp::ensure_source_plain_lines() {
+    if (source_panel_ == nullptr || cached_source_text_.empty() || !uses_full_file_source()) {
+        return;
+    }
+
+    const int file_lines = source_panel_->file_line_count();
+    if (static_cast<int>(source_panel_->lines().size()) >= file_lines) {
+        return;
+    }
+
+    const auto cached = source_plain_lines_cache_.find(cached_source_path_);
+    if (cached != source_plain_lines_cache_.end() &&
+        static_cast<int>(cached->second.size()) >= file_lines) {
+        source_panel_->set_lines(cached->second);
+        return;
+    }
+
+    const auto lines = build_plain_viewport_lines(cached_source_text_, 1, file_lines);
+    if (lines.empty()) {
+        return;
+    }
+
+    source_plain_lines_cache_[cached_source_path_] = lines;
+    source_panel_->set_lines(lines);
 }
 
 void DebugApp::maybe_request_source_highlight() {
@@ -1066,60 +1738,47 @@ void DebugApp::maybe_request_source_highlight() {
         return;
     }
 
-    if (model_.source_path.empty()) {
-        cached_source_path_.clear();
-        cached_source_text_.clear();
-        source_panel_->set_lines({});
+    const std::string source_key = source_cache_key(model_.source_path, model_.source_reference);
+    if (source_key.empty()) {
         return;
     }
 
-    if (model_.source_path != cached_source_path_) {
-        cached_source_path_ = model_.source_path;
-        cached_source_text_ = read_file_or_empty(cached_source_path_);
-        source_panel_->set_file_line_count(std::max(1, count_file_lines(cached_source_text_)));
-        cached_highlight_first_line_ = -1;
-        cached_highlight_line_count_ = -1;
-        highlight_request_first_line_ = -1;
-        highlight_request_line_count_ = -1;
+    if (source_key != cached_source_path_ || cached_source_reference_ != model_.source_reference) {
+        return;
     }
 
     if (cached_source_text_.empty()) {
-        source_panel_->set_lines({});
         return;
     }
 
-    const int viewport_height = source_viewport_height();
-    const int file_lines = source_panel_->file_line_count();
-    const bool full_file = uses_full_file_source();
-    const int line_count = full_file ? file_lines : std::max(1, viewport_height);
+    ensure_source_plain_lines();
 
-    int first_line = 1;
-    if (!full_file) {
-        first_line = std::max(1, source_panel_->cursor_line() - line_count / 2);
-        const auto& visible_lines = source_panel_->lines();
-        if (!visible_lines.empty()) {
-            const int scroll = source_panel_->scroll_offset();
-            if (scroll >= 0 && scroll < static_cast<int>(visible_lines.size())) {
-                first_line = visible_lines[static_cast<std::size_t>(scroll)].line_number;
-            }
-        }
-        const int cursor_line = source_panel_->cursor_line();
-        if (cursor_line < first_line || cursor_line >= first_line + line_count) {
-            first_line = std::max(1, cursor_line - line_count / 2);
-        }
-    }
+    const int line_count = highlight_line_count();
+    const int first_line = highlight_first_line();
+    const bool full_file = uses_full_file_source();
+
     if (first_line == cached_highlight_first_line_ && line_count == cached_highlight_line_count_ &&
-        cached_source_path_ == model_.source_path) {
+        cached_source_path_ == source_key) {
         return;
     }
     if (first_line == highlight_request_first_line_ && line_count == highlight_request_line_count_ &&
-        cached_source_path_ == model_.source_path) {
+        cached_source_path_ == source_key) {
         return;
     }
 
     highlight_request_first_line_ = first_line;
     highlight_request_line_count_ = line_count;
-    apply_instant_source_viewport(first_line, line_count);
+    highlight_request_scroll_y_ =
+        source_scroll_view_ != nullptr ? source_scroll_view_->scroll_y() : -1;
+
+    if (source_panel_->lines().empty()) {
+        if (!full_file) {
+            apply_instant_source_viewport(first_line, line_count);
+        } else {
+            ensure_source_plain_lines();
+        }
+    }
+
     session_io_->request_highlight(language_from_path(cached_source_path_), cached_source_text_, first_line,
                                     line_count);
 }
@@ -1147,16 +1806,22 @@ void DebugApp::sync_controls_bar() {
 
 std::string DebugApp::format_status_bar_text() const {
     const int max_cols = app_ != nullptr ? std::max(20, app_->terminal_size().width) : 80;
-    const std::string suffix = " | " + model_.connection_label() + " | focus: " + model_.focus_label();
+    std::string suffix = " | follow: " + std::string(follow_execution_ ? "on" : "off");
+    suffix += " | " + model_.connection_label() + " | focus: " + model_.focus_label();
     const int suffix_width = tuinator::text_display_width(suffix);
 
     std::string prefix = model_.status_message;
     if (!model_.source_path.empty()) {
         prefix += " | ";
-        prefix += model_.source_path;
+        prefix += panel_title_from_path(model_.source_path);
     }
-    if (model_.current_line > 0) {
-        prefix += " | ln " + std::to_string(model_.current_line);
+    if (source_panel_ != nullptr && source_panel_->cursor_line() > 0) {
+        prefix += " | ln " + std::to_string(source_panel_->cursor_line());
+    }
+    if (is_session_stopped() && !model_.execution_path.empty() &&
+        model_.execution_path != model_.source_path) {
+        prefix += " | stopped @ " + panel_title_from_path(model_.execution_path) + ":" +
+                  std::to_string(model_.execution_line);
     }
 
     if (tuinator::text_display_width(prefix) + suffix_width <= max_cols) {
@@ -1222,6 +1887,7 @@ void DebugApp::on_split_drag_ended() {
         status_bar_->set_text(status_text);
     }
     sync_ui_from_model();
+    maybe_request_source_highlight();
 }
 
 void DebugApp::persist_split_size_as_pct(ResizableSplitPane* split, std::uint16_t& pct_out, bool horizontal,
@@ -1286,19 +1952,86 @@ bool DebugApp::handle_layout_resize_key(const tuinator::KeyPress& key) {
     }
 
     if (key.character == '[') {
-        model_.layout.narrow_repl();
-        model_.status_message = "REPL " + std::to_string(model_.layout.repl_pct) + "%";
+        model_.layout.narrow_watches();
+        model_.status_message = "Watches " + std::to_string(model_.layout.watches_pct) + "%";
         build_ui();
         return true;
     }
     if (key.character == ']') {
-        model_.layout.widen_repl();
-        model_.status_message = "REPL " + std::to_string(model_.layout.repl_pct) + "%";
+        model_.layout.widen_watches();
+        model_.status_message = "Watches " + std::to_string(model_.layout.watches_pct) + "%";
         build_ui();
         return true;
     }
 
     return false;
+}
+
+bool DebugApp::is_watch_input_focused() const {
+    return watches_panel_ != nullptr && watches_panel_->input_widget() != nullptr &&
+           watches_panel_->input_widget()->is_focused();
+}
+
+bool DebugApp::is_breakpoint_input_focused() const {
+    return breakpoints_panel_ != nullptr && breakpoints_panel_->input_widget() != nullptr &&
+           breakpoints_panel_->input_widget()->is_focused();
+}
+
+bool DebugApp::is_scope_input_focused() const {
+    return scopes_panel_ != nullptr && scopes_panel_->input_widget() != nullptr &&
+           scopes_panel_->input_widget()->is_focused();
+}
+
+bool DebugApp::should_block_app_quit_key(const tuinator::KeyPress& key) const {
+    if (context_menu_open()) {
+        return true;
+    }
+    if (is_watch_input_focused() || is_breakpoint_input_focused() || is_scope_input_focused()) {
+        return true;
+    }
+    if (model_.focus == Focus::Watches) {
+        return key.character == 'q' || key.character == 'Q' || key.key == tuinator::Key::Escape;
+    }
+    return false;
+}
+
+void DebugApp::blur_watch_input() {
+    finish_watch_input();
+}
+
+void DebugApp::finish_watch_input() {
+    watch_input_draft_.clear();
+    watch_input_focused_ = false;
+    if (watches_panel_ == nullptr) {
+        return;
+    }
+    if (watches_panel_->input_widget() != nullptr) {
+        watches_panel_->input_widget()->set_value("");
+        watches_panel_->input_widget()->set_focused(false);
+    }
+    if (watches_panel_->list_widget() != nullptr) {
+        watches_panel_->list_widget()->set_focused(true);
+    }
+    model_.focus = Focus::Watches;
+    apply_focus();
+}
+
+void DebugApp::blur_scope_input() {
+    editing_variable_name_.clear();
+    editing_variables_reference_ = 0;
+    scope_input_draft_.clear();
+    scope_input_focused_ = false;
+    if (scopes_panel_ == nullptr) {
+        return;
+    }
+    if (scopes_panel_->input_widget() != nullptr) {
+        scopes_panel_->input_widget()->set_value("");
+        scopes_panel_->input_widget()->set_focused(false);
+    }
+    if (scopes_panel_->list_widget() != nullptr) {
+        scopes_panel_->list_widget()->set_focused(true);
+    }
+    model_.focus = Focus::Scopes;
 }
 
 bool DebugApp::handle_global_key(const tuinator::KeyPress& key) {
@@ -1309,6 +2042,13 @@ bool DebugApp::handle_global_key(const tuinator::KeyPress& key) {
         return true;
     }
 
+    if (is_watch_input_focused() || is_breakpoint_input_focused() || is_scope_input_focused()) {
+        if (key.alt && handle_layout_resize_key(key)) {
+            return true;
+        }
+        return false;
+    }
+
     if (handle_layout_resize_key(key)) {
         return true;
     }
@@ -1317,7 +2057,7 @@ bool DebugApp::handle_global_key(const tuinator::KeyPress& key) {
         return false;
     }
 
-    if (model_.focus != Focus::Repl && key.character >= '1' && key.character <= '8') {
+    if (key.character >= '1' && key.character <= '8') {
         static constexpr const char* kControlOps[] = {"play_pause", "step_into", "step_over", "step_out",
                                                       "step_back", "restart", "terminate", "disconnect"};
         send_command(kControlOps[key.character - '1']);
@@ -1329,6 +2069,63 @@ bool DebugApp::handle_global_key(const tuinator::KeyPress& key) {
         return true;
     }
 
+    if (key.character == 'f') {
+        follow_execution_ = !follow_execution_;
+        if (follow_execution_) {
+            maybe_follow_execution();
+        }
+        model_.status_message = follow_execution_ ? "Follow execution on" : "Follow execution off";
+        sync_status_bar();
+        return true;
+    }
+
+    if (is_breakpoint_input_focused() || is_scope_input_focused()) {
+        if (key.alt && handle_layout_resize_key(key)) {
+            return true;
+        }
+        return false;
+    }
+
+    if ((key.character == 'm' || key.character == 'M') && !key.ctrl && !key.alt) {
+        if (model_.focus == Focus::Source && source_panel_ != nullptr) {
+            const std::string path = effective_source_path();
+            const int line = source_panel_->cursor_line();
+            if (!path.empty() && line > 0) {
+                const tuinator::Rect panel_bounds = source_panel_->bounds();
+                tuinator::Point anchor{panel_bounds.x + 2, panel_bounds.y + 2};
+                std::optional<std::string> seed;
+                if (cached_source_path_ != path) {
+                    cached_source_path_ = path;
+                    cached_source_text_ = read_file_or_empty(path);
+                }
+                const std::string line_text =
+                    cached_source_text_.empty() ? highlighted_line_text(source_panel_, line)
+                                                : line_text_at(cached_source_text_, line);
+                seed = identifier_at_line_column(line_text, 0);
+                show_breakpoint_context_menu(path, line, anchor, seed);
+                return true;
+            }
+        } else if (model_.focus == Focus::Breakpoints && breakpoints_panel_ != nullptr) {
+            if (const BreakpointRow* row = breakpoints_panel_->selected_row()) {
+                tuinator::Point anchor{0, 0};
+                if (breakpoints_panel_->list_widget() != nullptr) {
+                    const tuinator::Rect list_bounds = breakpoints_panel_->list_widget()->bounds();
+                    anchor = {list_bounds.x + 2, list_bounds.y + 2};
+                }
+                std::optional<std::string> seed;
+                const int line_width = tuinator::text_display_width(row->source_text);
+                for (int column = 0; column < line_width; ++column) {
+                    seed = identifier_at_line_column(row->source_text, column);
+                    if (seed.has_value()) {
+                        break;
+                    }
+                }
+                show_breakpoint_context_menu(row->path, row->line, anchor, seed);
+                return true;
+            }
+        }
+    }
+
     if ((key.character == 'b' || key.character == ' ') && !key.ctrl && !key.alt && source_panel_ != nullptr &&
         model_.focus == Focus::Source) {
         if (!source_panel_->is_focused()) {
@@ -1336,6 +2133,51 @@ bool DebugApp::handle_global_key(const tuinator::KeyPress& key) {
         }
         toggle_breakpoint();
         return true;
+    }
+
+    if (key.character == 'c' && !key.ctrl && !key.alt) {
+        if (model_.focus == Focus::Source && source_panel_ != nullptr) {
+            const std::string path = effective_source_path();
+            const int line = source_panel_->cursor_line();
+            const auto file_it = breakpoints_by_path_.find(path);
+            if (file_it != breakpoints_by_path_.end() && file_it->second.contains(line)) {
+                begin_edit_breakpoint_condition(path, line);
+                return true;
+            }
+        } else if (model_.focus == Focus::Breakpoints && breakpoints_panel_ != nullptr) {
+            if (const BreakpointRow* row = breakpoints_panel_->selected_row()) {
+                begin_edit_breakpoint_condition(row->path, row->line);
+                return true;
+            }
+        }
+    }
+
+    if (model_.focus == Focus::Breakpoints && breakpoints_panel_ != nullptr) {
+        if (const BreakpointRow* row = breakpoints_panel_->selected_row()) {
+            if (key.character == 'd') {
+                remove_breakpoint_at(row->path, row->line);
+                return true;
+            }
+            if (key.character == 't' || key.character == ' ') {
+                toggle_breakpoint_at(row->path, row->line);
+                return true;
+            }
+        }
+    }
+
+    if (model_.focus == Focus::Watches && watches_panel_ != nullptr) {
+        if (key.character == 'd') {
+            const int index = watches_panel_->selected_index();
+            if (index >= 0) {
+                remove_watch_at(static_cast<std::size_t>(index));
+            }
+            return true;
+        }
+        if (key.character == 'w' || key.key == tuinator::Key::Enter) {
+            watch_input_focused_ = true;
+            watches_panel_->focus_input();
+            return true;
+        }
     }
 
     if (!has_active_session()) {
@@ -1371,10 +2213,14 @@ void DebugApp::apply_execution_command_started(const char* op) {
         if (is_session_stopped()) {
             model_.session_state = "running";
             model_.stop_reason.clear();
-            scope_variables_fetch_signature_.clear();
         } else if (std::strcmp(op, "play_pause") == 0) {
             model_.status_message = "Pausing…";
         }
+        return;
+    }
+
+    if (std::strcmp(op, "pause") == 0) {
+        model_.status_message = "Pausing…";
         return;
     }
 
@@ -1382,7 +2228,6 @@ void DebugApp::apply_execution_command_started(const char* op) {
         std::strcmp(op, "step_in") == 0 || std::strcmp(op, "step_out") == 0 || std::strcmp(op, "step_back") == 0) {
         model_.session_state = "running";
         model_.stop_reason.clear();
-        scope_variables_fetch_signature_.clear();
         return;
     }
 
@@ -1420,6 +2265,9 @@ void DebugApp::send_command(const char* op) {
         mark_all_panels_dirty();
     } else if (std::strcmp(op, "terminate") == 0 || std::strcmp(op, "disconnect") == 0) {
         apply_execution_command_started(op);
+    } else if (std::strcmp(op, "continue") == 0 || std::strcmp(op, "play_pause") == 0 ||
+               std::strcmp(op, "pause") == 0) {
+        apply_execution_command_started(op);
     }
 
     model_.status_message = command_status_message(op);
@@ -1436,9 +2284,12 @@ void DebugApp::cycle_focus_next() {
         model_.focus = Focus::Stacks;
         break;
     case Focus::Stacks:
-        model_.focus = Focus::Repl;
+        model_.focus = Focus::Breakpoints;
         break;
-    case Focus::Repl:
+    case Focus::Breakpoints:
+        model_.focus = Focus::Watches;
+        break;
+    case Focus::Watches:
         model_.focus = Focus::Console;
         break;
     default:
@@ -1451,21 +2302,49 @@ void DebugApp::cycle_focus_next() {
 }
 
 void DebugApp::apply_focus() {
+    if (model_.focus != Focus::Watches) {
+        watch_input_focused_ = false;
+    }
+    if (model_.focus != Focus::Breakpoints) {
+        breakpoint_input_focused_ = false;
+    }
+    if (model_.focus != Focus::Scopes) {
+        scope_input_focused_ = false;
+        if (editing_variable_name_.empty()) {
+            scope_input_draft_.clear();
+        }
+    }
+
     std::vector<tuinator::Widget*> widgets;
     if (source_panel_ != nullptr) {
         widgets.push_back(source_panel_);
     }
-    if (scopes_panel_ != nullptr && scopes_panel_->list_widget() != nullptr) {
-        widgets.push_back(scopes_panel_->list_widget());
+    if (scopes_panel_ != nullptr) {
+        if (scopes_panel_->list_widget() != nullptr) {
+            widgets.push_back(scopes_panel_->list_widget());
+        }
+        if (scopes_panel_->input_widget() != nullptr) {
+            widgets.push_back(scopes_panel_->input_widget());
+        }
     }
     if (stacks_panel_ != nullptr && stacks_panel_->list_widget() != nullptr) {
         widgets.push_back(stacks_panel_->list_widget());
     }
-    if (repl_input_ != nullptr) {
-        widgets.push_back(repl_input_);
+    if (breakpoints_panel_ != nullptr) {
+        if (breakpoints_panel_->list_widget() != nullptr) {
+            widgets.push_back(breakpoints_panel_->list_widget());
+        }
+        if (breakpoints_panel_->input_widget() != nullptr) {
+            widgets.push_back(breakpoints_panel_->input_widget());
+        }
     }
-    if (repl_history_ != nullptr) {
-        widgets.push_back(repl_history_);
+    if (watches_panel_ != nullptr) {
+        if (watches_panel_->list_widget() != nullptr) {
+            widgets.push_back(watches_panel_->list_widget());
+        }
+        if (watches_panel_->input_widget() != nullptr) {
+            widgets.push_back(watches_panel_->input_widget());
+        }
     }
     if (console_panel_ != nullptr) {
         widgets.push_back(console_panel_);
@@ -1481,16 +2360,28 @@ void DebugApp::apply_focus() {
         target = source_panel_;
         break;
     case Focus::Scopes:
-        target = scopes_panel_ != nullptr ? scopes_panel_->list_widget() : nullptr;
+        if (scope_input_focused_ && scopes_panel_ != nullptr && scopes_panel_->input_widget() != nullptr) {
+            target = scopes_panel_->input_widget();
+        } else {
+            target = scopes_panel_ != nullptr ? scopes_panel_->list_widget() : nullptr;
+        }
         break;
     case Focus::Stacks:
         target = stacks_panel_ != nullptr ? stacks_panel_->list_widget() : nullptr;
         break;
-    case Focus::Repl:
-        if (repl_input_ != nullptr) {
-            target = repl_input_;
+    case Focus::Breakpoints:
+        if (breakpoint_input_focused_ && breakpoints_panel_ != nullptr &&
+            breakpoints_panel_->input_widget() != nullptr) {
+            target = breakpoints_panel_->input_widget();
         } else {
-            target = repl_history_;
+            target = breakpoints_panel_ != nullptr ? breakpoints_panel_->list_widget() : nullptr;
+        }
+        break;
+    case Focus::Watches:
+        if (watch_input_focused_ && watches_panel_ != nullptr && watches_panel_->input_widget() != nullptr) {
+            target = watches_panel_->input_widget();
+        } else {
+            target = watches_panel_ != nullptr ? watches_panel_->list_widget() : nullptr;
         }
         break;
     case Focus::Console:
@@ -1510,13 +2401,30 @@ void DebugApp::apply_focus() {
 void DebugApp::sync_focus_from_ui() {
     Focus detected = model_.focus;
 
-    if (repl_input_ != nullptr && repl_input_->is_focused()) {
-        detected = Focus::Repl;
-    } else if (repl_history_ != nullptr && repl_history_->is_focused()) {
-        detected = Focus::Repl;
+    if (breakpoints_panel_ != nullptr && breakpoints_panel_->input_widget() != nullptr &&
+        breakpoints_panel_->input_widget()->is_focused()) {
+        detected = Focus::Breakpoints;
+        breakpoint_input_focused_ = true;
+    } else if (breakpoints_panel_ != nullptr && breakpoints_panel_->list_widget() != nullptr &&
+               breakpoints_panel_->list_widget()->is_focused()) {
+        detected = Focus::Breakpoints;
+        breakpoint_input_focused_ = false;
+    } else if (watches_panel_ != nullptr && watches_panel_->input_widget() != nullptr &&
+        watches_panel_->input_widget()->is_focused()) {
+        detected = Focus::Watches;
+        watch_input_focused_ = true;
+    } else if (watches_panel_ != nullptr && watches_panel_->list_widget() != nullptr &&
+               watches_panel_->list_widget()->is_focused()) {
+        detected = Focus::Watches;
+        watch_input_focused_ = false;
+    } else if (scopes_panel_ != nullptr && scopes_panel_->input_widget() != nullptr &&
+               scopes_panel_->input_widget()->is_focused()) {
+        detected = Focus::Scopes;
+        scope_input_focused_ = true;
     } else if (scopes_panel_ != nullptr && scopes_panel_->list_widget() != nullptr &&
                scopes_panel_->list_widget()->is_focused()) {
         detected = Focus::Scopes;
+        scope_input_focused_ = false;
     } else if (stacks_panel_ != nullptr && stacks_panel_->list_widget() != nullptr &&
                stacks_panel_->list_widget()->is_focused()) {
         detected = Focus::Stacks;
@@ -1544,18 +2452,33 @@ void DebugApp::mark_all_panels_dirty() {
         source_scroll_view_->refresh_content();
         source_scroll_view_->mark_dirty();
     }
-    if (scopes_panel_ != nullptr && scopes_panel_->list_widget() != nullptr) {
-        scopes_panel_->list_widget()->mark_dirty();
+    if (scopes_panel_ != nullptr) {
+        if (scopes_panel_->list_widget() != nullptr) {
+            scopes_panel_->list_widget()->mark_dirty();
+        }
+        if (scopes_panel_->input_widget() != nullptr) {
+            scopes_panel_->input_widget()->mark_dirty();
+        }
     }
     refresh_scroll_views();
     if (stacks_panel_ != nullptr && stacks_panel_->list_widget() != nullptr) {
         stacks_panel_->list_widget()->mark_dirty();
     }
-    if (repl_input_ != nullptr) {
-        repl_input_->mark_dirty();
+    if (breakpoints_panel_ != nullptr) {
+        if (breakpoints_panel_->list_widget() != nullptr) {
+            breakpoints_panel_->list_widget()->mark_dirty();
+        }
+        if (breakpoints_panel_->input_widget() != nullptr) {
+            breakpoints_panel_->input_widget()->mark_dirty();
+        }
     }
-    if (repl_history_ != nullptr) {
-        repl_history_->mark_dirty();
+    if (watches_panel_ != nullptr) {
+        if (watches_panel_->list_widget() != nullptr) {
+            watches_panel_->list_widget()->mark_dirty();
+        }
+        if (watches_panel_->input_widget() != nullptr) {
+            watches_panel_->input_widget()->mark_dirty();
+        }
     }
     if (console_panel_ != nullptr) {
         console_panel_->mark_dirty();
@@ -1568,6 +2491,122 @@ void DebugApp::mark_all_panels_dirty() {
     }
 }
 
+void DebugApp::open_source_file(const std::string& path, int line, bool pin, std::int64_t source_reference) {
+    const std::string cache_key = source_cache_key(path, source_reference);
+    if (cache_key.empty()) {
+        return;
+    }
+    if (pin) {
+        follow_execution_ = false;
+    }
+
+    const std::string display_path = path.empty() && source_reference > 0 ? cache_key : path;
+    const bool same_view =
+        viewing_same_source(model_.source_path, model_.source_reference, display_path, source_reference) &&
+        source_panel_ != nullptr && line > 0 && source_panel_->cursor_line() == line &&
+        !source_panel_->lines().empty();
+    if (same_view) {
+        return;
+    }
+
+    model_.source_path = display_path;
+    model_.source_reference = source_reference;
+
+    const bool cache_hit =
+        cached_source_path_ == cache_key && cached_source_reference_ == source_reference;
+    if (!cache_hit) {
+        cached_source_path_ = cache_key;
+        cached_source_reference_ = source_reference;
+        cached_source_text_ = path.empty() ? std::string{} : read_file_or_empty(path);
+        cached_highlight_first_line_ = -1;
+        cached_highlight_line_count_ = -1;
+        highlight_request_first_line_ = -1;
+        highlight_request_line_count_ = -1;
+        if (source_panel_ != nullptr) {
+            source_panel_->set_file_line_count(std::max(1, count_file_lines(cached_source_text_)));
+            source_panel_->set_lines({});
+        }
+        cached_highlight_scroll_y_ = -1;
+    }
+
+    if (cached_source_text_.empty() && source_reference > 0 && session_io_ != nullptr &&
+        session_io_->is_active()) {
+        pending_source_fetch_key_ = cache_key;
+        session_io_->request_source_fetch(source_reference, cache_key);
+    }
+
+    if (source_panel_ != nullptr && line > 0) {
+        source_panel_->set_cursor_line(line);
+    }
+
+    if (source_section_ != nullptr) {
+        const std::string title = panel_title_from_path(model_.source_path);
+        if (title != cached_source_title_) {
+            cached_source_title_ = title;
+            source_section_->set_title(title);
+        }
+    }
+
+    sync_breakpoints_to_panel();
+
+    if (!cached_source_text_.empty() && source_panel_ != nullptr && source_panel_->lines().empty()) {
+        if (uses_full_file_source()) {
+            ensure_source_plain_lines();
+        } else {
+            const int line_count = std::max(1, source_viewport_height());
+            const int first_line = std::max(1, line - line_count / 2);
+            apply_instant_source_viewport(first_line, line_count);
+        }
+    }
+
+    if (line > 0) {
+        scroll_source_to_line(line);
+    }
+
+    cached_highlight_first_line_ = -1;
+    highlight_request_first_line_ = -1;
+    maybe_request_source_highlight();
+
+    if (source_panel_ != nullptr) {
+        source_panel_->mark_dirty();
+    }
+    if (source_scroll_view_ != nullptr) {
+        source_scroll_view_->mark_dirty();
+    }
+    sync_status_bar();
+}
+
+void DebugApp::maybe_follow_execution() {
+    if (!follow_execution_ || model_.execution_path.empty()) {
+        return;
+    }
+
+    const int line = model_.execution_line > 0 ? static_cast<int>(model_.execution_line) : 1;
+    std::string path = model_.execution_path;
+    if (path.rfind("dap:source:", 0) == 0) {
+        path.clear();
+    }
+    open_source_file(path, line, false, model_.execution_source_reference);
+}
+
+void DebugApp::sync_breakpoints_list_panel() {
+    if (breakpoints_panel_ == nullptr) {
+        return;
+    }
+
+    std::vector<BreakpointRow> rows;
+    for (const auto& [path, breakpoints] : breakpoints_by_path_) {
+        const std::string normalized = normalize_source_path(path);
+        const std::string file_text = read_file_or_empty(normalized);
+        for (const auto& [bp_line, info] : breakpoints) {
+            rows.push_back(BreakpointRow{normalized, bp_line, trimmed_line_text_at(file_text, bp_line),
+                                         info.condition});
+        }
+    }
+
+    breakpoints_panel_->set_breakpoints(std::move(rows));
+}
+
 void DebugApp::toggle_breakpoint() {
     if (source_panel_ == nullptr) {
         return;
@@ -1575,11 +2614,55 @@ void DebugApp::toggle_breakpoint() {
     toggle_breakpoint_at_line(source_panel_->cursor_line());
 }
 
-std::string DebugApp::effective_source_path() const {
-    if (!model_.source_path.empty()) {
-        return model_.source_path;
+std::string DebugApp::normalize_source_path(const std::string& path) const {
+    if (path.empty() || path.rfind("dap:source:", 0) == 0) {
+        return path;
     }
-    return program_path_;
+
+    try {
+        std::filesystem::path resolved(path);
+        if (resolved.is_relative()) {
+            resolved = std::filesystem::absolute(resolved);
+        }
+        return std::filesystem::weakly_canonical(resolved).string();
+    } catch (...) {
+        return path;
+    }
+}
+
+void DebugApp::normalize_breakpoint_path_keys() {
+    BreakpointsByPath normalized;
+    for (auto& [path, breakpoints] : breakpoints_by_path_) {
+        auto& bucket = normalized[normalize_source_path(path)];
+        for (auto& [line, info] : breakpoints) {
+            bucket[line] = info;
+        }
+    }
+    breakpoints_by_path_ = std::move(normalized);
+}
+
+std::string DebugApp::effective_source_path() const {
+    if (!model_.source_path.empty() && model_.source_path.rfind("dap:source:", 0) != 0) {
+        return normalize_source_path(model_.source_path);
+    }
+    return normalize_source_path(program_path_);
+}
+
+void DebugApp::flush_breakpoints_to_session() {
+    if (session_io_ == nullptr || !session_io_->is_active() || model_.session_state == "disconnected") {
+        return;
+    }
+
+    std::unordered_set<std::string> pushed;
+    for (const auto& [path, breakpoints] : breakpoints_by_path_) {
+        (void)breakpoints;
+        const std::string normalized = normalize_source_path(path);
+        if (pushed.contains(normalized)) {
+            continue;
+        }
+        pushed.insert(normalized);
+        push_breakpoints_to_session(normalized);
+    }
 }
 
 void DebugApp::sync_breakpoints_to_panel() {
@@ -1592,34 +2675,116 @@ void DebugApp::sync_breakpoints_to_panel() {
         return;
     }
 
+    std::unordered_map<int, std::string> breakpoints;
     const auto it = breakpoints_by_path_.find(path);
     if (it != breakpoints_by_path_.end()) {
-        if (source_panel_->breakpoint_lines() != it->second) {
-            source_panel_->set_breakpoint_lines(it->second);
+        for (const auto& [line, info] : it->second) {
+            breakpoints[line] = info.condition;
         }
+    }
+    if (source_panel_->breakpoints() != breakpoints) {
+        source_panel_->set_breakpoints(std::move(breakpoints));
     }
 }
 
 void DebugApp::push_breakpoints_to_session(const std::string& path) {
-    if (path.empty() || session_io_ == nullptr || !session_io_->is_active() ||
+    const std::string normalized = normalize_source_path(path);
+    if (normalized.empty() || session_io_ == nullptr || !session_io_->is_active() ||
         model_.session_state == "disconnected") {
         return;
     }
 
-    const auto it = breakpoints_by_path_.find(path);
+    const auto it = breakpoints_by_path_.find(normalized);
     std::string json = "[";
     bool first = true;
     if (it != breakpoints_by_path_.end()) {
-        for (int bp_line : it->second) {
+        std::vector<int> lines;
+        lines.reserve(it->second.size());
+        for (const auto& [line, _] : it->second) {
+            lines.push_back(line);
+        }
+        std::sort(lines.begin(), lines.end());
+        for (int bp_line : lines) {
+            const BreakpointInfo& info = it->second.at(bp_line);
             if (!first) {
                 json += ',';
             }
-            json += std::to_string(bp_line);
+            json += "{\"line\":" + std::to_string(bp_line);
+            if (!info.condition.empty()) {
+                json += ",\"condition\":\"" + escape_json_string(info.condition) + "\"";
+            }
+            json += '}';
             first = false;
         }
     }
     json += ']';
-    session_io_->post_set_breakpoints(path, json);
+    session_io_->post_set_breakpoints(normalized, json);
+}
+
+void DebugApp::remove_breakpoint_at(const std::string& path, int line) {
+    const std::string normalized = normalize_source_path(path);
+    if (normalized.empty() || line <= 0) {
+        return;
+    }
+
+    auto it = breakpoints_by_path_.find(normalized);
+    if (it == breakpoints_by_path_.end() || !it->second.contains(line)) {
+        return;
+    }
+
+    it->second.erase(line);
+    if (it->second.empty()) {
+        breakpoints_by_path_.erase(it);
+    }
+    model_.status_message =
+        "Removed breakpoint at " + panel_title_from_path(normalized) + ":" + std::to_string(line);
+
+    if (source_panel_ != nullptr && effective_source_path() == normalized) {
+        std::unordered_map<int, std::string> breakpoints;
+        const auto current = breakpoints_by_path_.find(normalized);
+        if (current != breakpoints_by_path_.end()) {
+            for (const auto& [bp_line, info] : current->second) {
+                breakpoints[bp_line] = info.condition;
+            }
+        }
+        source_panel_->set_breakpoints(std::move(breakpoints));
+    }
+
+    if (session_io_ != nullptr && session_io_->is_active()) {
+        push_breakpoints_to_session(normalized);
+    }
+    sync_breakpoints_to_panel();
+    sync_breakpoints_list_panel();
+    sync_status_bar();
+    mark_all_panels_dirty();
+}
+
+void DebugApp::toggle_breakpoint_at(const std::string& path, int line) {
+    const std::string normalized = normalize_source_path(path);
+    if (normalized.empty() || line <= 0) {
+        return;
+    }
+
+    const auto it = breakpoints_by_path_.find(normalized);
+    if (it != breakpoints_by_path_.end() && it->second.contains(line)) {
+        remove_breakpoint_at(path, line);
+        return;
+    }
+
+    if (normalized == effective_source_path()) {
+        toggle_breakpoint_at_line(line);
+        return;
+    }
+
+    breakpoints_by_path_[normalized][line] = BreakpointInfo{line, ""};
+    model_.status_message =
+        "Set breakpoint at " + panel_title_from_path(normalized) + ":" + std::to_string(line);
+    if (session_io_ != nullptr && session_io_->is_active()) {
+        push_breakpoints_to_session(normalized);
+    }
+    sync_breakpoints_list_panel();
+    sync_status_bar();
+    mark_all_panels_dirty();
 }
 
 void DebugApp::toggle_breakpoint_at_line(int line) {
@@ -1636,20 +2801,25 @@ void DebugApp::toggle_breakpoint_at_line(int line) {
 
     source_panel_->set_cursor_line(line);
 
-    std::unordered_set<int>& lines = breakpoints_by_path_[path];
-    if (lines.contains(line)) {
-        lines.erase(line);
-        model_.status_message = "Removed breakpoint at line " + std::to_string(line);
-    } else {
-        if (!is_breakpointable_line(source_panel_, cached_source_text_, line)) {
-            model_.status_message = "Cannot set breakpoint on an empty line";
-            sync_status_bar();
-            return;
-        }
-        lines.insert(line);
-        model_.status_message = "Set breakpoint at line " + std::to_string(line);
+    auto& breakpoints = breakpoints_by_path_[path];
+    if (breakpoints.contains(line)) {
+        remove_breakpoint_at(path, line);
+        return;
     }
-    source_panel_->set_breakpoint_lines(lines);
+
+    if (!is_breakpointable_line(source_panel_, cached_source_text_, line)) {
+        model_.status_message = "Cannot set breakpoint on an empty line";
+        sync_status_bar();
+        return;
+    }
+
+    breakpoints[line] = BreakpointInfo{line, ""};
+    model_.status_message = "Set breakpoint at line " + std::to_string(line);
+    std::unordered_map<int, std::string> source_breakpoints;
+    for (const auto& [bp_line, info] : breakpoints) {
+        source_breakpoints[bp_line] = info.condition;
+    }
+    source_panel_->set_breakpoints(std::move(source_breakpoints));
 
     if (source_panel_->lines().empty() && !cached_source_text_.empty()) {
         const int line_count =
@@ -1658,30 +2828,348 @@ void DebugApp::toggle_breakpoint_at_line(int line) {
         apply_instant_source_viewport(first_line, line_count);
     }
 
-    push_breakpoints_to_session(path);
-    sync_breakpoints_to_panel();
+    if (session_io_ != nullptr && session_io_->is_active()) {
+        push_breakpoints_to_session(path);
+    }
+    sync_breakpoints_list_panel();
     sync_status_bar();
     mark_all_panels_dirty();
 }
 
-void DebugApp::submit_repl(const std::string& expression) {
-    if (expression.empty()) {
+void DebugApp::set_breakpoint_condition(const std::string& path, int line, const std::string& condition) {
+    const std::string normalized = normalize_source_path(path);
+    if (normalized.empty() || line <= 0) {
         return;
     }
 
-    if (!session_io_->is_active() || model_.stack_frames.empty()) {
-        model_.status_message = "REPL unavailable";
-        sync_ui_from_model();
+    auto it = breakpoints_by_path_.find(normalized);
+    if (it == breakpoints_by_path_.end() || !it->second.contains(line)) {
         return;
     }
 
-    const std::int64_t frame_id = model_.stack_frames.front().id;
-    model_.status_message = "Evaluating…";
-    session_io_->post_evaluate(expression, frame_id, "repl");
-    if (repl_input_ != nullptr) {
-        repl_input_->set_value("");
+    const std::string trimmed = trim_breakpoint_condition(condition);
+    it->second[line].condition = trimmed;
+    if (trimmed.empty()) {
+        model_.status_message =
+            "Cleared condition at " + panel_title_from_path(normalized) + ":" + std::to_string(line);
+    } else {
+        model_.status_message = "Condition at " + panel_title_from_path(normalized) + ":" +
+                                std::to_string(line) + " = " + trimmed;
     }
-    sync_ui_from_model();
+
+    sync_breakpoints_to_panel();
+    sync_breakpoints_list_panel();
+    if (session_io_ != nullptr && session_io_->is_active()) {
+        push_breakpoints_to_session(normalized);
+    }
+    sync_status_bar();
+    mark_all_panels_dirty();
+}
+
+void DebugApp::begin_edit_breakpoint_condition(const std::string& path, int line) {
+    const std::string normalized = normalize_source_path(path);
+    if (normalized.empty() || line <= 0) {
+        return;
+    }
+
+    const auto it = breakpoints_by_path_.find(normalized);
+    if (it == breakpoints_by_path_.end() || !it->second.contains(line)) {
+        model_.status_message = "No breakpoint on this line";
+        sync_status_bar();
+        return;
+    }
+
+    editing_breakpoint_path_ = normalized;
+    editing_breakpoint_line_ = line;
+    breakpoint_input_draft_ = it->second.at(line).condition;
+    breakpoint_input_focused_ = true;
+    model_.focus = Focus::Breakpoints;
+
+    if (breakpoints_panel_ != nullptr) {
+        breakpoints_panel_->set_input_value(breakpoint_input_draft_);
+        breakpoints_panel_->focus_input();
+    }
+
+    model_.status_message =
+        "Condition for " + panel_title_from_path(normalized) + ":" + std::to_string(line);
+    apply_focus();
+    sync_status_bar();
+}
+
+void DebugApp::submit_breakpoint_condition(const std::string& condition) {
+    if (editing_breakpoint_path_.empty() || editing_breakpoint_line_ <= 0) {
+        return;
+    }
+
+    set_breakpoint_condition(editing_breakpoint_path_, editing_breakpoint_line_, condition);
+    breakpoint_input_draft_.clear();
+    breakpoint_input_focused_ = false;
+    editing_breakpoint_path_.clear();
+    editing_breakpoint_line_ = 0;
+
+    if (breakpoints_panel_ != nullptr) {
+        breakpoints_panel_->set_input_value("");
+        if (breakpoints_panel_->list_widget() != nullptr) {
+            breakpoints_panel_->list_widget()->set_focused(true);
+        }
+        if (breakpoints_panel_->input_widget() != nullptr) {
+            breakpoints_panel_->input_widget()->set_focused(false);
+        }
+    }
+}
+
+void DebugApp::capture_breakpoint_input_state() {
+    if (breakpoints_panel_ == nullptr) {
+        return;
+    }
+    breakpoint_input_draft_ = breakpoints_panel_->input_value();
+    if (breakpoints_panel_->input_widget() != nullptr && breakpoints_panel_->input_widget()->is_focused()) {
+        breakpoint_input_focused_ = true;
+        model_.focus = Focus::Breakpoints;
+    }
+}
+
+void DebugApp::restore_breakpoint_input_state() {
+    if (breakpoints_panel_ == nullptr) {
+        return;
+    }
+    if (!breakpoint_input_draft_.empty()) {
+        breakpoints_panel_->set_input_value(breakpoint_input_draft_);
+    }
+    if (!breakpoint_input_focused_) {
+        return;
+    }
+    model_.focus = Focus::Breakpoints;
+    breakpoints_panel_->focus_input();
+}
+
+void DebugApp::begin_edit_variable(const std::string& variable_name) {
+    if (!is_session_stopped()) {
+        model_.status_message = "Cannot edit variables while running";
+        sync_status_bar();
+        return;
+    }
+
+    const std::optional<VariableEditTarget> target = find_variable_for_edit(model_, variable_name);
+    if (!target.has_value()) {
+        model_.status_message = "Variable not found: " + variable_name;
+        sync_status_bar();
+        return;
+    }
+
+    editing_variable_name_ = variable_name;
+    editing_variables_reference_ = target->variables_reference;
+    scope_input_draft_ = target->value;
+    scope_input_focused_ = true;
+    model_.focus = Focus::Scopes;
+
+    if (scopes_panel_ != nullptr) {
+        scopes_panel_->set_input_value(scope_input_draft_);
+        scopes_panel_->focus_input();
+    }
+
+    model_.status_message = "Edit " + variable_name;
+    apply_focus();
+    sync_status_bar();
+}
+
+void DebugApp::submit_variable_value(const std::string& value) {
+    if (editing_variable_name_.empty() || editing_variables_reference_ <= 0) {
+        scope_input_draft_.clear();
+        scope_input_focused_ = false;
+        if (scopes_panel_ != nullptr && scopes_panel_->input_widget() != nullptr) {
+            scopes_panel_->input_widget()->set_value("");
+        }
+        return;
+    }
+
+    if (session_io_ == nullptr) {
+        model_.status_message = "No debug session";
+        sync_status_bar();
+        return;
+    }
+
+    pending_variable_value_ = value;
+    session_io_->post_set_variable(editing_variables_reference_, editing_variable_name_, value);
+    model_.status_message = "Setting " + editing_variable_name_ + "…";
+    sync_status_bar();
+}
+
+void DebugApp::capture_scope_input_state() {
+    if (scopes_panel_ == nullptr) {
+        return;
+    }
+    scope_input_draft_ = scopes_panel_->input_value();
+    if (scopes_panel_->input_widget() != nullptr && scopes_panel_->input_widget()->is_focused()) {
+        scope_input_focused_ = true;
+        model_.focus = Focus::Scopes;
+    }
+}
+
+void DebugApp::restore_scope_input_state() {
+    if (scopes_panel_ == nullptr) {
+        return;
+    }
+    if (!scope_input_draft_.empty()) {
+        scopes_panel_->set_input_value(scope_input_draft_);
+    }
+    if (!scope_input_focused_) {
+        return;
+    }
+    model_.focus = Focus::Scopes;
+    scopes_panel_->focus_input();
+}
+
+bool DebugApp::context_menu_open() const {
+    return context_menu_ != nullptr && context_menu_->is_open();
+}
+
+bool DebugApp::handle_overlay_event(const tuinator::Event& event) {
+    if (context_menu_ == nullptr || !context_menu_->is_open()) {
+        return false;
+    }
+
+    context_menu_->layout(overlay_clip_bounds());
+    const bool handled = context_menu_->handle_event(event);
+    std::function<void()> pending_action;
+    if (context_menu_ != nullptr) {
+        pending_action = context_menu_->take_pending_action();
+    }
+    if (pending_action) {
+        pending_action();
+    }
+    if (handled || pending_action) {
+        request_full_screen_refresh();
+    }
+    return handled || static_cast<bool>(pending_action);
+}
+
+void DebugApp::paint_overlay(tuinator::PaintContext& ctx) const {
+    if (context_menu_ == nullptr || !context_menu_->is_open()) {
+        return;
+    }
+
+    context_menu_->layout(overlay_clip_bounds());
+    context_menu_->paint(ctx);
+}
+
+tuinator::Rect DebugApp::overlay_clip_bounds() const {
+    const tuinator::Size term = app_->terminal_size();
+    return {0, 0, term.width, term.height};
+}
+
+std::optional<std::string> DebugApp::identifier_at_line_column(const std::string& line_text, int column) const {
+    if (line_text.empty() || column < 0) {
+        return std::nullopt;
+    }
+
+    const auto is_ident_start = [](unsigned char ch) { return std::isalpha(ch) != 0 || ch == '_'; };
+    const auto is_ident_part = [](unsigned char ch) { return std::isalnum(ch) != 0 || ch == '_'; };
+
+    const std::size_t byte_at =
+        std::min(tuinator::text_byte_length_for_width(line_text, column), line_text.size());
+    std::size_t pos = byte_at;
+    if (pos >= line_text.size() || !is_ident_part(static_cast<unsigned char>(line_text[pos]))) {
+        if (pos == 0 || !is_ident_part(static_cast<unsigned char>(line_text[pos - 1]))) {
+            return std::nullopt;
+        }
+        pos -= 1;
+    }
+
+    std::size_t start = pos;
+    while (start > 0 && is_ident_part(static_cast<unsigned char>(line_text[start - 1]))) {
+        --start;
+    }
+    std::size_t end = pos + 1;
+    while (end < line_text.size() && is_ident_part(static_cast<unsigned char>(line_text[end]))) {
+        ++end;
+    }
+
+    if (start >= line_text.size() || !is_ident_start(static_cast<unsigned char>(line_text[start]))) {
+        return std::nullopt;
+    }
+
+    return line_text.substr(start, end - start);
+}
+
+void DebugApp::begin_watch_expression(const std::string& seed) {
+    editing_watch_index_ = -1;
+    watch_input_draft_ = seed;
+    watch_input_focused_ = true;
+    model_.focus = Focus::Watches;
+
+    if (watches_panel_ != nullptr) {
+        watches_panel_->set_input_value(seed);
+        watches_panel_->focus_input();
+    }
+
+    model_.status_message = seed.empty() ? "Add watch expression" : "Watch expression";
+    apply_focus();
+    sync_status_bar();
+}
+
+void DebugApp::show_breakpoint_context_menu(const std::string& path, int line, tuinator::Point anchor,
+                                            const std::optional<std::string>& seed_identifier) {
+    if (context_menu_ == nullptr || path.empty() || line <= 0) {
+        return;
+    }
+
+    const std::string normalized = normalize_source_path(path);
+    const auto path_it = breakpoints_by_path_.find(normalized);
+    const bool has_breakpoint =
+        path_it != breakpoints_by_path_.end() && path_it->second.contains(line);
+    const bool has_condition =
+        has_breakpoint && !path_it->second.at(line).condition.empty();
+
+    auto ensure_breakpoint = [this, normalized, line]() {
+        auto& breakpoints = breakpoints_by_path_[normalized];
+        if (breakpoints.contains(line)) {
+            return;
+        }
+        breakpoints[line] = BreakpointInfo{line, ""};
+        if (normalized == effective_source_path()) {
+            sync_breakpoints_to_panel();
+        }
+        if (session_io_ != nullptr && session_io_->is_active()) {
+            push_breakpoints_to_session(normalized);
+        }
+        sync_breakpoints_list_panel();
+        mark_all_panels_dirty();
+    };
+
+    std::vector<ContextMenu::Item> items;
+    if (has_breakpoint) {
+        items.push_back(ContextMenu::Item{
+            "Edit condition",
+            [this, normalized, line]() { begin_edit_breakpoint_condition(normalized, line); },
+        });
+        if (has_condition) {
+            items.push_back(ContextMenu::Item{
+                "Clear condition",
+                [this, normalized, line]() { set_breakpoint_condition(normalized, line, ""); },
+            });
+        }
+        items.push_back(ContextMenu::Item{
+            "Remove breakpoint",
+            [this, normalized, line]() { remove_breakpoint_at(normalized, line); },
+        });
+    } else {
+        items.push_back(ContextMenu::Item{
+            "Add breakpoint",
+            [this, normalized, line]() { toggle_breakpoint_at(normalized, line); },
+        });
+        items.push_back(ContextMenu::Item{
+            "Add conditional breakpoint",
+            [this, ensure_breakpoint, normalized, line]() {
+                ensure_breakpoint();
+                begin_edit_breakpoint_condition(normalized, line);
+            },
+        });
+    }
+
+    context_menu_->open(anchor, overlay_clip_bounds(), std::move(items));
+    context_menu_->layout(overlay_clip_bounds());
+    request_full_screen_refresh();
 }
 
 std::string DebugApp::command_status_message(const char* op) const {
@@ -1710,6 +3198,188 @@ std::string DebugApp::command_status_message(const char* op) const {
         return "Step out";
     }
     return std::string("Sent: ") + op;
+}
+
+void DebugApp::capture_watch_input_state() {
+    if (watches_panel_ == nullptr) {
+        return;
+    }
+    watch_input_draft_ = watches_panel_->input_value();
+    if (watches_panel_->input_widget() != nullptr && watches_panel_->input_widget()->is_focused()) {
+        watch_input_focused_ = true;
+        model_.focus = Focus::Watches;
+    }
+}
+
+void DebugApp::restore_watch_input_state() {
+    if (watches_panel_ == nullptr) {
+        return;
+    }
+    if (!watch_input_draft_.empty()) {
+        watches_panel_->set_input_value(watch_input_draft_);
+    }
+    if (!watch_input_focused_) {
+        apply_focus();
+        return;
+    }
+    model_.focus = Focus::Watches;
+    apply_focus();
+}
+
+void DebugApp::sync_watches_panel() {
+    if (watches_panel_ == nullptr) {
+        return;
+    }
+
+    std::vector<std::string> lines;
+    lines.reserve(model_.watches.size());
+    for (const WatchEntry& watch : model_.watches) {
+        if (!watch.error.empty()) {
+            lines.push_back(watch.expression + " = <error: " + watch.error + ">");
+        } else if (watch.value.empty()) {
+            lines.push_back(watch.expression + " = ?");
+        } else {
+            lines.push_back(watch.expression + " = " + watch.value);
+        }
+    }
+    watches_panel_->set_lines(std::move(lines));
+}
+
+void DebugApp::begin_edit_watch_at(int index) {
+    if (watches_panel_ == nullptr || index < 0 || index >= static_cast<int>(model_.watches.size())) {
+        return;
+    }
+
+    editing_watch_index_ = index;
+    watch_input_draft_ = model_.watches[static_cast<std::size_t>(index)].expression;
+    watch_input_focused_ = true;
+    model_.focus = Focus::Watches;
+    watches_panel_->set_input_value(watch_input_draft_);
+    watches_panel_->focus_input();
+    model_.status_message = "Edit watch expression";
+    apply_focus();
+    sync_status_bar();
+}
+
+void DebugApp::submit_watch_expression(const std::string& expression) {
+    std::string trimmed = expression;
+    while (!trimmed.empty() && std::isspace(static_cast<unsigned char>(trimmed.front()))) {
+        trimmed.erase(trimmed.begin());
+    }
+    while (!trimmed.empty() && std::isspace(static_cast<unsigned char>(trimmed.back()))) {
+        trimmed.pop_back();
+    }
+
+    if (editing_watch_index_ >= 0 && editing_watch_index_ < static_cast<int>(model_.watches.size())) {
+        if (trimmed.empty()) {
+            editing_watch_index_ = -1;
+            finish_watch_input();
+            return;
+        }
+
+        WatchEntry& watch = model_.watches[static_cast<std::size_t>(editing_watch_index_)];
+        watch.expression = normalize_watch_expression(trimmed);
+        watch.value.clear();
+        watch.error.clear();
+        editing_watch_index_ = -1;
+
+        finish_watch_input();
+        sync_watches_panel();
+        model_.status_message = "Updated watch";
+        sync_status_bar();
+        resolve_watches_from_locals();
+        return;
+    }
+
+    add_watch(expression);
+}
+
+void DebugApp::add_watch(const std::string& expression) {
+    editing_watch_index_ = -1;
+    std::string trimmed = expression;
+    while (!trimmed.empty() && std::isspace(static_cast<unsigned char>(trimmed.front()))) {
+        trimmed.erase(trimmed.begin());
+    }
+    while (!trimmed.empty() && std::isspace(static_cast<unsigned char>(trimmed.back()))) {
+        trimmed.pop_back();
+    }
+    if (trimmed.empty()) {
+        return;
+    }
+
+    WatchEntry entry{};
+    entry.id = model_.next_watch_id++;
+    entry.expression = normalize_watch_expression(trimmed);
+    model_.watches.push_back(std::move(entry));
+
+    finish_watch_input();
+    sync_watches_panel();
+    model_.status_message = "Added watch";
+    sync_status_bar();
+
+    resolve_watches_from_locals();
+}
+
+void DebugApp::remove_watch_at(std::size_t index) {
+    if (index >= model_.watches.size()) {
+        return;
+    }
+    if (editing_watch_index_ == static_cast<int>(index)) {
+        editing_watch_index_ = -1;
+        watch_input_draft_.clear();
+        watch_input_focused_ = false;
+        if (watches_panel_ != nullptr) {
+            watches_panel_->set_input_value("");
+        }
+    } else if (editing_watch_index_ > static_cast<int>(index)) {
+        --editing_watch_index_;
+    }
+    model_.watches.erase(model_.watches.begin() + static_cast<std::ptrdiff_t>(index));
+    sync_watches_panel();
+    model_.status_message = "Removed watch";
+    sync_status_bar();
+}
+
+void DebugApp::resolve_watches_from_locals() {
+    if (!launch_complete_handled_ || model_.watches.empty() || !is_session_stopped()) {
+        return;
+    }
+
+    const bool locals_visible = !model_.variables.empty() || !model_.scope_variables.empty() ||
+                                scope_rows_include_variables(cached_scope_rows_);
+
+    bool changed = false;
+    for (WatchEntry& watch : model_.watches) {
+        watch.expression = normalize_watch_expression(watch.expression);
+
+        std::optional<std::string> resolved = try_resolve_watch_from_model(model_, watch.expression);
+        if (!resolved) {
+            resolved = try_resolve_watch_from_scope_rows(cached_scope_rows_, watch.expression);
+        }
+
+        if (resolved) {
+            if (watch.value != *resolved || !watch.error.empty()) {
+                watch.value = *resolved;
+                watch.error.clear();
+                changed = true;
+            }
+            continue;
+        }
+
+        if (!locals_visible) {
+            continue;
+        }
+
+        if (!watch.value.empty() || watch.error != "not in scope") {
+            watch.value.clear();
+            watch.error = "not in scope";
+            changed = true;
+        }
+    }
+
+    if (changed) {
+        sync_watches_panel();
+    }
 }
 
 }  // namespace tui_debug_ui

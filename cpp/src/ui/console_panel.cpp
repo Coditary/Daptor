@@ -1,11 +1,13 @@
 #include <tui_debug_ui/console_panel.hpp>
 
+#include <tui_debug_ui/dap_ui_theme.hpp>
 #include <tui_debug_ui/debug_ui_model.hpp>
 
 #include <tuinator/render/text.hpp>
 
 #include <algorithm>
 #include <sstream>
+#include <string_view>
 
 namespace tui_debug_ui {
 
@@ -24,10 +26,39 @@ std::vector<std::string> split_lines(const std::string& text) {
     return lines;
 }
 
+tuinator::Style console_line_style(const std::string& line, tuinator::Style fallback,
+                                   tuinator::Style stderr_style, tuinator::Style stdout_style,
+                                   tuinator::Style event_style) {
+    if (line.size() < 3 || line[0] != '[') {
+        return fallback;
+    }
+
+    const std::size_t end = line.find(']');
+    if (end == std::string::npos || end < 2) {
+        return fallback;
+    }
+
+    const std::string category = line.substr(1, end - 1);
+    if (category == "stderr" || category == "error") {
+        return stderr_style;
+    }
+    if (category == "stdout" || category == "output") {
+        return stdout_style;
+    }
+    if (category == "event" || category == "dap") {
+        return event_style;
+    }
+    return fallback;
+}
+
 }  // namespace
 
-ConsolePanel::ConsolePanel(tuinator::Style label_style, tuinator::Style panel_background)
-    : label_style_(std::move(label_style)), panel_background_(std::move(panel_background)) {}
+ConsolePanel::ConsolePanel(const DapUiTheme& theme)
+    : label_style_(theme.label),
+      panel_background_(theme.panel_background),
+      console_stderr_(theme.console_stderr),
+      console_stdout_(theme.console_stdout),
+      console_event_(theme.console_event) {}
 
 void ConsolePanel::set_text(std::string text) {
     lines_ = split_lines(std::move(text));
@@ -72,7 +103,9 @@ void ConsolePanel::paint(tuinator::PaintContext& ctx) const {
             continue;
         }
 
-        canvas.draw_text({0, index}, line.substr(0, bytes), label_style_);
+        const tuinator::Style style =
+            console_line_style(line, label_style_, console_stderr_, console_stdout_, console_event_);
+        canvas.draw_text({0, index}, line.substr(0, bytes), style);
     }
 }
 
