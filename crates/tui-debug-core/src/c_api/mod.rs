@@ -116,6 +116,60 @@ pub extern "C" fn tui_debug_session_launch(program: *const c_char) -> *mut c_voi
     }
 }
 
+/// Launch a native binary debug session via lldb-dap.
+#[no_mangle]
+pub extern "C" fn tui_debug_session_launch_lldb(program: *const c_char) -> *mut c_void {
+    clear_last_error();
+
+    if program.is_null() {
+        set_last_error("program must not be null");
+        return ptr::null_mut();
+    }
+
+    let program_str = match unsafe { CStr::from_ptr(program) }.to_str() {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(format!("invalid UTF-8 in program path: {err}"));
+            return ptr::null_mut();
+        }
+    };
+
+    match CSession::launch_lldb(program_str) {
+        Ok(session) => Box::into_raw(Box::new(session)) as *mut c_void,
+        Err(err) => {
+            set_last_error(err.to_string());
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Launch a native binary debug session via rr record + replay (reverse debugging).
+#[no_mangle]
+pub extern "C" fn tui_debug_session_launch_rr(program: *const c_char) -> *mut c_void {
+    clear_last_error();
+
+    if program.is_null() {
+        set_last_error("program must not be null");
+        return ptr::null_mut();
+    }
+
+    let program_str = match unsafe { CStr::from_ptr(program) }.to_str() {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(format!("invalid UTF-8 in program path: {err}"));
+            return ptr::null_mut();
+        }
+    };
+
+    match CSession::launch_rr(program_str) {
+        Ok(session) => Box::into_raw(Box::new(session)) as *mut c_void,
+        Err(err) => {
+            set_last_error(format!("{err:#}"));
+            ptr::null_mut()
+        }
+    }
+}
+
 /// Free a session created by [`tui_debug_session_launch`].
 #[no_mangle]
 pub unsafe extern "C" fn tui_debug_session_free(session: *mut c_void) {
@@ -496,6 +550,35 @@ pub extern "C" fn tui_debug_fetch_source(
 
     match session.fetch_source(source_reference) {
         Ok(source) => match write_json_to_buffer(&source, source_out, cap) {
+            Ok(()) => 0,
+            Err(err) => {
+                set_last_error(err);
+                -1
+            }
+        },
+        Err(err) => {
+            set_last_error(err.to_string());
+            -1
+        }
+    }
+}
+
+/// Fetch possible step-in targets for a stack frame into `json_out` as a JSON array.
+#[no_mangle]
+pub extern "C" fn tui_debug_fetch_step_in_targets(
+    session: *mut c_void,
+    frame_id: i64,
+    json_out: *mut c_char,
+    cap: usize,
+) -> c_int {
+    clear_last_error();
+
+    let Some(session) = session_from_ptr(session) else {
+        return -1;
+    };
+
+    match session.fetch_step_in_targets_json(frame_id) {
+        Ok(json) => match write_json_to_buffer(&json, json_out, cap) {
             Ok(()) => 0,
             Err(err) => {
                 set_last_error(err);

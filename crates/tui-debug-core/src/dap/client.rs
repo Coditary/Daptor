@@ -27,6 +27,34 @@ enum PendingResponse {
     Failure { command: String, message: String },
 }
 
+/// Spawn the `lldb-dap` binary and return the child process.
+pub fn spawn_lldb_dap_adapter() -> Result<Child> {
+    let mut command = Command::new("lldb-dap");
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+
+    let child = command.spawn().context(
+        "failed to spawn lldb-dap — install the LLVM lldb package (provides /usr/bin/lldb-dap)",
+    )?;
+
+    Ok(child)
+}
+
 /// Spawn `python3 -m debugpy.adapter` and return the child process.
 pub fn spawn_debugpy_adapter() -> Result<Child> {
     let mut command = Command::new("python3");

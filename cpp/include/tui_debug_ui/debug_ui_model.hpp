@@ -112,6 +112,9 @@ class DebugUiModel {
     std::vector<WatchEntry> watches;
     std::uint64_t next_watch_id = 1;
 
+    bool supports_step_back = false;
+    bool supports_step_in_targets = false;
+
     /// Apply a JSON snapshot from the Rust session.
     void apply_snapshot_json(const std::string& json);
 

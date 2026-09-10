@@ -1,4 +1,5 @@
 #include "tui_debug_ui/session_backend.hpp"
+#include "tui_debug_ui/step_in_selection.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -12,6 +13,16 @@ namespace tui_debug_ui {
 namespace {
 
 constexpr int kMockLines[] = {1, 3, 4, 8, 9, 12, 13, 17, 22};
+constexpr int kMockLineCount = static_cast<int>(sizeof(kMockLines) / sizeof(kMockLines[0]));
+
+int mock_line_index(int line) {
+    for (int index = 0; index < kMockLineCount; ++index) {
+        if (kMockLines[index] == line) {
+            return index;
+        }
+    }
+    return 0;
+}
 
 std::string read_file(const std::string& path) {
     std::ifstream input(path);
@@ -49,6 +60,29 @@ std::string mock_variables_json(const char* prefix, int count, int value_offset 
     return json.str();
 }
 
+std::string line_text_at(const std::string& text, int line_number) {
+    if (line_number < 1) {
+        return {};
+    }
+
+    int current = 1;
+    for (std::size_t index = 0; index < text.size();) {
+        const std::size_t end = text.find('\n', index);
+        if (current == line_number) {
+            if (end == std::string::npos) {
+                return text.substr(index);
+            }
+            return text.substr(index, end - index);
+        }
+        if (end == std::string::npos) {
+            break;
+        }
+        index = end + 1;
+        ++current;
+    }
+    return {};
+}
+
 }  // namespace
 
 class MockSessionBackend final : public SessionBackend {
@@ -58,6 +92,10 @@ class MockSessionBackend final : public SessionBackend {
         source_text_ = read_file(program_path);
         current_line_ = 1;
         step_index_ = 0;
+        if (program_path.find("step_in_demo") != std::string::npos) {
+            current_line_ = 17;
+            step_index_ = mock_line_index(current_line_);
+        }
         breakpoints_.clear();
         console_pending_.clear();
         stopped_ = true;
@@ -101,6 +139,22 @@ class MockSessionBackend final : public SessionBackend {
             return false;
         }
 
+        std::string command = op;
+        if (!op.empty() && op.front() == '{') {
+            if (op.find("\"step_into\"") != std::string::npos ||
+                op.find("\"step_in\"") != std::string::npos) {
+                command = "step_over";
+            } else if (op.find("\"op\"") != std::string::npos) {
+                const std::size_t op_pos = op.find("\"op\"");
+                const std::size_t colon = op.find(':', op_pos);
+                const std::size_t quote = op.find('"', colon + 1);
+                const std::size_t end = op.find('"', quote + 1);
+                if (quote != std::string::npos && end != std::string::npos) {
+                    command = op.substr(quote + 1, end - quote - 1);
+                }
+            }
+        }
+
         if (session_state_ == "exited" || session_state_ == "disconnected") {
             if (op == "restart") {
                 launch(program_path_);
@@ -120,7 +174,7 @@ class MockSessionBackend final : public SessionBackend {
             return false;
         }
 
-        if (op == "continue" || op == "play_pause") {
+        if (command == "continue" || command == "play_pause") {
             if (stopped_) {
                 step_index_ = static_cast<int>(sizeof(kMockLines) / sizeof(kMockLines[0])) - 1;
                 current_line_ = kMockLines[step_index_];
@@ -132,7 +186,7 @@ class MockSessionBackend final : public SessionBackend {
             }
             return true;
         }
-        if (op == "step_over" || op == "next") {
+        if (command == "step_over" || command == "next") {
             if (step_index_ + 1 < static_cast<int>(sizeof(kMockLines) / sizeof(kMockLines[0]))) {
                 ++step_index_;
                 current_line_ = kMockLines[step_index_];
@@ -145,37 +199,95 @@ class MockSessionBackend final : public SessionBackend {
             session_state_ = "stopped";
             return true;
         }
-        if (op == "step_into" || op == "step_in") {
+        if (command == "step_into" || command == "step_in") {
             return send_command("step_over", error_out);
         }
-        if (op == "step_out") {
+        if (command == "step_out") {
             return send_command("step_over", error_out);
         }
-        if (op == "pause") {
+        if (command == "reverse_continue") {
+            if (step_index_ <= 0) {
+                error_out = "already at earliest mock stop";
+                return false;
+            }
+            step_index_ = 0;
+            current_line_ = kMockLines[step_index_];
             stopped_ = true;
             session_state_ = "stopped";
             return true;
         }
-        if (op == "terminate") {
+        if (command == "step_back" || command == "step_back_into") {
+            if (step_index_ <= 0) {
+                error_out = "already at earliest mock stop";
+                return false;
+            }
+            --step_index_;
+            current_line_ = kMockLines[step_index_];
+            stopped_ = true;
+            session_state_ = "stopped";
+            return true;
+        }
+        if (command == "pause") {
+            stopped_ = true;
+            session_state_ = "stopped";
+            return true;
+        }
+        if (command == "terminate") {
             session_state_ = "exited";
             stopped_ = true;
             return true;
         }
-        if (op == "disconnect") {
+        if (command == "disconnect") {
             session_state_ = "disconnected";
             stopped_ = true;
             return true;
         }
-        if (op == "restart") {
+        if (command == "restart") {
             current_line_ = 1;
             step_index_ = 0;
+            if (program_path_.find("step_in_demo") != std::string::npos) {
+                current_line_ = 17;
+                step_index_ = mock_line_index(current_line_);
+            }
             stopped_ = true;
             session_state_ = "stopped";
             return true;
         }
 
-        error_out = "unknown mock command: " + op;
+        error_out = "unknown mock command: " + command;
         return false;
+    }
+
+    bool fetch_step_in_targets(std::int64_t frame_id, std::string& json_out,
+                               std::string& error_out) override {
+        (void)frame_id;
+        if (!launched_) {
+            error_out = "mock session not launched";
+            return false;
+        }
+        if (!stopped_) {
+            error_out = "cannot resolve step-in targets while running";
+            return false;
+        }
+
+        const std::string line_text = line_text_at(source_text_, current_line_);
+        if (line_text.empty()) {
+            json_out = "[]";
+            return true;
+        }
+
+        const std::vector<StepInTargetSpan> targets = find_step_in_targets_on_line(line_text);
+        std::ostringstream json;
+        json << '[';
+        for (std::size_t index = 0; index < targets.size(); ++index) {
+            if (index > 0) {
+                json << ',';
+            }
+            json << R"({"id":)" << index << R"(,"label":")" << escape_json(targets[index].label) << R"("})";
+        }
+        json << ']';
+        json_out = json.str();
+        return true;
     }
 
     bool evaluate(const std::string& expression, std::int64_t frame_id, const std::string& context,
@@ -318,7 +430,7 @@ class MockSessionBackend final : public SessionBackend {
 
     std::string build_snapshot() const {
         std::ostringstream json;
-        json << R"({"type":"snapshot","snapshot":{)";
+        json << R"({"type":"snapshot","snapshot":{"capabilities":{"supports_step_back":true,"supports_step_in_targets":true},)";
         if (session_state_ == "exited") {
             json << R"("state":"Exited","threads":[],"stack_frames":[],"scopes":[],"variables":[]}})";
             return json.str();

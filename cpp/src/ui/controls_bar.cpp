@@ -18,6 +18,8 @@ constexpr const char* kStepInto = "\u{ead4}";
 constexpr const char* kStepOver = "\u{ead6}";
 constexpr const char* kStepOut = "\u{ead5}";
 constexpr const char* kStepBack = "\u{eb8f}";
+constexpr const char* kStepBackInto = "\u{2196}";
+constexpr const char* kContinueBack = "\u{25c1}";
 constexpr const char* kRestart = "\u{eb37}";
 constexpr const char* kTerminate = "\u{ead7}";
 constexpr const char* kDisconnect = "\u{ead0}";
@@ -32,6 +34,8 @@ constexpr ControlsBar::ControlButton ControlsBar::kButtons[ControlsBar::kButtonC
     {kStepOver, "step_over", true, false},
     {kStepOut, "step_out", true, false},
     {kStepBack, "step_back", true, false},
+    {kStepBackInto, "step_back_into", true, false},
+    {kContinueBack, "reverse_continue", true, false},
     {kRestart, "restart", false, false},
     {kTerminate, "terminate", false, true},
     {kDisconnect, "disconnect", false, true},
@@ -56,7 +60,15 @@ void ControlsBar::set_session_ended(bool ended) {
     mark_dirty();
 }
 
-tuinator::Size ControlsBar::preferred_size() const { return {40, 1}; }
+void ControlsBar::set_supports_step_back(bool supported) {
+    if (supports_step_back_ == supported) {
+        return;
+    }
+    supports_step_back_ = supported;
+    mark_dirty();
+}
+
+tuinator::Size ControlsBar::preferred_size() const { return {50, 1}; }
 
 void ControlsBar::layout(tuinator::Rect bounds) {
     bounds_ = bounds;
@@ -108,6 +120,10 @@ bool ControlsBar::is_button_available(int index) const {
         return true;
     }
     if (button.needs_stopped) {
+        if (std::strcmp(button.op, "step_back") == 0 || std::strcmp(button.op, "step_back_into") == 0 ||
+            std::strcmp(button.op, "reverse_continue") == 0) {
+            return stopped_ && supports_step_back_;
+        }
         return stopped_;
     }
     return true;
@@ -127,9 +143,9 @@ tuinator::Style ControlsBar::button_style(int index) const {
     tuinator::Style style = theme_.control_step;
     if (index == 0) {
         style = theme_.control_play;
-    } else if (index == 5) {
+    } else if (index == 7) {
         style = theme_.control_restart;
-    } else if (index == 6 || index == 7) {
+    } else if (index == 8 || index == 9) {
         style = theme_.control_stop;
     }
 
@@ -183,8 +199,15 @@ bool ControlsBar::handle_event(const tuinator::Event& event) {
     }
 
     if (const auto* key = std::get_if<tuinator::KeyPress>(&event)) {
-        if (key->character >= '1' && key->character <= '8') {
+        if (key->character >= '1' && key->character <= '9') {
             const int index = key->character - '1';
+            if (is_button_available(index) && on_action_ != nullptr) {
+                on_action_(kButtons[index].op);
+                return true;
+            }
+        }
+        if (key->character == '0') {
+            const int index = 9;
             if (is_button_available(index) && on_action_ != nullptr) {
                 on_action_(kButtons[index].op);
                 return true;

@@ -1,11 +1,13 @@
 #pragma once
 
 #include <tui_debug_ui/syntax_theme.hpp>
+#include <tui_debug_ui/step_in_selection.hpp>
 
 #include <tuinator/core/geometry.hpp>
 #include <tuinator/widgets/widget.hpp>
 
 #include <functional>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -67,8 +69,16 @@ class SourcePanel : public tuinator::Widget {
     using ViewportRequestCallback = std::function<void(int center_line)>;
     void set_on_request_viewport(ViewportRequestCallback callback);
 
+    using StepInTargetClickCallback = std::function<void(int target_index)>;
+    void set_on_step_in_target_click(StepInTargetClickCallback callback);
+
     const SyntaxTheme& syntax_theme() const { return theme_; }
     void set_syntax_theme(SyntaxTheme theme);
+
+    void set_step_in_selection(std::optional<StepInSelectionState> selection);
+    [[nodiscard]] const std::optional<StepInSelectionState>& step_in_selection() const {
+        return step_in_selection_;
+    }
 
     tuinator::Size preferred_size() const override;
     void layout(tuinator::Rect bounds) override;
@@ -87,10 +97,15 @@ class SourcePanel : public tuinator::Widget {
     int code_start_x() const;
     bool is_gutter_click(int local_x) const;
 
+    tuinator::Style style_for_code_column(int line_number, int code_column, HighlightKind base_kind) const;
+    [[nodiscard]] bool is_step_in_column(int line_number, int code_column) const;
+    [[nodiscard]] std::optional<int> step_in_target_index_at(int line_number, int code_column) const;
+
     SyntaxTheme theme_;
     BreakpointToggleCallback on_toggle_breakpoint_;
     BreakpointContextCallback on_breakpoint_context_;
     ViewportRequestCallback on_request_viewport_;
+    StepInTargetClickCallback on_step_in_target_click_;
     std::vector<HighlightedLine> lines_;
     std::unordered_map<int, std::string> breakpoints_;
     int scroll_offset_ = 0;
@@ -98,6 +113,7 @@ class SourcePanel : public tuinator::Widget {
     int execution_line_ = 0;
     int cursor_line_ = 1;
     int file_line_count_ = 1;
+    std::optional<StepInSelectionState> step_in_selection_;
 };
 
 } // namespace tui_debug_ui

@@ -12,6 +12,12 @@ enum class SessionMode {
     Mock,
 };
 
+enum class DebugAdapter {
+    Debugpy,
+    Lldb,
+    Rr,
+};
+
 /// Abstraction over the Rust C API (or a mock for frontend-only development).
 class SessionBackend {
   public:
@@ -28,6 +34,8 @@ class SessionBackend {
     virtual std::optional<std::string> drain_console_json() = 0;
 
     virtual bool send_command(const std::string& op, std::string& error_out) = 0;
+    virtual bool fetch_step_in_targets(std::int64_t frame_id, std::string& json_out,
+                                     std::string& error_out) = 0;
     virtual bool evaluate(const std::string& expression, std::int64_t frame_id, const std::string& context,
                           std::string& result_out, std::string& error_out) = 0;
     virtual bool set_variable(std::int64_t variables_reference, const std::string& name, const std::string& value,
@@ -41,6 +49,7 @@ class SessionBackend {
                                                           std::string& error_out) = 0;
 };
 
-std::unique_ptr<SessionBackend> create_session_backend(SessionMode mode);
+std::unique_ptr<SessionBackend> create_session_backend(SessionMode mode,
+                                                       DebugAdapter adapter = DebugAdapter::Debugpy);
 
 }  // namespace tui_debug_ui

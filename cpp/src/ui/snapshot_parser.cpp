@@ -14,6 +14,28 @@ namespace {
 #ifdef TUI_DEBUG_UI_HAS_NLOHMANN_JSON
 using Json = nlohmann::json;
 
+std::int64_t json_int64_or(const Json& object, const char* key, std::int64_t default_value) {
+    if (!object.contains(key)) {
+        return default_value;
+    }
+    const Json& value = object.at(key);
+    if (value.is_null() || !value.is_number()) {
+        return default_value;
+    }
+    return value.get<std::int64_t>();
+}
+
+std::string json_string_or(const Json& object, const char* key, std::string default_value = {}) {
+    if (!object.contains(key)) {
+        return default_value;
+    }
+    const Json& value = object.at(key);
+    if (value.is_null() || !value.is_string()) {
+        return default_value;
+    }
+    return value.get<std::string>();
+}
+
 bool parse_session_state(const Json& state, std::string& session_state, std::string& stop_reason) {
     if (state.is_string()) {
         const std::string value = state.get<std::string>();
@@ -76,6 +98,12 @@ void apply_snapshot_object(DebugUiModel& model, const Json& snapshot) {
         }
     }
 
+    if (snapshot.contains("capabilities") && snapshot.at("capabilities").is_object()) {
+        const Json& capabilities = snapshot.at("capabilities");
+        model.supports_step_back = capabilities.value("supports_step_back", false);
+        model.supports_step_in_targets = capabilities.value("supports_step_in_targets", false);
+    }
+
     model.threads.clear();
     if (snapshot.contains("threads") && snapshot.at("threads").is_array()) {
         for (const Json& thread : snapshot.at("threads")) {
@@ -94,8 +122,8 @@ void apply_snapshot_object(DebugUiModel& model, const Json& snapshot) {
 
         if (frame.contains("source") && frame.at("source").is_object()) {
             const Json& source = frame.at("source");
-            info.path = source.value("path", std::string{});
-            info.source_reference = source.value("sourceReference", static_cast<std::int64_t>(0));
+            info.path = json_string_or(source, "path");
+            info.source_reference = json_int64_or(source, "sourceReference", 0);
         }
         return info;
     };
@@ -352,6 +380,22 @@ bool manual_apply_poll_json(DebugUiModel& model, const std::string& json) {
         model.status_message = "Session ended";
     } else {
         model.status_message = "Connected";
+    }
+
+    const std::string capabilities_needle = "\"capabilities\":{";
+    const std::size_t capabilities_pos = snapshot_json.find(capabilities_needle);
+    if (capabilities_pos != std::string_view::npos) {
+        if (snapshot_json.find("\"supports_step_back\":true", capabilities_pos) != std::string_view::npos) {
+            model.supports_step_back = true;
+        } else if (snapshot_json.find("\"supports_step_back\":false", capabilities_pos) != std::string_view::npos) {
+            model.supports_step_back = false;
+        }
+        if (snapshot_json.find("\"supports_step_in_targets\":true", capabilities_pos) != std::string_view::npos) {
+            model.supports_step_in_targets = true;
+        } else if (snapshot_json.find("\"supports_step_in_targets\":false", capabilities_pos) !=
+                   std::string_view::npos) {
+            model.supports_step_in_targets = false;
+        }
     }
 
     model.connection_state = ConnectionState::Connected;

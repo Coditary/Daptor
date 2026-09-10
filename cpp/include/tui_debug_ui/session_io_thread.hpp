@@ -29,6 +29,7 @@ enum class SessionIoEventKind {
     EvaluateFinished,
     SetVariableFinished,
     BreakpointsFinished,
+    StepInTargetsReady,
 };
 
 struct PendingSetVariable {
@@ -51,7 +52,7 @@ struct SessionIoEvent {
 /// Owns the SessionBackend on a worker thread so the Tuinator UI never blocks on DAP I/O.
 class SessionIoThread {
   public:
-    explicit SessionIoThread(SessionMode mode);
+    explicit SessionIoThread(SessionMode mode, DebugAdapter adapter = DebugAdapter::Debugpy);
     ~SessionIoThread();
 
     SessionIoThread(const SessionIoThread&) = delete;
@@ -70,6 +71,7 @@ class SessionIoThread {
                                  const std::vector<std::pair<std::int64_t, std::string>>& scopes);
     void request_highlight(const std::string& language, const std::string& source, int first_line, int line_count);
     void request_source_fetch(std::int64_t source_reference, const std::string& cache_key);
+    void request_step_in_targets(std::int64_t frame_id);
 
     bool try_pop_event(SessionIoEvent& out);
     [[nodiscard]] bool has_pending_execution_command() const;
@@ -92,6 +94,7 @@ class SessionIoThread {
     void process_scope_fetch();
     void process_highlight_request();
     void process_source_fetch();
+    void process_step_in_targets_fetch();
     void maybe_begin_launch();
     void join_launch_worker();
     void sync_initial_state();
@@ -100,6 +103,7 @@ class SessionIoThread {
     static bool command_needs_snapshot(const std::string& op);
     static bool command_syncs_snapshot(const std::string& op);
     static bool command_preempts_background_work(const std::string& op);
+    static std::string command_op_name(const std::string& op_or_json);
 
     std::unique_ptr<SessionBackend> backend_;
     std::thread thread_;
@@ -129,6 +133,7 @@ class SessionIoThread {
     std::optional<HighlightRequest> highlight_request_;
     std::optional<std::int64_t> source_fetch_reference_;
     std::string source_fetch_cache_key_;
+    std::optional<std::int64_t> step_in_targets_frame_;
 
     std::mutex events_mutex_;
     std::deque<SessionIoEvent> events_;

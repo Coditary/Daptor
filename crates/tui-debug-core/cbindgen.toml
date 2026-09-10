@@ -16,6 +16,8 @@ include = [
     "tui_debug_try_load_language",
     "tui_debug_last_error",
     "tui_debug_session_launch",
+    "tui_debug_session_launch_lldb",
+    "tui_debug_session_launch_rr",
     "tui_debug_session_free",
     "tui_debug_poll",
     "tui_debug_command",
@@ -26,6 +28,7 @@ include = [
     "tui_debug_fetch_variables",
     "tui_debug_set_variable",
     "tui_debug_fetch_source",
+    "tui_debug_fetch_step_in_targets",
     "tui_debug_highlight_viewport",
 ]
 

@@ -7,6 +7,7 @@
 #include "tui_debug_ui/source_panel.hpp"
 #include "tui_debug_ui/session_backend.hpp"
 #include "tui_debug_ui/session_io_thread.hpp"
+#include "tui_debug_ui/step_in_selection.hpp"
 
 #include <tuinator/core/event.hpp>
 #include <tuinator/widgets/views/list_view.hpp>
@@ -41,7 +42,8 @@ class TitledScrollPane;
 /// Tuinator application wrapper for the tui-debug shell.
 class DebugApp {
   public:
-    explicit DebugApp(const std::string& program_path, SessionMode mode = SessionMode::Rust);
+    explicit DebugApp(const std::string& program_path, SessionMode mode = SessionMode::Rust,
+                      DebugAdapter adapter = DebugAdapter::Debugpy);
     ~DebugApp();
 
     DebugApp(const DebugApp&) = delete;
@@ -153,12 +155,29 @@ class DebugApp {
     void capture_watch_input_state();
     void restore_watch_input_state();
     void finish_watch_input();
+    [[nodiscard]] bool step_in_selection_active() const;
+    void begin_step_in_selection(std::vector<StepInTargetSpan> targets);
+    void cancel_step_in_selection();
+    void cycle_step_in_target(int delta);
+    void confirm_step_in_selection();
+    void sync_step_in_selection_to_panel();
+    [[nodiscard]] std::string execution_line_source_text() const;
+    [[nodiscard]] std::int64_t current_frame_id() const;
+    bool handle_step_in_request();
+    void handle_step_in_targets_payload(const SessionIoEvent& event);
+    void send_step_into_command(std::optional<std::int64_t> target_id);
+    void send_command_direct(const char* op);
+    void update_step_in_status_message();
+    bool handle_step_in_selection_key(const tuinator::KeyPress& key);
+    void maybe_apply_reverse_continue_hint();
 
     SessionMode mode_;
+    DebugAdapter adapter_;
     std::string program_path_;
     std::unique_ptr<SessionIoThread> session_io_;
     bool launch_complete_handled_ = false;
     bool launch_posted_ = false;
+    bool reverse_continue_hint_shown_ = false;
     bool terminal_ready_for_session_ = false;
     bool ui_built_ = false;
     bool divider_drag_active_ = false;
@@ -219,6 +238,8 @@ class DebugApp {
     bool restart_pending_ = false;
     bool breakpoints_flushed_after_launch_ = false;
     bool follow_execution_ = true;
+    std::optional<StepInSelectionState> step_in_selection_;
+    bool step_in_targets_pending_ = false;
     std::unordered_map<std::string, std::vector<HighlightedLine>> source_plain_lines_cache_;
     BreakpointsByPath breakpoints_by_path_;
     std::chrono::steady_clock::time_point last_spinner_update_{};

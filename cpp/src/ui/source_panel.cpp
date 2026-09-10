@@ -172,6 +172,10 @@ void SourcePanel::set_on_request_viewport(ViewportRequestCallback callback) {
     on_request_viewport_ = std::move(callback);
 }
 
+void SourcePanel::set_on_step_in_target_click(StepInTargetClickCallback callback) {
+    on_step_in_target_click_ = std::move(callback);
+}
+
 void SourcePanel::move_cursor_by(int delta) {
     if (file_line_count_ <= 0) {
         return;
@@ -252,7 +256,47 @@ void SourcePanel::set_syntax_theme(SyntaxTheme theme) {
     theme_.breakpoint_marker.bold = true;
     theme_.breakpoint_conditional_marker.bold = true;
     theme_.execution_row.bold = true;
+    theme_.step_in_candidate.bold = true;
+    theme_.step_in_active.bold = true;
     mark_dirty();
+}
+
+void SourcePanel::set_step_in_selection(std::optional<StepInSelectionState> selection) {
+    step_in_selection_ = std::move(selection);
+    mark_dirty();
+}
+
+Style SourcePanel::style_for_code_column(int line_number, int code_column, HighlightKind base_kind) const {
+    if (step_in_selection_ && step_in_selection_->line == line_number) {
+        for (std::size_t index = 0; index < step_in_selection_->targets.size(); ++index) {
+            const StepInTargetSpan& target = step_in_selection_->targets[index];
+            if (code_column >= target.start_column && code_column < target.end_column) {
+                const HighlightKind kind = static_cast<int>(index) == step_in_selection_->active_index
+                                               ? HighlightKind::StepInActive
+                                               : HighlightKind::StepInCandidate;
+                return theme_.style_for(kind);
+            }
+        }
+    }
+    return theme_.style_for(base_kind);
+}
+
+bool SourcePanel::is_step_in_column(int line_number, int code_column) const {
+    return step_in_target_index_at(line_number, code_column).has_value();
+}
+
+std::optional<int> SourcePanel::step_in_target_index_at(int line_number, int code_column) const {
+    if (!step_in_selection_ || step_in_selection_->line != line_number) {
+        return std::nullopt;
+    }
+
+    for (std::size_t index = 0; index < step_in_selection_->targets.size(); ++index) {
+        const StepInTargetSpan& target = step_in_selection_->targets[index];
+        if (code_column >= target.start_column && code_column < target.end_column) {
+            return static_cast<int>(index);
+        }
+    }
+    return std::nullopt;
 }
 
 Size SourcePanel::preferred_size() const {
@@ -347,6 +391,18 @@ bool SourcePanel::handle_event(const Event& event) {
             set_cursor_line(line);
             on_toggle_breakpoint_(line);
             return true;
+        }
+
+        if (!right_click && step_in_selection_ && step_in_selection_->active()) {
+            if (const std::optional<int> target_index =
+                    step_in_target_index_at(line, code_column_from_local_x(local.x))) {
+                if (on_step_in_target_click_) {
+                    set_focused(true);
+                    set_cursor_line(line);
+                    on_step_in_target_click_(*target_index);
+                    return true;
+                }
+            }
         }
 
         if (!is_focused()) {
@@ -484,24 +540,35 @@ void SourcePanel::paint_line(PaintContext& ctx, int row, const HighlightedLine& 
         return;
     }
 
+    int code_column = 0;
     for (const HighlightSpan& span : line.spans) {
         if (span.text.empty()) {
             continue;
         }
 
-        Style span_style = theme_.merge_row_background(theme_.style_for(span.kind), row_style);
-        const int remaining = bounds_.width - x;
-        if (remaining <= 0) {
-            break;
-        }
+        std::size_t byte_offset = 0;
+        while (byte_offset < span.text.size()) {
+            const int remaining = bounds_.width - x;
+            if (remaining <= 0) {
+                return;
+            }
 
-        const std::size_t bytes = tuinator::text_byte_length_for_width(span.text, remaining);
-        if (bytes == 0) {
-            break;
-        }
+            const std::size_t chunk_bytes =
+                tuinator::text_byte_length_for_width(span.text.substr(byte_offset), remaining);
+            if (chunk_bytes == 0) {
+                return;
+            }
 
-        canvas.draw_text({x, row}, span.text.substr(0, bytes), span_style);
-        x += tuinator::text_display_width(span.text.substr(0, bytes));
+            const std::string chunk = span.text.substr(byte_offset, chunk_bytes);
+            const Style base = style_for_code_column(line.line_number, code_column, span.kind);
+            const Style span_style =
+                is_step_in_column(line.line_number, code_column) ? base : theme_.merge_row_background(base, row_style);
+            canvas.draw_text({x, row}, chunk, span_style);
+            const int chunk_width = tuinator::text_display_width(chunk);
+            x += chunk_width;
+            code_column += chunk_width;
+            byte_offset += chunk_bytes;
+        }
     }
 }
 

@@ -16,6 +16,8 @@ enum class HighlightKind {
     Number,
     Operator,
     Variable,
+    StepInCandidate,
+    StepInActive,
 };
 
 inline HighlightKind highlight_kind_from_string(std::string_view kind) {
@@ -65,6 +67,10 @@ struct SyntaxTheme {
     tuinator::Style breakpoint_conditional_marker{tuinator::style_fg_bg(tuinator::Rgb{255, 200, 80}, kBackground)};
     tuinator::Style execution_row{tuinator::style_fg_bg(tuinator::Rgb{255, 255, 255}, tuinator::Rgb{28, 80, 48})};
     tuinator::Style cursor_row{tuinator::style_fg_bg(tuinator::Rgb{255, 255, 255}, tuinator::Rgb{45, 45, 55})};
+    tuinator::Style step_in_candidate{
+        tuinator::style_fg_bg(tuinator::Rgb{30, 25, 0}, tuinator::Rgb{200, 160, 40})};
+    tuinator::Style step_in_active{
+        tuinator::style_fg_bg(tuinator::Rgb{0, 0, 0}, tuinator::Rgb{255, 235, 80})};
     tuinator::Style panel_background{tuinator::style_bg(tuinator::Rgb{30, 30, 36})};
 
     tuinator::Style style_for(HighlightKind kind) const {
@@ -85,6 +91,10 @@ struct SyntaxTheme {
             return operator_;
         case HighlightKind::Variable:
             return variable;
+        case HighlightKind::StepInCandidate:
+            return step_in_candidate;
+        case HighlightKind::StepInActive:
+            return step_in_active;
         case HighlightKind::Default:
             return default_text;
         }

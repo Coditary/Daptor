@@ -60,7 +60,20 @@ bool is_execution_control_command(const char* op) {
            std::strcmp(op, "pause") == 0 || std::strcmp(op, "step_over") == 0 ||
            std::strcmp(op, "next") == 0 || std::strcmp(op, "step_into") == 0 ||
            std::strcmp(op, "step_in") == 0 || std::strcmp(op, "step_out") == 0 ||
-           std::strcmp(op, "step_back") == 0;
+           std::strcmp(op, "step_back") == 0 || std::strcmp(op, "step_back_into") == 0 ||
+           std::strcmp(op, "reverse_continue") == 0;
+}
+
+bool command_state_synced_via_snapshot(const char* op) {
+    if (op == nullptr) {
+        return false;
+    }
+    return std::strcmp(op, "continue") == 0 || std::strcmp(op, "play_pause") == 0 ||
+           std::strcmp(op, "pause") == 0 || std::strcmp(op, "step_over") == 0 ||
+           std::strcmp(op, "next") == 0 || std::strcmp(op, "step_into") == 0 ||
+           std::strcmp(op, "step_in") == 0 || std::strcmp(op, "step_out") == 0 ||
+           std::strcmp(op, "step_back") == 0 || std::strcmp(op, "step_back_into") == 0 ||
+           std::strcmp(op, "reverse_continue") == 0;
 }
 
 std::string trim_watch_text(const std::string& text) {
@@ -538,7 +551,18 @@ int main_area_height(int terminal_height, int bottom_tray_height) {
 
 std::string source_cache_key(const std::string& path, std::int64_t source_reference) {
     if (!path.empty()) {
-        return path;
+        if (path.rfind("dap:source:", 0) == 0) {
+            return path;
+        }
+        try {
+            std::filesystem::path resolved(path);
+            if (resolved.is_relative()) {
+                resolved = std::filesystem::absolute(resolved);
+            }
+            return std::filesystem::weakly_canonical(resolved).string();
+        } catch (...) {
+            return path;
+        }
     }
     if (source_reference > 0) {
         return "dap:source:" + std::to_string(source_reference);
@@ -574,6 +598,105 @@ std::string read_file_or_empty(const std::string& path) {
     std::ostringstream buffer;
     buffer << input.rdbuf();
     return buffer.str();
+}
+
+bool looks_like_elf_executable(const std::string& path) {
+    if (path.empty()) {
+        return false;
+    }
+    std::ifstream input(path, std::ios::binary);
+    if (!input.is_open()) {
+        return false;
+    }
+    char magic[4] = {};
+    input.read(magic, 4);
+    return input.gcount() == 4 && magic[0] == '\x7f' && magic[1] == 'E' && magic[2] == 'L' && magic[3] == 'F';
+}
+
+bool source_file_exists(const std::string& path) {
+    if (path.empty()) {
+        return false;
+    }
+    std::ifstream input(path);
+    return input.good();
+}
+
+std::string sibling_source_for_executable(const std::string& program_path) {
+    if (!looks_like_elf_executable(program_path)) {
+        return {};
+    }
+
+    const std::filesystem::path executable(program_path);
+    const std::string stem = executable.filename().string();
+    const std::filesystem::path parent = executable.parent_path();
+
+    for (const char* extension : {".c", ".cpp", ".cc", ".cxx", ".rs"}) {
+        const std::filesystem::path candidate = parent / (stem + extension);
+        if (source_file_exists(candidate.string())) {
+            return candidate.string();
+        }
+    }
+    return {};
+}
+
+std::string resolve_debugger_source_path(const std::string& path, const std::string& program_path) {
+    if (path.empty() || path.rfind("dap:source:", 0) == 0) {
+        return path;
+    }
+
+    std::string normalized = path;
+    if (const std::size_t tick = normalized.find('`'); tick != std::string::npos) {
+        normalized.resize(tick);
+    }
+
+    if (source_file_exists(normalized)) {
+        return normalized;
+    }
+
+    try {
+        const std::filesystem::path reported(normalized);
+        if (!program_path.empty()) {
+            const std::filesystem::path program(program_path);
+            const std::filesystem::path joined = program.parent_path() / reported;
+            if (source_file_exists(joined.string())) {
+                return joined.string();
+            }
+            if (!reported.filename().empty()) {
+                const std::filesystem::path sibling = program.parent_path() / reported.filename();
+                if (source_file_exists(sibling.string())) {
+                    return sibling.string();
+                }
+            }
+        }
+
+        if (reported.is_relative()) {
+            const std::filesystem::path absolute = std::filesystem::absolute(reported);
+            if (source_file_exists(absolute.string())) {
+                return absolute.string();
+            }
+        }
+    } catch (...) {
+    }
+
+    if (looks_like_elf_executable(normalized)) {
+        return sibling_source_for_executable(normalized);
+    }
+
+    return normalized;
+}
+
+bool should_open_program_path_as_source(const std::string& program_path) {
+    if (program_path.empty() || looks_like_elf_executable(program_path)) {
+        return false;
+    }
+    return source_file_exists(program_path);
+}
+
+std::string preferred_program_source_path(const std::string& program_path) {
+    if (should_open_program_path_as_source(program_path)) {
+        return program_path;
+    }
+    return sibling_source_for_executable(program_path);
 }
 
 int count_file_lines(const std::string& text) {
@@ -676,8 +799,11 @@ std::string language_from_path(const std::string& path) {
 
 namespace tui_debug_ui {
 
-DebugApp::DebugApp(const std::string& program_path, SessionMode mode)
-    : mode_(mode), program_path_(program_path), session_io_(std::make_unique<SessionIoThread>(mode)),
+DebugApp::DebugApp(const std::string& program_path, SessionMode mode, DebugAdapter adapter)
+    : mode_(mode),
+      adapter_(adapter),
+      program_path_(program_path),
+      session_io_(std::make_unique<SessionIoThread>(mode, adapter)),
       app_(std::make_unique<tuinator::Application>()) {
     tuinator::Theme theme = app_->theme();
     dap_theme_.apply_to(theme);
@@ -685,6 +811,12 @@ DebugApp::DebugApp(const std::string& program_path, SessionMode mode)
 
     if (mode_ == SessionMode::Mock) {
         model_.status_message = "Mock UI mode (no Rust backend)";
+    } else if (adapter_ == DebugAdapter::Lldb) {
+        model_.status_message = "Connecting to lldb-dap…";
+    } else if (adapter_ == DebugAdapter::Rr) {
+        model_.status_message = "Recording with rr…";
+    } else {
+        model_.status_message = "Connecting to debugpy…";
     }
 
 }
@@ -872,8 +1004,21 @@ void DebugApp::build_ui() {
         highlight_request_line_count_ = -1;
         maybe_request_source_highlight();
     });
+    source_panel_->set_on_step_in_target_click([this](int target_index) {
+        if (!step_in_selection_active()) {
+            return;
+        }
+        if (target_index < 0 || target_index >= static_cast<int>(step_in_selection_->targets.size())) {
+            return;
+        }
+        step_in_selection_->active_index = target_index;
+        confirm_step_in_selection();
+    });
     if (!program_path_.empty()) {
-        source_panel_->set_file_line_count(std::max(1, count_file_lines(read_file_or_empty(program_path_))));
+        const std::string preview_path = preferred_program_source_path(program_path_);
+        if (!preview_path.empty()) {
+            source_panel_->set_file_line_count(std::max(1, count_file_lines(read_file_or_empty(preview_path))));
+        }
     }
 
     source_section_ = std::make_unique<TitledScrollPane>(panel_title_from_path(model_.source_path),
@@ -969,8 +1114,8 @@ void DebugApp::build_ui() {
     sync_ui_from_model();
     sync_controls_bar();
     sync_breakpoints_list_panel();
-    if (!program_path_.empty()) {
-        open_source_file(program_path_, 1, false);
+    if (const std::string preview_path = preferred_program_source_path(program_path_); !preview_path.empty()) {
+        open_source_file(preview_path, 1, false);
         if (!launch_posted_) {
             prefetch_program_source_highlight();
         }
@@ -1018,17 +1163,18 @@ void DebugApp::maybe_start_launch() {
 }
 
 void DebugApp::prefetch_program_source_highlight() {
-    if (program_path_.empty() || session_io_ == nullptr) {
+    const std::string source_path = preferred_program_source_path(program_path_);
+    if (source_path.empty() || session_io_ == nullptr) {
         return;
     }
 
-    const std::string text = read_file_or_empty(program_path_);
+    const std::string text = read_file_or_empty(source_path);
     if (text.empty()) {
         return;
     }
 
     if (cached_source_text_.empty()) {
-        cached_source_path_ = program_path_;
+        cached_source_path_ = source_path;
         cached_source_text_ = text;
         if (source_panel_ != nullptr) {
             source_panel_->set_file_line_count(std::max(1, count_file_lines(text)));
@@ -1037,7 +1183,7 @@ void DebugApp::prefetch_program_source_highlight() {
     }
 
     const int line_count = std::min(kMaxHighlightLinesPerRequest, kHighlightLineMargin + 24);
-    session_io_->request_highlight(language_from_path(program_path_), text, 1, line_count);
+    session_io_->request_highlight(language_from_path(source_path), text, 1, line_count);
 }
 
 bool DebugApp::update_connecting_spinner() {
@@ -1048,7 +1194,15 @@ bool DebugApp::update_connecting_spinner() {
     last_spinner_update_ = now;
 
     static constexpr char kSpinner[] = "|/-\\";
-    const std::string message = std::string("Connecting to debugpy… ")
+    const char* adapter_label = "debugpy";
+    if (mode_ == SessionMode::Mock) {
+        adapter_label = "mock session";
+    } else if (adapter_ == DebugAdapter::Lldb) {
+        adapter_label = "lldb-dap";
+    } else if (adapter_ == DebugAdapter::Rr) {
+        adapter_label = "rr replay";
+    }
+    const std::string message = std::string("Connecting to ") + adapter_label + "… "
                               + kSpinner[static_cast<std::size_t>(spinner_frame_++ % 4)];
     if (message == model_.status_message) {
         return false;
@@ -1075,32 +1229,60 @@ void DebugApp::handle_launch_complete() {
     sync_ui_from_model();
 
     if (session_io_->is_active()) {
-        if (model_.source_path.empty() && !program_path_.empty()) {
-            open_source_file(program_path_, 1, false);
+        if (const std::string preview_path = preferred_program_source_path(program_path_);
+            model_.source_path.empty() && !preview_path.empty() && model_.execution_path.empty()) {
+            open_source_file(preview_path, 1, false);
         }
         maybe_follow_execution();
         maybe_request_scope_variables();
         maybe_request_source_highlight();
         normalize_breakpoint_path_keys();
-        flush_breakpoints_to_session();
-        breakpoints_flushed_after_launch_ = true;
+        if (is_session_stopped()) {
+            flush_breakpoints_to_session();
+            breakpoints_flushed_after_launch_ = true;
+            maybe_request_scope_variables();
+            resolve_watches_from_locals();
+        } else if (model_.session_state == "exited" || model_.session_state == "Exited") {
+            model_.status_message =
+                "Program exited before stopping — press Restart, or rebuild: "
+                "gcc -g -O0 -o fixtures/reverse_demo fixtures/reverse_demo.c";
+        }
         sync_breakpoints_list_panel();
         sync_breakpoints_to_panel();
-        resolve_watches_from_locals();
-        restore_watch_input_state();
+        if (breakpoints_flushed_after_launch_) {
+            restore_watch_input_state();
+        }
         request_full_screen_refresh();
     }
 }
 
 void DebugApp::apply_snapshot_json_payload(const std::string& json) {
     const std::string previous_state = model_.session_state;
+    if (step_in_selection_active()) {
+        cancel_step_in_selection();
+    }
+    step_in_targets_pending_ = false;
     model_.apply_snapshot_json(json);
+    if (is_session_stopped()) {
+        for (const ScopeInfo& scope : model_.scopes) {
+            if (scope.variables_reference > 0 && is_locals_scope_name(scope.name) && !model_.variables.empty()) {
+                model_.scope_variables[scope.variables_reference] = model_.variables;
+            }
+        }
+    }
+    if (!model_.execution_path.empty() && model_.execution_path.rfind("dap:source:", 0) != 0) {
+        const std::string resolved = resolve_debugger_source_path(model_.execution_path, program_path_);
+        if (!resolved.empty()) {
+            model_.execution_path = resolved;
+        }
+    }
     ++snapshot_generation_;
     scope_variables_fetch_pending_ = false;
     scope_variables_fetch_signature_.clear();
     scope_variables_signature_.clear();
-    if (model_.source_path.empty() && !program_path_.empty() && model_.execution_path.empty()) {
-        open_source_file(program_path_, 1, false);
+    if (const std::string preview_path = preferred_program_source_path(program_path_);
+        model_.source_path.empty() && !preview_path.empty() && model_.execution_path.empty()) {
+        open_source_file(preview_path, 1, false);
     }
     if (is_session_stopped()) {
         maybe_follow_execution();
@@ -1239,9 +1421,7 @@ void DebugApp::handle_session_event(const SessionIoEvent& event) {
             }
         } else if (std::strcmp(event.payload.c_str(), "disconnect") == 0) {
             reclaim_terminal_for_ui();
-        } else if (std::strcmp(event.payload.c_str(), "play_pause") == 0 ||
-                   std::strcmp(event.payload.c_str(), "continue") == 0 ||
-                   std::strcmp(event.payload.c_str(), "pause") == 0) {
+        } else if (command_state_synced_via_snapshot(event.payload.c_str())) {
             // SnapshotJson already refreshed session_state/status_message.
         } else {
             const std::string status = command_status_message(event.payload.c_str());
@@ -1292,6 +1472,9 @@ void DebugApp::handle_session_event(const SessionIoEvent& event) {
         if (source_panel_ != nullptr) {
             source_panel_->mark_dirty();
         }
+        break;
+    case SessionIoEventKind::StepInTargetsReady:
+        handle_step_in_targets_payload(event);
         break;
     }
 }
@@ -1347,6 +1530,7 @@ void DebugApp::poll_session() {
 
 void DebugApp::sync_ui_from_model() {
     sync_controls_bar();
+    maybe_apply_reverse_continue_hint();
     sync_status_bar();
     if (scopes_panel_ != nullptr) {
         std::vector<std::string> scope_rows = build_scope_rows(model_);
@@ -1444,18 +1628,21 @@ void DebugApp::sync_ui_from_model() {
             !model_.execution_path.empty() &&
             viewing_same_source(model_.source_path, model_.source_reference, model_.execution_path,
                                 model_.execution_source_reference);
-        source_panel_->set_execution_line(viewing_execution && model_.execution_line > 0
-                                               ? static_cast<int>(model_.execution_line)
-                                               : 0);
+        const int next_execution_line =
+            viewing_execution && model_.execution_line > 0 ? static_cast<int>(model_.execution_line) : 0;
+        if (source_panel_->execution_line() != next_execution_line) {
+            source_panel_->set_execution_line(next_execution_line);
+        }
         if (viewing_execution && model_.execution_line > 0 &&
             model_.execution_line != cached_follow_line_) {
             cached_follow_line_ = model_.execution_line;
-            source_panel_->set_execution_line(static_cast<int>(model_.execution_line));
             if (follow_execution_) {
                 scroll_source_to_line(static_cast<int>(model_.execution_line));
                 cached_highlight_first_line_ = -1;
                 highlight_request_first_line_ = -1;
                 maybe_request_source_highlight();
+            } else {
+                source_panel_->mark_dirty();
             }
         }
     }
@@ -1788,6 +1975,17 @@ bool DebugApp::is_session_stopped() const {
            model_.session_state.find("stopped") != std::string::npos;
 }
 
+void DebugApp::maybe_apply_reverse_continue_hint() {
+    if (reverse_continue_hint_shown_ || mode_ == SessionMode::Mock || adapter_ != DebugAdapter::Lldb ||
+        model_.supports_step_back || !is_session_stopped()) {
+        return;
+    }
+
+    reverse_continue_hint_shown_ = true;
+    model_.status_message =
+        "Reverse continue unavailable on this system (LLDB trace). Step Over/Into/Out still work.";
+}
+
 void DebugApp::sync_controls_bar() {
     if (controls_bar_ == nullptr) {
         return;
@@ -1797,11 +1995,13 @@ void DebugApp::sync_controls_bar() {
     const bool ended = model_.session_state == "exited" || model_.session_state == "disconnected";
     if (controls_bar_->session_active() == active && controls_bar_->stopped() == stopped &&
         controls_bar_->session_ended() == ended) {
-        return;
+        // fall through — capabilities may still need syncing
+    } else {
+        controls_bar_->set_session_active(active);
+        controls_bar_->set_stopped(stopped);
+        controls_bar_->set_session_ended(ended);
     }
-    controls_bar_->set_session_active(active);
-    controls_bar_->set_stopped(stopped);
-    controls_bar_->set_session_ended(ended);
+    controls_bar_->set_supports_step_back(mode_ == SessionMode::Mock ? true : model_.supports_step_back);
 }
 
 std::string DebugApp::format_status_bar_text() const {
@@ -1983,6 +2183,9 @@ bool DebugApp::is_scope_input_focused() const {
 }
 
 bool DebugApp::should_block_app_quit_key(const tuinator::KeyPress& key) const {
+    if (step_in_selection_active()) {
+        return true;
+    }
     if (context_menu_open()) {
         return true;
     }
@@ -2035,6 +2238,10 @@ void DebugApp::blur_scope_input() {
 }
 
 bool DebugApp::handle_global_key(const tuinator::KeyPress& key) {
+    if (handle_step_in_selection_key(key)) {
+        return true;
+    }
+
     if (key.ctrl && key.character == 'c') {
         if (app_ != nullptr) {
             app_->quit();
@@ -2057,10 +2264,15 @@ bool DebugApp::handle_global_key(const tuinator::KeyPress& key) {
         return false;
     }
 
-    if (key.character >= '1' && key.character <= '8') {
-        static constexpr const char* kControlOps[] = {"play_pause", "step_into", "step_over", "step_out",
-                                                      "step_back", "restart", "terminate", "disconnect"};
+    if (key.character >= '1' && key.character <= '9') {
+        static constexpr const char* kControlOps[] = {
+            "play_pause",     "step_into",   "step_over",        "step_out",      "step_back",
+            "step_back_into", "reverse_continue", "restart", "terminate", "disconnect"};
         send_command(kControlOps[key.character - '1']);
+        return true;
+    }
+    if (key.character == '0') {
+        send_command("disconnect");
         return true;
     }
 
@@ -2225,7 +2437,8 @@ void DebugApp::apply_execution_command_started(const char* op) {
     }
 
     if (std::strcmp(op, "step_over") == 0 || std::strcmp(op, "next") == 0 || std::strcmp(op, "step_into") == 0 ||
-        std::strcmp(op, "step_in") == 0 || std::strcmp(op, "step_out") == 0 || std::strcmp(op, "step_back") == 0) {
+        std::strcmp(op, "step_in") == 0 || std::strcmp(op, "step_out") == 0 || std::strcmp(op, "step_back") == 0 ||
+        std::strcmp(op, "step_back_into") == 0 || std::strcmp(op, "reverse_continue") == 0) {
         model_.session_state = "running";
         model_.stop_reason.clear();
         return;
@@ -2251,7 +2464,276 @@ void DebugApp::apply_execution_command_started(const char* op) {
     }
 }
 
+bool DebugApp::step_in_selection_active() const {
+    return step_in_selection_.has_value() && step_in_selection_->active();
+}
+
+void DebugApp::sync_step_in_selection_to_panel() {
+    if (source_panel_ == nullptr) {
+        return;
+    }
+    source_panel_->set_step_in_selection(step_in_selection_);
+    source_panel_->mark_dirty();
+    sync_status_bar();
+}
+
+void DebugApp::cancel_step_in_selection() {
+    if (!step_in_selection_active()) {
+        return;
+    }
+    step_in_selection_.reset();
+    sync_step_in_selection_to_panel();
+}
+
+std::string DebugApp::execution_line_source_text() const {
+    const int line = source_panel_ != nullptr && source_panel_->execution_line() > 0
+                         ? source_panel_->execution_line()
+                         : static_cast<int>(model_.execution_line);
+    if (line <= 0) {
+        return {};
+    }
+    if (!cached_source_text_.empty()) {
+        return line_text_at(cached_source_text_, line);
+    }
+    if (source_panel_ != nullptr) {
+        return highlighted_line_text(source_panel_, line);
+    }
+    return {};
+}
+
+void DebugApp::begin_step_in_selection(std::vector<StepInTargetSpan> targets) {
+    if (targets.size() <= 1) {
+        return;
+    }
+
+    const int line = source_panel_ != nullptr && source_panel_->execution_line() > 0
+                         ? source_panel_->execution_line()
+                         : static_cast<int>(model_.execution_line);
+    if (line <= 0) {
+        model_.status_message = "No execution line for step-in selection";
+        sync_status_bar();
+        return;
+    }
+
+    StepInSelectionState selection{};
+    selection.line = line;
+    selection.targets = std::move(targets);
+    selection.active_index = 0;
+    step_in_selection_ = std::move(selection);
+
+    model_.focus = Focus::Source;
+    apply_focus();
+    if (source_panel_ != nullptr) {
+        source_panel_->set_cursor_line(line);
+        source_panel_->ensure_cursor_visible();
+    }
+
+    update_step_in_status_message();
+    sync_step_in_selection_to_panel();
+    sync_ui_from_model();
+}
+
+void DebugApp::update_step_in_status_message() {
+    if (!step_in_selection_active()) {
+        return;
+    }
+    const StepInTargetSpan* active = step_in_selection_->active_target();
+    const std::string label = active != nullptr ? active->label : "target";
+    model_.status_message = "Step into [" + std::to_string(step_in_selection_->active_index + 1) + "/" +
+                            std::to_string(step_in_selection_->targets.size()) + "]: " + label +
+                            "  |  click target  |  ←/→ choose  |  i/Enter confirm  |  Esc cancel";
+}
+
+std::int64_t DebugApp::current_frame_id() const {
+    if (!model_.stack_frames.empty()) {
+        return model_.stack_frames.front().id;
+    }
+    return 0;
+}
+
+bool DebugApp::handle_step_in_request() {
+    if (!is_session_stopped() || step_in_selection_active() || step_in_targets_pending_) {
+        return false;
+    }
+    if (session_io_ == nullptr || !session_io_->is_active()) {
+        return false;
+    }
+
+    const std::int64_t frame_id = current_frame_id();
+    if (frame_id <= 0) {
+        model_.status_message = "No active frame for step into";
+        sync_status_bar();
+        return true;
+    }
+
+    step_in_targets_pending_ = true;
+    session_io_->request_step_in_targets(frame_id);
+    model_.status_message = "Resolving step-in targets…";
+    sync_status_bar();
+    return true;
+}
+
+void DebugApp::handle_step_in_targets_payload(const SessionIoEvent& event) {
+    step_in_targets_pending_ = false;
+
+    const std::string line_text = execution_line_source_text();
+    std::vector<StepInTargetSpan> targets;
+    if (event.success) {
+        std::string error;
+        targets = build_step_in_target_spans(line_text, event.payload, error);
+        if (!error.empty() && targets.empty()) {
+            model_.status_message = "Step-in targets failed: " + error;
+            sync_status_bar();
+            return;
+        }
+    } else if (!line_text.empty()) {
+        targets = find_step_in_targets_on_line(line_text);
+        if (!event.payload.empty()) {
+            model_.status_message = "Step-in targets failed: " + event.payload;
+        }
+    }
+
+    if (targets.empty()) {
+        send_step_into_command(std::nullopt);
+        return;
+    }
+    if (targets.size() == 1) {
+        send_step_into_command(targets.front().target_id >= 0 ? std::optional<std::int64_t>(targets.front().target_id)
+                                                              : std::nullopt);
+        return;
+    }
+
+    begin_step_in_selection(std::move(targets));
+}
+
+void DebugApp::send_step_into_command(std::optional<std::int64_t> target_id) {
+    if (session_io_ == nullptr || !session_io_->is_active()) {
+        model_.status_message = "No active session";
+        sync_status_bar();
+        return;
+    }
+
+    apply_execution_command_started("step_into");
+    if (target_id.has_value() && *target_id >= 0) {
+        session_io_->post_command(R"({"op":"step_into","target_id":)" + std::to_string(*target_id) + "}");
+        model_.status_message = "Step into";
+    } else {
+        session_io_->post_command("step_into");
+        model_.status_message = "Step into";
+    }
+    sync_ui_from_model();
+}
+
+void DebugApp::send_command_direct(const char* op) {
+    if (op == nullptr || session_io_ == nullptr || !session_io_->is_active()) {
+        model_.status_message = "No active session";
+        sync_status_bar();
+        return;
+    }
+
+    apply_execution_command_started(op);
+    if (!command_state_synced_via_snapshot(op)) {
+        model_.status_message = command_status_message(op);
+    }
+    session_io_->post_command(op);
+    sync_ui_from_model();
+}
+
+void DebugApp::cycle_step_in_target(int delta) {
+    if (!step_in_selection_active()) {
+        return;
+    }
+
+    const int count = static_cast<int>(step_in_selection_->targets.size());
+    if (count <= 0) {
+        return;
+    }
+
+    int next = step_in_selection_->active_index + delta;
+    next %= count;
+    if (next < 0) {
+        next += count;
+    }
+    step_in_selection_->active_index = next;
+
+    update_step_in_status_message();
+    sync_step_in_selection_to_panel();
+    sync_status_bar();
+}
+
+void DebugApp::confirm_step_in_selection() {
+    if (!step_in_selection_active()) {
+        return;
+    }
+
+    const StepInTargetSpan* active = step_in_selection_->active_target();
+    const std::string label = active != nullptr ? active->label : "target";
+    const std::optional<std::int64_t> target_id =
+        active != nullptr && active->target_id >= 0 ? std::optional<std::int64_t>(active->target_id) : std::nullopt;
+    cancel_step_in_selection();
+    model_.status_message = "Step into " + label;
+    sync_status_bar();
+    send_step_into_command(target_id);
+}
+
+bool DebugApp::handle_step_in_selection_key(const tuinator::KeyPress& key) {
+    if (!step_in_selection_active()) {
+        return false;
+    }
+
+    if (key.key == tuinator::Key::Escape) {
+        cancel_step_in_selection();
+        model_.status_message = "Step into cancelled";
+        sync_status_bar();
+        return true;
+    }
+
+    if (key.key == tuinator::Key::Left || key.character == 'h') {
+        cycle_step_in_target(-1);
+        return true;
+    }
+    if (key.key == tuinator::Key::Right || key.character == 'l') {
+        cycle_step_in_target(1);
+        return true;
+    }
+    if (key.key == tuinator::Key::Up || key.character == 'k') {
+        cycle_step_in_target(-1);
+        return true;
+    }
+    if (key.key == tuinator::Key::Down || key.character == 'j') {
+        cycle_step_in_target(1);
+        return true;
+    }
+    if (key.key == tuinator::Key::Enter || key.character == 'i') {
+        confirm_step_in_selection();
+        return true;
+    }
+    if (key.character >= '1' && key.character <= '8') {
+        if (key.character == '2') {
+            confirm_step_in_selection();
+        }
+        return true;
+    }
+
+    return true;
+}
+
 void DebugApp::send_command(const char* op) {
+    if (op == nullptr) {
+        return;
+    }
+
+    if (std::strcmp(op, "step_into") == 0) {
+        if (step_in_selection_active()) {
+            confirm_step_in_selection();
+            return;
+        }
+        if (handle_step_in_request()) {
+            sync_ui_from_model();
+            return;
+        }
+    }
+
     if (!session_io_->is_active()) {
         model_.status_message = "No active session";
         sync_ui_from_model();
@@ -2265,8 +2747,9 @@ void DebugApp::send_command(const char* op) {
         mark_all_panels_dirty();
     } else if (std::strcmp(op, "terminate") == 0 || std::strcmp(op, "disconnect") == 0) {
         apply_execution_command_started(op);
-    } else if (std::strcmp(op, "continue") == 0 || std::strcmp(op, "play_pause") == 0 ||
-               std::strcmp(op, "pause") == 0) {
+    } else if (command_state_synced_via_snapshot(op)) {
+        // Snapshot from the IO thread owns the next stopped/running state.
+    } else {
         apply_execution_command_started(op);
     }
 
@@ -2492,7 +2975,19 @@ void DebugApp::mark_all_panels_dirty() {
 }
 
 void DebugApp::open_source_file(const std::string& path, int line, bool pin, std::int64_t source_reference) {
-    const std::string cache_key = source_cache_key(path, source_reference);
+    std::string disk_path = path;
+    if (!disk_path.empty() && disk_path.rfind("dap:source:", 0) != 0) {
+        disk_path = resolve_debugger_source_path(disk_path, program_path_);
+        if (looks_like_elf_executable(disk_path)) {
+            if (const std::string sibling = sibling_source_for_executable(disk_path); !sibling.empty()) {
+                disk_path = sibling;
+            } else {
+                return;
+            }
+        }
+    }
+
+    const std::string cache_key = source_cache_key(disk_path.empty() ? path : disk_path, source_reference);
     if (cache_key.empty()) {
         return;
     }
@@ -2500,16 +2995,22 @@ void DebugApp::open_source_file(const std::string& path, int line, bool pin, std
         follow_execution_ = false;
     }
 
-    const std::string display_path = path.empty() && source_reference > 0 ? cache_key : path;
+    const std::string display_path =
+        (disk_path.empty() && source_reference > 0) ? cache_key : (disk_path.empty() ? path : disk_path);
+    const std::string normalized_display_path =
+        display_path.rfind("dap:source:", 0) == 0 ? display_path : source_cache_key(display_path, 0);
     const bool same_view =
-        viewing_same_source(model_.source_path, model_.source_reference, display_path, source_reference) &&
+        viewing_same_source(model_.source_path, model_.source_reference, normalized_display_path, source_reference) &&
         source_panel_ != nullptr && line > 0 && source_panel_->cursor_line() == line &&
         !source_panel_->lines().empty();
     if (same_view) {
+        if (source_panel_ != nullptr && is_session_stopped() && model_.execution_line > 0) {
+            source_panel_->set_execution_line(static_cast<int>(model_.execution_line));
+        }
         return;
     }
 
-    model_.source_path = display_path;
+    model_.source_path = normalized_display_path;
     model_.source_reference = source_reference;
 
     const bool cache_hit =
@@ -2517,7 +3018,7 @@ void DebugApp::open_source_file(const std::string& path, int line, bool pin, std
     if (!cache_hit) {
         cached_source_path_ = cache_key;
         cached_source_reference_ = source_reference;
-        cached_source_text_ = path.empty() ? std::string{} : read_file_or_empty(path);
+        cached_source_text_ = disk_path.empty() ? std::string{} : read_file_or_empty(disk_path);
         cached_highlight_first_line_ = -1;
         cached_highlight_line_count_ = -1;
         highlight_request_first_line_ = -1;
@@ -2585,6 +3086,8 @@ void DebugApp::maybe_follow_execution() {
     std::string path = model_.execution_path;
     if (path.rfind("dap:source:", 0) == 0) {
         path.clear();
+    } else {
+        path = resolve_debugger_source_path(path, program_path_);
     }
     open_source_file(path, line, false, model_.execution_source_reference);
 }
@@ -3196,6 +3699,15 @@ std::string DebugApp::command_status_message(const char* op) const {
     }
     if (std::strcmp(op, "step_out") == 0) {
         return "Step out";
+    }
+    if (std::strcmp(op, "reverse_continue") == 0) {
+        return "Continue back";
+    }
+    if (std::strcmp(op, "step_back") == 0) {
+        return "Step back";
+    }
+    if (std::strcmp(op, "step_back_into") == 0) {
+        return "Step back into";
     }
     return std::string("Sent: ") + op;
 }

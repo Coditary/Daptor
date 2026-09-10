@@ -20,6 +20,7 @@ class ControlsBar : public tuinator::Widget {
     void set_session_active(bool active);
     void set_stopped(bool stopped);
     void set_session_ended(bool ended);
+    void set_supports_step_back(bool supported);
     bool session_active() const { return session_active_; }
     bool stopped() const { return stopped_; }
     bool session_ended() const { return session_ended_; }
@@ -48,8 +49,9 @@ class ControlsBar : public tuinator::Widget {
     bool session_active_ = false;
     bool stopped_ = false;
     bool session_ended_ = false;
+    bool supports_step_back_ = false;
     int hover_index_ = -1;
-    static constexpr int kButtonCount = 8;
+    static constexpr int kButtonCount = 10;
     static const ControlButton kButtons[kButtonCount];
 };
 

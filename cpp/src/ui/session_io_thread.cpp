@@ -12,7 +12,8 @@ constexpr auto kBreakpointDebounce = std::chrono::milliseconds(150);
 
 }  // namespace
 
-SessionIoThread::SessionIoThread(SessionMode mode) : backend_(create_session_backend(mode)) {
+SessionIoThread::SessionIoThread(SessionMode mode, DebugAdapter adapter)
+    : backend_(create_session_backend(mode, adapter)) {
     thread_ = std::thread([this]() { thread_main(); });
 }
 
@@ -193,16 +194,73 @@ void SessionIoThread::push_event(SessionIoEvent event) {
 }
 
 bool SessionIoThread::command_needs_snapshot(const std::string& op) {
-    return op == "step_over" || op == "next" || op == "step_into" || op == "step_in" || op == "step_out" ||
-           op == "step_back" || op == "restart" || op == "disconnect" || op == "terminate";
+    const std::string name = command_op_name(op);
+    return name == "step_over" || name == "next" || name == "step_into" || name == "step_in" || name == "step_out" ||
+           name == "step_back" || name == "step_back_into" || name == "reverse_continue" || name == "restart" ||
+           name == "disconnect" || name == "terminate";
 }
 
 bool SessionIoThread::command_syncs_snapshot(const std::string& op) {
-    return op == "continue" || op == "play_pause" || op == "pause";
+    const std::string name = command_op_name(op);
+    return name == "continue" || name == "play_pause" || name == "pause";
 }
 
 bool SessionIoThread::command_preempts_background_work(const std::string& op) {
-    return command_needs_snapshot(op) || op == "continue" || op == "play_pause" || op == "pause";
+    return command_needs_snapshot(op) || command_syncs_snapshot(op);
+}
+
+std::string SessionIoThread::command_op_name(const std::string& op_or_json) {
+    if (op_or_json.empty() || op_or_json.front() != '{') {
+        return op_or_json;
+    }
+
+    const std::string needle = "\"op\"";
+    const std::size_t op_pos = op_or_json.find(needle);
+    if (op_pos == std::string::npos) {
+        return op_or_json;
+    }
+    const std::size_t colon = op_or_json.find(':', op_pos);
+    const std::size_t quote = op_or_json.find('"', colon + 1);
+    const std::size_t end = op_or_json.find('"', quote + 1);
+    if (quote == std::string::npos || end == std::string::npos) {
+        return op_or_json;
+    }
+    return op_or_json.substr(quote + 1, end - quote - 1);
+}
+
+void SessionIoThread::request_step_in_targets(std::int64_t frame_id) {
+    {
+        std::lock_guard lock(mutex_);
+        step_in_targets_frame_ = frame_id;
+    }
+    cv_.notify_all();
+}
+
+void SessionIoThread::process_step_in_targets_fetch() {
+    if (!adapter_live_.load(std::memory_order_acquire)) {
+        return;
+    }
+
+    if (has_pending_execution_command()) {
+        return;
+    }
+
+    std::int64_t frame_id = 0;
+    {
+        std::lock_guard lock(mutex_);
+        if (!step_in_targets_frame_.has_value()) {
+            return;
+        }
+        frame_id = *step_in_targets_frame_;
+        step_in_targets_frame_.reset();
+    }
+
+    std::string json;
+    std::string error;
+    const bool ok = backend_->fetch_step_in_targets(frame_id, json, error);
+    SessionIoEvent event{SessionIoEventKind::StepInTargetsReady, ok, ok ? std::move(json) : std::move(error),
+                         std::to_string(frame_id)};
+    push_event(std::move(event));
 }
 
 void SessionIoThread::sync_initial_state() {
@@ -376,17 +434,18 @@ void SessionIoThread::process_pending_breakpoints() {
 }
 
 void SessionIoThread::dispatch_command(const std::string& op) {
+    const std::string op_name = command_op_name(op);
     std::string error;
     const bool ok = backend_->send_command(op, error);
     if (!ok) {
-        push_event(SessionIoEvent{SessionIoEventKind::CommandFinished, false, op, error});
+        push_event(SessionIoEvent{SessionIoEventKind::CommandFinished, false, op_name, error});
         return;
     }
 
-    if (op == "disconnect") {
+    if (op_name == "disconnect") {
         adapter_live_.store(false, std::memory_order_release);
         clear_pending_adapter_work();
-    } else if (op == "restart") {
+    } else if (op_name == "restart") {
         adapter_live_.store(true, std::memory_order_release);
         clear_pending_adapter_work();
     }
@@ -400,7 +459,7 @@ void SessionIoThread::dispatch_command(const std::string& op) {
         }
     }
 
-    push_event(SessionIoEvent{SessionIoEventKind::CommandFinished, true, op});
+    push_event(SessionIoEvent{SessionIoEventKind::CommandFinished, true, op_name});
 }
 
 void SessionIoThread::process_preempting_commands() {
@@ -552,6 +611,9 @@ void SessionIoThread::thread_main() {
                 if (!has_pending_execution_command()) {
                     process_scope_fetch();
                 }
+                if (!has_pending_execution_command()) {
+                    process_step_in_targets_fetch();
+                }
             }
 
             std::unique_lock lock(mutex_);
@@ -560,7 +622,7 @@ void SessionIoThread::thread_main() {
                        pending_evaluate_.has_value() || pending_set_variable_.has_value() ||
                        (pending_breakpoints_path_.has_value() && pending_breakpoints_json_.has_value()) ||
                        scope_fetch_pending_ || highlight_request_.has_value() ||
-                       source_fetch_reference_.has_value() ||
+                       source_fetch_reference_.has_value() || step_in_targets_frame_.has_value() ||
                        (!launch_started_.load(std::memory_order_acquire) && !program_path_.empty());
             });
         } catch (const std::exception& ex) {

@@ -111,6 +111,18 @@ pub struct Variable {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StepInTarget {
+    pub id: i64,
+    pub label: String,
+    pub line: Option<i64>,
+    pub column: Option<i64>,
+    #[serde(rename = "endLine")]
+    pub end_line: Option<i64>,
+    #[serde(rename = "endColumn")]
+    pub end_column: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoppedEventBody {
     #[serde(rename = "threadId")]
     pub thread_id: i64,

@@ -11,11 +11,19 @@ namespace tui_debug_ui {
 
 class RustSessionBackend final : public SessionBackend {
   public:
+    explicit RustSessionBackend(DebugAdapter adapter) : adapter_(adapter) {}
+
     ~RustSessionBackend() override { shutdown(); }
 
     void launch(const std::string& program_path) override {
         shutdown();
-        session_ = tui_debug_session_launch(program_path.c_str());
+        if (adapter_ == DebugAdapter::Lldb) {
+            session_ = tui_debug_session_launch_lldb(program_path.c_str());
+        } else if (adapter_ == DebugAdapter::Rr) {
+            session_ = tui_debug_session_launch_rr(program_path.c_str());
+        } else {
+            session_ = tui_debug_session_launch(program_path.c_str());
+        }
     }
 
     void shutdown() override {
@@ -72,9 +80,25 @@ class RustSessionBackend final : public SessionBackend {
             return false;
         }
 
-        char cmd[128];
-        std::snprintf(cmd, sizeof(cmd), "{\"op\":\"%s\"}", op.c_str());
-        if (tui_debug_command(session_, cmd) == 0) {
+        const std::string cmd = !op.empty() && op.front() == '{' ? op : std::string("{\"op\":\"") + op + "\"}";
+        if (tui_debug_command(session_, cmd.c_str()) == 0) {
+            return true;
+        }
+
+        error_out = adapter_last_error();
+        return false;
+    }
+
+    bool fetch_step_in_targets(std::int64_t frame_id, std::string& json_out,
+                               std::string& error_out) override {
+        if (session_ == nullptr) {
+            error_out = "no session";
+            return false;
+        }
+
+        char buffer[16384];
+        if (tui_debug_fetch_step_in_targets(session_, frame_id, buffer, sizeof(buffer)) == 0) {
+            json_out = buffer;
             return true;
         }
 
@@ -177,10 +201,11 @@ class RustSessionBackend final : public SessionBackend {
     }
 
     void* session_ = nullptr;
+    DebugAdapter adapter_ = DebugAdapter::Debugpy;
 };
 
-std::unique_ptr<SessionBackend> create_rust_session_backend() {
-    return std::make_unique<RustSessionBackend>();
+std::unique_ptr<SessionBackend> create_rust_session_backend(DebugAdapter adapter) {
+    return std::make_unique<RustSessionBackend>(adapter);
 }
 
 }  // namespace tui_debug_ui

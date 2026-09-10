@@ -6,8 +6,30 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, warn};
 
-use crate::dap::protocol::{InboundMessage, OutputEventBody, Scope, StackFrame, StoppedEventBody, Thread, Variable};
-use crate::dap::{DapTransport, spawn_debugpy_adapter};
+use crate::dap::protocol::{
+    InboundMessage, OutputEventBody, Scope, StackFrame, StoppedEventBody, Thread, Variable,
+};
+pub use crate::dap::protocol::StepInTarget;
+use crate::dap::{DapTransport, spawn_debugpy_adapter, spawn_lldb_dap_adapter};
+
+mod rr_session;
+pub use rr_session::RrDebugSession;
+
+/// Which DAP adapter backs this session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DebugAdapterKind {
+    Debugpy,
+    Lldb,
+}
+
+/// Adapter features advertised to the UI (from DAP initialize).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct AdapterCapabilities {
+    #[serde(default)]
+    pub supports_step_back: bool,
+    #[serde(default)]
+    pub supports_step_in_targets: bool,
+}
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const WATCH_EVAL_TIMEOUT: Duration = Duration::from_secs(15);
@@ -23,6 +45,26 @@ fn adapter_launch_extras() -> serde_json::Value {
     json!({
         "justMyCode": !debuggee_includes_library_sources(),
     })
+}
+
+fn sibling_source_path(program: &Path) -> Option<PathBuf> {
+    for extension in ["c", "cpp", "cc", "cxx", "rs"] {
+        let candidate = program.with_extension(extension);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn lldb_init_breakpoint_commands(program: &Path) -> Vec<String> {
+    if let Some(source) = sibling_source_path(program) {
+        return vec![format!(
+            "breakpoint set --file '{}' --name main",
+            source.display()
+        )];
+    }
+    vec!["breakpoint set --name main".into()]
 }
 
 /// High-level debug session state exposed to the TUI layer.
@@ -59,6 +101,8 @@ pub struct SessionSnapshot {
     pub thread_stacks: Vec<ThreadStackTrace>,
     pub scopes: Vec<Scope>,
     pub variables: Vec<Variable>,
+    #[serde(default)]
+    pub capabilities: AdapterCapabilities,
 }
 
 /// Owns the Dap transport and implements the debug session lifecycle.
@@ -70,6 +114,9 @@ pub struct DebugSession {
     active_frame: Option<i64>,
     /// Snapshot from launch (stop-on-entry) — avoids re-fetching on UI connect.
     initial_snapshot: Option<SessionSnapshot>,
+    supports_step_in_targets: bool,
+    supports_step_back: bool,
+    adapter: DebugAdapterKind,
 }
 
 impl DebugSession {
@@ -91,6 +138,36 @@ impl DebugSession {
             active_thread: None,
             active_frame: None,
             initial_snapshot: None,
+            supports_step_in_targets: false,
+            supports_step_back: false,
+            adapter: DebugAdapterKind::Debugpy,
+        };
+
+        session.initialize_and_launch()?;
+        Ok(session)
+    }
+
+    /// Connect to lldb-dap and launch a native binary.
+    pub fn launch_native(program: impl AsRef<Path>) -> Result<Self> {
+        let program = program.as_ref().canonicalize().with_context(|| {
+            format!("failed to resolve program path: {}", program.as_ref().display())
+        })?;
+
+        info!("spawning lldb-dap adapter");
+        let child = spawn_lldb_dap_adapter()?;
+        let transport = DapTransport::spawn(child)?;
+        info!("lldb-dap adapter started, initializing DAP session");
+
+        let mut session = Self {
+            transport,
+            program,
+            state: SessionState::Disconnected,
+            active_thread: None,
+            active_frame: None,
+            initial_snapshot: None,
+            supports_step_in_targets: false,
+            supports_step_back: false,
+            adapter: DebugAdapterKind::Lldb,
         };
 
         session.initialize_and_launch()?;
@@ -109,12 +186,17 @@ impl DebugSession {
     }
 
     fn initialize_and_launch(&mut self) -> Result<()> {
+        let (adapter_id, launch_type) = match self.adapter {
+            DebugAdapterKind::Debugpy => ("debugpy", "debugpy"),
+            DebugAdapterKind::Lldb => ("lldb-dap", "lldb"),
+        };
+
         let init_seq = self.transport.send_request(
             "initialize",
             json!({
                 "clientID": "tui-debug",
                 "clientName": "tui-debug",
-                "adapterID": "debugpy",
+                "adapterID": adapter_id,
                 "pathFormat": "path",
                 "linesStartAt1": true,
                 "columnsStartAt1": true,
@@ -124,33 +206,51 @@ impl DebugSession {
                 "supportsRunInTerminalRequest": false,
             }),
         )?;
-        self.transport.wait_response(init_seq, REQUEST_TIMEOUT)?;
-        info!("DAP initialize complete, launching debuggee");
+        let init_body = self.transport.wait_response(init_seq, REQUEST_TIMEOUT)?;
+        self.merge_capabilities_from_value(&init_body);
+        info!(
+            "DAP initialize complete (step_back={}, step_in_targets={}), launching debuggee",
+            self.supports_step_back, self.supports_step_in_targets
+        );
 
         // debugpy expects launch in-flight before configurationDone; initialized may
         // arrive before or after configurationDone and is queued for later handling.
         let mut launch_args = json!({
-            "type": "debugpy",
+            "type": launch_type,
             "request": "launch",
             "program": self.program.to_string_lossy(),
-            "console": "internalConsole",
-            "redirectOutput": true,
-            "stopOnEntry": true,
+            "stopOnEntry": match self.adapter {
+                DebugAdapterKind::Lldb => false,
+                DebugAdapterKind::Debugpy => true,
+            },
         });
-        if let Some(extras) = adapter_launch_extras().as_object() {
-            launch_args
-                .as_object_mut()
-                .expect("launch payload object")
-                .extend(extras.clone());
+
+        match self.adapter {
+            DebugAdapterKind::Debugpy => {
+                launch_args["console"] = json!("internalConsole");
+                launch_args["redirectOutput"] = json!(true);
+                if let Some(extras) = adapter_launch_extras().as_object() {
+                    launch_args
+                        .as_object_mut()
+                        .expect("launch payload object")
+                        .extend(extras.clone());
+                }
+            }
+            DebugAdapterKind::Lldb => {
+                launch_args["initCommands"] = json!(lldb_init_breakpoint_commands(&self.program));
+                if let Some(parent) = self.program.parent() {
+                    launch_args["cwd"] = json!(parent);
+                }
+            }
         }
+
         let launch_seq = self.transport.send_request("launch", launch_args)?;
 
         let cfg_seq = self.transport.send_request("configurationDone", json!({}))?;
         self.transport.wait_response(cfg_seq, REQUEST_TIMEOUT)?;
         self.transport.wait_response(launch_seq, REQUEST_TIMEOUT)?;
 
-        self.state = SessionState::Running;
-        info!("launched {}", self.program.display());
+        info!("launched {}, waiting for initial stop", self.program.display());
 
         if let Some(snapshot) = self.poll_until_stopped()? {
             self.initial_snapshot = Some(snapshot);
@@ -171,21 +271,48 @@ impl DebugSession {
 
         match &self.state {
             SessionState::Exited | SessionState::Disconnected => {
-                Ok(Self::empty_state_snapshot(self.state.clone()))
+                Ok(self.empty_state_snapshot(self.state.clone()))
             }
             _ => self.refresh_snapshot(),
         }
     }
 
-    fn empty_state_snapshot(state: SessionState) -> SessionSnapshot {
-        SessionSnapshot {
+    fn merge_capabilities_from_value(&mut self, value: &serde_json::Value) {
+        if let Some(capabilities) = value.get("capabilities") {
+            self.merge_capabilities_from_value(capabilities);
+        }
+        if let Some(enabled) = value
+            .get("supportsStepInTargetsRequest")
+            .and_then(|value| value.as_bool())
+        {
+            self.supports_step_in_targets = enabled;
+        }
+        if let Some(enabled) = value
+            .get("supportsStepBack")
+            .and_then(|value| value.as_bool())
+        {
+            self.supports_step_back = enabled;
+        }
+    }
+
+    fn attach_capabilities(&self, mut snapshot: SessionSnapshot) -> SessionSnapshot {
+        snapshot.capabilities = AdapterCapabilities {
+            supports_step_back: self.supports_step_back,
+            supports_step_in_targets: self.supports_step_in_targets,
+        };
+        snapshot
+    }
+
+    fn empty_state_snapshot(&self, state: SessionState) -> SessionSnapshot {
+        self.attach_capabilities(SessionSnapshot {
             state,
             threads: vec![],
             stack_frames: vec![],
             thread_stacks: vec![],
             scopes: vec![],
             variables: vec![],
-        }
+            capabilities: AdapterCapabilities::default(),
+        })
     }
 
     fn stack_traces_for_threads(&self, threads: &[Thread]) -> Vec<ThreadStackTrace> {
@@ -244,6 +371,9 @@ impl DebugSession {
                                     self.transport.push_output(output);
                                 }
                             }
+                            "capabilities" => {
+                                self.merge_capabilities_from_value(&body);
+                            }
                             "thread" => {
                                 if self.handle_thread_event(&body)? {
                                     return Ok(None);
@@ -294,7 +424,7 @@ impl DebugSession {
                             continue;
                         }
                         self.state = SessionState::Exited;
-                        return Ok(Some(Self::empty_state_snapshot(SessionState::Exited)));
+                        return Ok(Some(self.empty_state_snapshot(SessionState::Exited)));
                     }
                     "output" => {
                         if let Ok(output) = serde_json::from_value::<OutputEventBody>(body.clone())
@@ -302,9 +432,12 @@ impl DebugSession {
                             self.transport.push_output(output);
                         }
                     }
+                    "capabilities" => {
+                        self.merge_capabilities_from_value(&body);
+                    }
                     "thread" => {
                         if self.handle_thread_event(&body)? {
-                            return Ok(Some(Self::empty_state_snapshot(SessionState::Exited)));
+                            return Ok(Some(self.empty_state_snapshot(SessionState::Exited)));
                         }
                     }
                     other => {
@@ -380,14 +513,15 @@ impl DebugSession {
             .transpose()?
             .unwrap_or_default();
 
-        Ok(SessionSnapshot {
+        Ok(self.attach_capabilities(SessionSnapshot {
             state: self.state.clone(),
             threads,
             stack_frames,
             thread_stacks,
             scopes,
             variables,
-        })
+            capabilities: AdapterCapabilities::default(),
+        }))
     }
 
     pub fn continue_execution(&mut self) -> Result<Option<SessionSnapshot>> {
@@ -415,6 +549,10 @@ impl DebugSession {
     }
 
     pub fn dispatch_step(&mut self, command: &'static str) -> Result<()> {
+        if command == "stepIn" {
+            return self.dispatch_step_in(None);
+        }
+
         let thread_id = self
             .active_thread
             .context("cannot step without an active thread")?;
@@ -424,6 +562,49 @@ impl DebugSession {
         self.transport.wait_response(seq, REQUEST_TIMEOUT)?;
         self.state = SessionState::Running;
         Ok(())
+    }
+
+    pub fn dispatch_step_in(&mut self, target_id: Option<i64>) -> Result<()> {
+        let thread_id = self
+            .active_thread
+            .context("cannot step without an active thread")?;
+        let mut args = json!({ "threadId": thread_id });
+        if let Some(target_id) = target_id {
+            args["targetId"] = json!(target_id);
+        }
+        let seq = self.transport.send_request("stepIn", args)?;
+        self.transport.wait_response(seq, REQUEST_TIMEOUT)?;
+        self.state = SessionState::Running;
+        Ok(())
+    }
+
+    pub fn supports_step_in_targets(&self) -> bool {
+        self.supports_step_in_targets
+    }
+
+    pub fn active_frame_id(&self) -> Option<i64> {
+        self.active_frame
+    }
+
+    pub fn step_in_targets(&self, frame_id: i64) -> Result<Vec<StepInTarget>> {
+        if !self.supports_step_in_targets {
+            return Ok(vec![]);
+        }
+
+        let seq = self
+            .transport
+            .send_request("stepInTargets", json!({ "frameId": frame_id }))?;
+        let body = self.transport.wait_response(seq, REQUEST_TIMEOUT)?;
+
+        #[derive(Deserialize)]
+        struct StepInTargetsBody {
+            targets: Vec<StepInTarget>,
+        }
+
+        let parsed = serde_json::from_value::<StepInTargetsBody>(body).unwrap_or(StepInTargetsBody {
+            targets: vec![],
+        });
+        Ok(parsed.targets)
     }
 
     pub fn step_over(&mut self) -> Result<SessionSnapshot> {
@@ -439,7 +620,18 @@ impl DebugSession {
     }
 
     fn step(&mut self, command: &'static str) -> Result<SessionSnapshot> {
-        self.dispatch_step(command)?;
+        if command == "stepIn" {
+            self.dispatch_step_in(None)?;
+        } else {
+            let thread_id = self
+                .active_thread
+                .context("cannot step without an active thread")?;
+            let seq = self
+                .transport
+                .send_request(command, json!({ "threadId": thread_id }))?;
+            self.transport.wait_response(seq, REQUEST_TIMEOUT)?;
+            self.state = SessionState::Running;
+        }
         self.poll_until_stopped()?
             .context("program exited during step")
     }
@@ -617,11 +809,15 @@ impl DebugSession {
         Ok(())
     }
 
-    /// Spawn a fresh debugpy session for the same program (after exit/disconnect).
+    /// Spawn a fresh session for the same program (after exit/disconnect).
     pub fn relaunch(&mut self) -> Result<()> {
         let program = self.program.clone();
+        let adapter = self.adapter;
         let _ = self.shutdown();
-        *self = Self::launch_python(&program)?;
+        *self = match adapter {
+            DebugAdapterKind::Debugpy => Self::launch_python(&program)?,
+            DebugAdapterKind::Lldb => Self::launch_native(&program)?,
+        };
         Ok(())
     }
 
@@ -733,6 +929,9 @@ impl DebugSession {
     }
 
     pub fn step_back(&mut self) -> Result<SessionSnapshot> {
+        if !self.supports_step_back {
+            bail!("step back is not supported by this debug adapter");
+        }
         let thread_id = self
             .active_thread
             .context("cannot step back without an active thread")?;
@@ -744,6 +943,29 @@ impl DebugSession {
         self.state = SessionState::Running;
         self.poll_until_stopped()?
             .context("program exited during step back")
+    }
+
+    /// Run backward until the next stop (breakpoint, step, etc.).
+    pub fn dispatch_reverse_continue(&mut self) -> Result<()> {
+        if !self.supports_step_back {
+            bail!("reverse continue is not supported by this debug adapter");
+        }
+        let thread_id = self
+            .active_thread
+            .context("cannot reverse continue without an active thread")?;
+        let seq = self.transport.send_request(
+            "reverseContinue",
+            json!({ "threadId": thread_id }),
+        )?;
+        self.transport.wait_response(seq, REQUEST_TIMEOUT)?;
+        self.state = SessionState::Running;
+        Ok(())
+    }
+
+    pub fn reverse_continue(&mut self) -> Result<SessionSnapshot> {
+        self.dispatch_reverse_continue()?;
+        self.poll_until_stopped()?
+            .context("program exited during reverse continue")
     }
 }
 
@@ -986,5 +1208,66 @@ mod lifecycle_tests {
         ));
 
         session.disconnect().expect("final disconnect");
+    }
+}
+
+#[cfg(test)]
+mod lldb_launch_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn launch_native_reverse_demo_stops_in_main() {
+        let program = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/reverse_demo")
+            .canonicalize()
+            .expect("reverse_demo fixture");
+
+        let mut session = DebugSession::launch_native(&program).expect("lldb launch");
+        let snap = session.snapshot_for_sync().expect("snapshot");
+        println!("state={:?}", snap.state);
+        for frame in &snap.stack_frames {
+            let path = frame
+                .source
+                .as_ref()
+                .and_then(|s| s.path.as_deref())
+                .unwrap_or("");
+            println!("frame {} line={} path={}", frame.name, frame.line, path);
+        }
+        assert!(matches!(snap.state, SessionState::Stopped { .. }), "{:?}", snap.state);
+        assert!(!snap.stack_frames.is_empty(), "expected stack frames");
+        session.shutdown().expect("shutdown");
+    }
+
+    #[test]
+    fn launch_native_step_over_reverse_demo() {
+        let program = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/reverse_demo")
+            .canonicalize()
+            .expect("reverse_demo fixture");
+
+        let mut session = DebugSession::launch_native(&program).expect("lldb launch");
+        let snap = session.step_over().expect("step over");
+        for frame in &snap.stack_frames {
+            let path = frame
+                .source
+                .as_ref()
+                .and_then(|s| s.path.as_deref())
+                .unwrap_or("");
+            println!("after step_over: {} line={} path={}", frame.name, frame.line, path);
+        }
+        assert!(matches!(snap.state, SessionState::Stopped { .. }));
+        assert!(
+            !snap.capabilities.supports_step_back,
+            "unexpected step-back support on this host"
+        );
+        let err = session
+            .dispatch_reverse_continue()
+            .expect_err("reverse continue should fail without trace support");
+        assert!(
+            err.to_string().contains("not supported"),
+            "unexpected error: {err:#}"
+        );
+        session.shutdown().expect("shutdown");
     }
 }

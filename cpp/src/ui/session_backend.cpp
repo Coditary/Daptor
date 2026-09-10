@@ -3,13 +3,13 @@
 namespace tui_debug_ui {
 
 std::unique_ptr<SessionBackend> create_mock_session_backend();
-std::unique_ptr<SessionBackend> create_rust_session_backend();
+std::unique_ptr<SessionBackend> create_rust_session_backend(DebugAdapter adapter);
 
-std::unique_ptr<SessionBackend> create_session_backend(SessionMode mode) {
+std::unique_ptr<SessionBackend> create_session_backend(SessionMode mode, DebugAdapter adapter) {
     if (mode == SessionMode::Mock) {
         return create_mock_session_backend();
     }
-    return create_rust_session_backend();
+    return create_rust_session_backend(adapter);
 }
 
 }  // namespace tui_debug_ui
