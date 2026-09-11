@@ -32,6 +32,8 @@ enum class SessionIoEventKind {
     BreakpointsFinished,
     DataBreakpointInfoReady,
     DataBreakpointsFinished,
+    FunctionBreakpointsFinished,
+    ExceptionBreakpointsFinished,
     StepInTargetsReady,
     GotoTargetsReady,
 };
@@ -62,7 +64,7 @@ class SessionIoThread {
     SessionIoThread(const SessionIoThread&) = delete;
     SessionIoThread& operator=(const SessionIoThread&) = delete;
 
-    void start_launch(const std::string& program_path);
+    void start_launch(const std::string& program_path, const std::vector<std::string>& program_args);
     bool launch_finished() const;
     bool is_active() const;
     bool adapter_live() const;
@@ -74,6 +76,8 @@ class SessionIoThread {
     void request_data_breakpoint_info(std::int64_t variables_reference, std::int64_t frame_id,
                                       const std::string& name, const std::string& access_type);
     void post_set_data_breakpoints(const std::string& breakpoints_json);
+    void post_set_function_breakpoints(const std::string& breakpoints_json);
+    void post_set_exception_breakpoints(const std::string& filters_json);
     void request_scope_variables(const std::string& signature,
                                  const std::vector<std::pair<std::int64_t, std::string>>& scopes);
     void request_variable_children(std::int64_t variables_reference, const std::string& path);
@@ -101,6 +105,8 @@ class SessionIoThread {
     void process_pending_breakpoints();
     void process_data_breakpoint_info_fetch();
     void process_pending_data_breakpoints();
+    void process_pending_function_breakpoints();
+    void process_pending_exception_breakpoints();
     void dispatch_command(const std::string& op);
     void process_scope_fetch();
     void process_variable_children_fetch();
@@ -132,6 +138,7 @@ class SessionIoThread {
     mutable std::mutex mutex_;
     std::condition_variable cv_;
     std::string program_path_;
+    std::vector<std::string> program_args_;
     std::string pending_command_;
     bool has_pending_command_ = false;
     std::optional<std::string> pending_evaluate_;
@@ -150,6 +157,10 @@ class SessionIoThread {
     std::optional<DataBreakpointInfoRequest> data_breakpoint_info_request_;
     std::optional<std::string> pending_data_breakpoints_json_;
     std::chrono::steady_clock::time_point data_breakpoints_posted_at_{};
+    std::optional<std::string> pending_function_breakpoints_json_;
+    std::chrono::steady_clock::time_point function_breakpoints_posted_at_{};
+    std::optional<std::string> pending_exception_breakpoints_json_;
+    std::chrono::steady_clock::time_point exception_breakpoints_posted_at_{};
     std::string scope_fetch_signature_;
     std::vector<std::pair<std::int64_t, std::string>> scope_fetch_scopes_;
     bool scope_fetch_pending_ = false;

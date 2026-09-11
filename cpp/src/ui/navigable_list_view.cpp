@@ -7,6 +7,7 @@
 #include <tuinator/widgets/containers/scroll_view.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <optional>
 #include <string_view>
 #include <utility>
@@ -37,6 +38,27 @@ tuinator::Style action_remove_style(const DapUiTheme& theme) { return theme.cont
 
 bool is_scope_header_row(std::string_view line) {
     return !line.empty() && line.back() == ':' && (line.size() < 2 || line[0] != ' ');
+}
+
+bool breakpoint_file_header_has_expand_prefix(std::string_view item) {
+    return item.size() >= 3 &&
+           (item.compare(0, 3, kScopeExpandExpanded) == 0 || item.compare(0, 3, kScopeExpandCollapsed) == 0);
+}
+
+std::size_t breakpoint_row_content_start(std::string_view item) {
+    std::size_t pos = 2;
+    if (item.rfind("  ", 0) != 0) {
+        return 0;
+    }
+    if (item.size() >= pos + 3 &&
+        (item.compare(pos, 3, kScopeExpandExpanded) == 0 || item.compare(pos, 3, kScopeExpandCollapsed) == 0)) {
+        pos += 3;
+    }
+    return pos;
+}
+
+bool is_breakpoint_exception_row_content(std::string_view content) {
+    return content.size() >= 2 && (content.compare(0, 2, "\u2713 ") == 0 || content.compare(0, 2, "\u00b7 ") == 0);
 }
 
 tuinator::Style scope_header_style(std::string_view line, const DapUiTheme& theme) {
@@ -566,6 +588,18 @@ bool NavigableListView::is_breakpoint_data_row(const std::string& item) {
     return item.rfind("  \u2295 ", 0) == 0;
 }
 
+bool NavigableListView::is_breakpoint_function_row(const std::string& item) {
+    return item.rfind("  \u0192 ", 0) == 0;
+}
+
+bool NavigableListView::is_breakpoint_exception_row(const std::string& item) {
+    if (item.rfind("  ", 0) != 0) {
+        return false;
+    }
+    const std::size_t pos = breakpoint_row_content_start(item);
+    return is_breakpoint_exception_row_content(item.substr(pos));
+}
+
 bool NavigableListView::row_shows_actions(int index, const std::string& item) const {
     if (row_action_layout_ == ListRowActionLayout::None || theme_ == nullptr) {
         return false;
@@ -576,7 +610,8 @@ bool NavigableListView::row_shows_actions(int index, const std::string& item) co
         if (is_inline_when_edit_row(item) || is_inline_hit_edit_row(item)) {
             return false;
         }
-        if (is_breakpoint_condition_row(item) || is_breakpoint_data_row(item)) {
+        if (is_breakpoint_condition_row(item) || is_breakpoint_data_row(item) ||
+            is_breakpoint_function_row(item) || is_breakpoint_exception_row(item)) {
             return true;
         }
         return item.rfind("  ", 0) == 0 && !is_scope_header_row(item);
@@ -654,10 +689,28 @@ void NavigableListView::paint_row_actions(tuinator::Canvas& canvas, int index, i
         return;
     }
 
-    if (row_action_layout_ == ListRowActionLayout::BreakpointRow && is_breakpoint_data_row(item)) {
+    if (row_action_layout_ == ListRowActionLayout::BreakpointRow &&
+        (is_breakpoint_data_row(item) || is_breakpoint_function_row(item))) {
         const int remove_width = remove_icon_display_width();
         const int remove_x = std::max(0, max_width - remove_width);
         canvas.draw_text({remove_x, row}, kRemoveIcon, action_remove_style(*theme_));
+        return;
+    }
+
+    if (row_action_layout_ == ListRowActionLayout::BreakpointRow && is_breakpoint_exception_row(item)) {
+        const bool enabled = item.substr(breakpoint_row_content_start(item)).rfind("\u2713 ", 0) == 0;
+        const int remove_width = remove_icon_display_width();
+        const int remove_x = std::max(0, max_width - remove_width);
+        if (enabled) {
+            canvas.draw_text({remove_x, row}, kRemoveIcon, action_remove_style(*theme_));
+            const int add_width = tuinator::text_display_width(kAddIcon);
+            const int add_x = std::max(0, remove_x - kActionIconGap - add_width);
+            canvas.draw_text({add_x, row}, kAddIcon, action_add_style(*theme_));
+            return;
+        }
+        const int add_width = tuinator::text_display_width(kAddIcon);
+        const int add_x = std::max(0, max_width - add_width);
+        canvas.draw_text({add_x, row}, kAddIcon, action_add_style(*theme_));
         return;
     }
 
@@ -717,11 +770,35 @@ std::optional<RowActionType> NavigableListView::row_action_at(int index, const s
         return std::nullopt;
     }
 
-    if (row_action_layout_ == ListRowActionLayout::BreakpointRow && is_breakpoint_data_row(item)) {
+    if (row_action_layout_ == ListRowActionLayout::BreakpointRow &&
+        (is_breakpoint_data_row(item) || is_breakpoint_function_row(item))) {
         const int remove_width = remove_icon_display_width();
         const int remove_x = std::max(0, max_width - remove_width);
         if (local_x >= remove_x) {
             return RowActionType::Remove;
+        }
+        return std::nullopt;
+    }
+
+    if (row_action_layout_ == ListRowActionLayout::BreakpointRow && is_breakpoint_exception_row(item)) {
+        const bool enabled = item.substr(breakpoint_row_content_start(item)).rfind("\u2713 ", 0) == 0;
+        const int remove_width = remove_icon_display_width();
+        const int remove_x = std::max(0, max_width - remove_width);
+        if (enabled) {
+            if (local_x >= remove_x) {
+                return RowActionType::Remove;
+            }
+            const int add_width = tuinator::text_display_width(kAddIcon);
+            const int add_x = std::max(0, remove_x - kActionIconGap - add_width);
+            if (local_x >= add_x && local_x < remove_x - kActionIconGap) {
+                return RowActionType::Add;
+            }
+            return std::nullopt;
+        }
+        const int add_width = tuinator::text_display_width(kAddIcon);
+        const int add_x = std::max(0, max_width - add_width);
+        if (local_x >= add_x) {
+            return RowActionType::Add;
         }
         return std::nullopt;
     }
@@ -874,7 +951,12 @@ void NavigableListView::paint_themed_row(tuinator::Canvas& canvas, int row, int 
         }
         case ListPaintMode::Breakpoints: {
             if (is_scope_header_row(item) && item.find('/') == std::string::npos) {
-                draw_truncated(canvas, {column, row}, item, theme_->breakpoint_file, content_max_width - column);
+                std::string_view header = item;
+                if (breakpoint_file_header_has_expand_prefix(header)) {
+                    draw_segment(canvas, column, row, header.substr(0, 3), item_style_, content_max_width);
+                    header = header.substr(3);
+                }
+                draw_truncated(canvas, {column, row}, header, theme_->breakpoint_file, content_max_width - column);
                 return;
             }
 
@@ -906,12 +988,25 @@ void NavigableListView::paint_themed_row(tuinator::Canvas& canvas, int row, int 
             if (item.rfind("  ", 0) == 0) {
                 std::string_view rest = item;
                 rest.remove_prefix(2);
-                const std::size_t space = rest.find(' ');
-                const std::string line_number = space == std::string_view::npos
-                                                    ? std::string(rest)
-                                                    : std::string(rest.substr(0, space));
-                if (!line_number.empty()) {
+                if (rest.size() >= 3 &&
+                    (rest.compare(0, 3, kScopeExpandExpanded) == 0 || rest.compare(0, 3, kScopeExpandCollapsed) == 0)) {
                     draw_segment(canvas, column, row, "  ", item_style_, content_max_width);
+                    draw_segment(canvas, column, row, rest.substr(0, 3), item_style_, content_max_width);
+                    rest.remove_prefix(3);
+                } else {
+                    draw_segment(canvas, column, row, "  ", item_style_, content_max_width);
+                }
+
+                if (is_breakpoint_exception_row_content(rest)) {
+                    draw_segment(canvas, column, row, rest, item_style_, content_max_width);
+                    paint_row_actions(canvas, index, row, item, max_width);
+                    return;
+                }
+
+                const std::size_t space = rest.find(' ');
+                const std::string line_number = space == std::string_view::npos ? std::string(rest)
+                                                                              : std::string(rest.substr(0, space));
+                if (!line_number.empty() && std::isdigit(static_cast<unsigned char>(line_number.front())) != 0) {
                     draw_segment(canvas, column, row, line_number, theme_->breakpoint_line_number, content_max_width);
                     if (space != std::string_view::npos) {
                         draw_segment(canvas, column, row, rest.substr(space), item_style_, content_max_width);

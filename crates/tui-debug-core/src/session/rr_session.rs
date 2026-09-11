@@ -26,6 +26,10 @@ pub struct RrDebugSession {
 
 impl RrDebugSession {
     pub fn launch(program: impl AsRef<Path>) -> Result<Self> {
+        Self::launch_with_args(program, &[])
+    }
+
+    pub fn launch_with_args(program: impl AsRef<Path>, args: &[String]) -> Result<Self> {
         ensure_rr_available()?;
         ensure_gdb_available()?;
 
@@ -33,7 +37,7 @@ impl RrDebugSession {
             format!("failed to resolve program path: {}", program.as_ref().display())
         })?;
 
-        record_program(&program)?;
+        record_program(&program, args)?;
 
         let replay_port = pick_replay_port(50505)?;
         let replay_child = spawn_replay_server(replay_port)?;
@@ -317,6 +321,8 @@ impl RrDebugSession {
                 supports_step_in_targets: false,
                 supports_goto_targets: false,
                 supports_data_breakpoints: false,
+                supports_function_breakpoints: false,
+                exception_breakpoint_filters: Vec::new(),
             },
             breakpoint_hits: vec![],
         })
@@ -336,6 +342,8 @@ impl RrDebugSession {
                 supports_step_in_targets: false,
                 supports_goto_targets: false,
                 supports_data_breakpoints: false,
+                supports_function_breakpoints: false,
+                exception_breakpoint_filters: Vec::new(),
             },
         }
     }

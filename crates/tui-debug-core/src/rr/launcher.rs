@@ -39,12 +39,14 @@ pub fn pick_replay_port(preferred: u16) -> Result<u16> {
     Ok(listener.local_addr()?.port())
 }
 
-pub fn record_program(program: &Path) -> Result<()> {
+pub fn record_program(program: &Path, args: &[String]) -> Result<()> {
     info!("recording {} with rr", program.display());
-    let output = Command::new("rr")
-        .arg("record")
-        .arg("--")
-        .arg(program)
+    let mut command = Command::new("rr");
+    command.arg("record").arg("--").arg(program);
+    for arg in args {
+        command.arg(arg);
+    }
+    let output = command
         .output()
         .context("failed to run rr record — install rr from https://rr-project.org/")?;
 

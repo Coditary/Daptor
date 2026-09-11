@@ -2,12 +2,15 @@
 
 #include "tui_debug_ui/breakpoint_info.hpp"
 #include "tui_debug_ui/data_breakpoint_info.hpp"
+#include "tui_debug_ui/function_breakpoint_info.hpp"
 #include "tui_debug_ui/context_menu.hpp"
 #include "tui_debug_ui/dap_ui_theme.hpp"
 #include "tui_debug_ui/debug_ui_model.hpp"
+#include "tui_debug_ui/highlight_bridge.hpp"
 #include "tui_debug_ui/source_panel.hpp"
 #include "tui_debug_ui/session_backend.hpp"
 #include "tui_debug_ui/session_io_thread.hpp"
+#include "tui_debug_ui/stacks_panel.hpp"
 #include "tui_debug_ui/step_in_selection.hpp"
 
 #include <tuinator/core/event.hpp>
@@ -44,7 +47,8 @@ class TitledScrollPane;
 class DebugApp {
   public:
     explicit DebugApp(const std::string& program_path, SessionMode mode = SessionMode::Rust,
-                      DebugAdapter adapter = DebugAdapter::Debugpy);
+                      DebugAdapter adapter = DebugAdapter::Debugpy,
+                      std::vector<std::string> program_args = {});
     ~DebugApp();
 
     DebugApp(const DebugApp&) = delete;
@@ -125,6 +129,8 @@ class DebugApp {
     void set_breakpoint_hit_condition(const std::string& path, int line, const std::string& hit_condition);
     void begin_edit_breakpoint_condition(const std::string& path, int line);
     void begin_edit_breakpoint_hit_condition(const std::string& path, int line);
+    void begin_edit_exception_condition(const std::string& filter);
+    void set_exception_breakpoint_condition(const std::string& filter, const std::string& condition);
     void open_breakpoint_condition_editor(const std::string& path, int line,
                                           std::optional<tuinator::Point> action_anchor = std::nullopt,
                                           std::optional<int> breakpoints_display_index = std::nullopt);
@@ -141,19 +147,20 @@ class DebugApp {
     [[nodiscard]] bool scope_prompt_active() const;
     void begin_watch_expression(const std::string& seed);
     void show_breakpoint_context_menu(const std::string& path, int line, tuinator::Point anchor,
-                                      const std::optional<std::string>& seed_identifier);
+                                      const std::optional<SourceContextIdentifier>& source_identifier);
     void begin_source_context_menu(const std::string& path, int line, int code_column, tuinator::Point anchor,
-                                   const std::optional<std::string>& seed_identifier);
+                                   const std::optional<SourceContextIdentifier>& source_identifier);
     void open_source_context_menu(const std::string& path, int line, tuinator::Point anchor,
-                                  const std::optional<std::string>& seed_identifier,
+                                  const std::optional<SourceContextIdentifier>& source_identifier,
                                   const std::vector<std::pair<std::int64_t, std::string>>& goto_targets,
                                   bool offer_lldb_line_jump = false);
     void handle_goto_targets_payload(const SessionIoEvent& event);
     void send_goto_command(std::int64_t target_id);
     void send_goto_line_command(const std::string& path, int line);
     [[nodiscard]] std::string goto_probe_source_path() const;
-    [[nodiscard]] std::optional<std::string> identifier_at_line_column(const std::string& line_text,
-                                                                     int column) const;
+    [[nodiscard]] std::optional<SourceContextIdentifier> resolve_source_identifier(
+        const std::string& path, const std::string& source_text, int line, int display_column) const;
+    [[nodiscard]] std::optional<std::int64_t> scope_container_for_local(const std::string& name) const;
     [[nodiscard]] tuinator::Rect overlay_clip_bounds() const;
     [[nodiscard]] tuinator::Rect breakpoints_panel_clip_bounds() const;
     [[nodiscard]] tuinator::Rect source_context_clip_bounds() const;
@@ -163,6 +170,25 @@ class DebugApp {
     void flush_breakpoints_to_session();
     void push_data_breakpoints_to_session();
     void flush_data_breakpoints_to_session();
+    void push_function_breakpoints_to_session();
+    void flush_function_breakpoints_to_session();
+    void push_exception_breakpoints_to_session();
+    void flush_exception_breakpoints_to_session();
+    void toggle_exception_breakpoint(const std::string& filter);
+    void apply_exception_filter_defaults();
+    void add_function_breakpoint(const std::string& name, const std::string& path = {}, int line = 0);
+    void remove_function_breakpoint(const std::string& name);
+    void toggle_function_breakpoint(const std::string& name, const std::string& path = {}, int line = 0);
+    [[nodiscard]] bool has_function_breakpoint(const std::string& name) const;
+    [[nodiscard]] int find_function_definition_line(const std::string& source_text,
+                                                    const std::string& name) const;
+    void show_stack_frame_context_menu(const StackFrameRow& frame, tuinator::Point anchor);
+    [[nodiscard]] std::string build_function_breakpoints_json() const;
+    [[nodiscard]] std::string build_exception_breakpoints_json() const;
+    [[nodiscard]] std::optional<std::string> function_name_at_breakpoint_line(const std::string& path,
+                                                                               const std::string& source_text,
+                                                                               int line) const;
+    [[nodiscard]] bool adapter_supports_function_breakpoints() const;
     void request_data_breakpoint(const std::string& variable_name, std::int64_t container_reference,
                                  const std::string& access_type);
     void remove_data_breakpoint(const std::string& data_id);
@@ -173,6 +199,11 @@ class DebugApp {
     void normalize_breakpoint_path_keys();
     void open_source_file(const std::string& path, int line, bool pin, std::int64_t source_reference = 0);
     void maybe_follow_execution();
+    void navigate_to_user_stop_frame();
+    [[nodiscard]] bool both_cxx_exception_filters_enabled() const;
+    [[nodiscard]] bool is_catch_phase_exception_stop() const;
+    bool try_skip_exception_runtime_to_catch(const char* op);
+    void maybe_finish_ephemeral_catch_skip();
     void sync_breakpoints_list_panel();
     void apply_breakpoint_hit_counts(const std::string& path, const std::string& results_json);
     void apply_breakpoint_hits_from_snapshot_json(const std::string& json);
@@ -224,6 +255,7 @@ class DebugApp {
     SessionMode mode_;
     DebugAdapter adapter_;
     std::string program_path_;
+    std::vector<std::string> program_args_;
     std::unique_ptr<SessionIoThread> session_io_;
     bool launch_complete_handled_ = false;
     bool launch_posted_ = false;
@@ -261,6 +293,7 @@ class DebugApp {
     std::string editing_breakpoint_path_;
     int editing_breakpoint_line_ = 0;
     bool editing_breakpoint_hit_ = false;
+    std::string editing_exception_filter_;
     std::string scope_input_draft_;
     bool scope_input_focused_ = false;
     std::string editing_variable_name_;
@@ -300,7 +333,7 @@ class DebugApp {
         std::string path;
         int line = 0;
         tuinator::Point anchor{};
-        std::optional<std::string> seed_identifier;
+        std::optional<SourceContextIdentifier> source_identifier;
     };
     std::optional<PendingSourceContextMenu> pending_source_context_menu_;
     bool goto_targets_pending_ = false;
@@ -317,11 +350,24 @@ class DebugApp {
     std::unordered_map<std::string, std::vector<HighlightedLine>> source_plain_lines_cache_;
     BreakpointsByPath breakpoints_by_path_;
     DataBreakpoints data_breakpoints_;
+    FunctionBreakpoints function_breakpoints_;
+    struct ExceptionBreakpointEntry {
+        bool enabled = false;
+        std::string condition;
+    };
+    std::unordered_map<std::string, ExceptionBreakpointEntry> exception_breakpoints_;
+    bool exception_defaults_applied_ = false;
     struct PendingDataBreakpointRequest {
         std::string variable_name;
         std::string access_type;
     };
     std::optional<PendingDataBreakpointRequest> pending_data_breakpoint_;
+    struct EphemeralCatchSkipBreakpoint {
+        std::string path;
+        int line = 0;
+        bool added = false;
+    };
+    std::optional<EphemeralCatchSkipBreakpoint> ephemeral_catch_skip_;
     std::chrono::steady_clock::time_point last_spinner_update_{};
 };
 

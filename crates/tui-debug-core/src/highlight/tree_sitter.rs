@@ -104,7 +104,7 @@ fn state() -> &'static Mutex<TreeSitterState> {
 }
 
 /// Register a language from an external tree-sitter grammar directory.
-pub fn register_language_from_dir(language: &str, dir: &Path) -> Result<()> {
+pub(crate) fn register_language_from_dir(language: &str, dir: &Path) -> Result<()> {
     let loaded = load_language_from_dir(language, dir)?;
     let mut guard = state().lock().expect("tree-sitter state lock");
     guard.languages.insert(language.to_string(), loaded);
@@ -209,11 +209,20 @@ fn ensure_runtime(language: &str) -> Result<()> {
     Ok(())
 }
 
-fn language_dir(language: &str) -> PathBuf {
+pub(crate) fn language_dir(language: &str) -> PathBuf {
     default_tree_sitter_dir().join(language)
 }
 
+/// Map file-extension language ids to registered grammar keys.
+pub fn normalize_language(language: &str) -> &str {
+    match language {
+        "cc" | "cxx" => "cpp",
+        _ => language,
+    }
+}
+
 pub fn language_is_loaded(language: &str) -> bool {
+    let language = normalize_language(language);
     state()
         .lock()
         .expect("tree-sitter state lock")
@@ -235,6 +244,7 @@ pub fn language_setup_hint(language: &str, reason: &str) -> String {
 
 /// Load a grammar from the default directory; returns a user-facing message on failure.
 pub fn try_load_language(language: &str) -> Result<(), String> {
+    let language = normalize_language(language);
     if language_is_loaded(language) {
         return Ok(());
     }
@@ -258,6 +268,7 @@ pub fn highlight_source(language: &str, source: &str) -> Option<Vec<StyledSpan>>
         return Some(Vec::new());
     }
 
+    let language = normalize_language(language);
     {
         let guard = state().lock().expect("tree-sitter state lock");
         if !guard.languages.contains_key(language) {
@@ -282,6 +293,7 @@ pub fn highlight_source(language: &str, source: &str) -> Option<Vec<StyledSpan>>
 
 /// Parse-only helper for diagnostics.
 pub fn parse_snippet(language: &str, source: &str) -> Result<Tree> {
+    let language = normalize_language(language);
     let guard = state().lock().expect("tree-sitter state lock");
     let loaded = guard
         .languages

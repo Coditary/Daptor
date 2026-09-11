@@ -112,6 +112,10 @@ inline std::vector<HighlightedLine> parse_highlight_json(std::string_view json) 
 #endif
 }
 
+inline bool highlight_language_is_loaded(const std::string& language) {
+    return tui_debug_language_is_loaded(language.c_str()) != 0;
+}
+
 inline std::optional<std::string> fetch_highlight_json(const std::string& language, const std::string& source,
                                                        int first_line, int line_count,
                                                        std::size_t buffer_capacity = 65536) {
@@ -122,6 +126,68 @@ inline std::optional<std::string> fetch_highlight_json(const std::string& langua
         return std::nullopt;
     }
     return std::string{buffer.data()};
+}
+
+inline std::optional<std::string> function_name_at_line_from_treesitter(const std::string& language,
+                                                                         const std::string& source, int line) {
+    if (line <= 0 || source.empty()) {
+        return std::nullopt;
+    }
+
+    char buffer[256] = {};
+    if (tui_debug_function_name_at_line(language.c_str(), source.c_str(), static_cast<unsigned>(line), buffer,
+                                        sizeof(buffer)) != 0) {
+        return std::nullopt;
+    }
+    if (buffer[0] == '\0') {
+        return std::nullopt;
+    }
+    return std::string(buffer);
+}
+
+struct SourceContextIdentifier {
+    std::string watch_expression;
+    std::optional<std::string> local_name;
+};
+
+inline std::optional<SourceContextIdentifier> identifier_at_position_from_treesitter(
+    const std::string& language, const std::string& source, int line, int byte_column) {
+    if (line <= 0 || source.empty() || byte_column < 0) {
+        return std::nullopt;
+    }
+
+    char expression[512] = {};
+    char simple[256] = {};
+    const int status = tui_debug_identifier_at_position(
+        language.c_str(), source.c_str(), static_cast<unsigned>(line), static_cast<unsigned>(byte_column),
+        expression, sizeof(expression), simple, sizeof(simple));
+    if (status != 0 || expression[0] == '\0') {
+        return std::nullopt;
+    }
+
+    SourceContextIdentifier result{};
+    result.watch_expression = expression;
+    if (simple[0] != '\0') {
+        result.local_name = simple;
+    }
+    return result;
+}
+
+inline std::optional<int> function_definition_line_from_treesitter(const std::string& language,
+                                                                    const std::string& source,
+                                                                    const std::string& name) {
+    if (name.empty() || source.empty()) {
+        return std::nullopt;
+    }
+
+    unsigned line = 0;
+    if (tui_debug_function_definition_line(language.c_str(), source.c_str(), name.c_str(), &line) != 0) {
+        return std::nullopt;
+    }
+    if (line == 0) {
+        return std::nullopt;
+    }
+    return static_cast<int>(line);
 }
 
 inline std::vector<HighlightedLine> fetch_highlight_viewport(const std::string& language,

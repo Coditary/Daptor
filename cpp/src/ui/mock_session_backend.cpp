@@ -132,8 +132,9 @@ std::optional<std::int64_t> json_target_id(const std::string& json) {
 
 class MockSessionBackend final : public SessionBackend {
   public:
-    void launch(const std::string& program_path) override {
+    void launch(const std::string& program_path, const std::vector<std::string>& program_args) override {
         program_path_ = program_path;
+        program_args_ = program_args;
         source_text_ = read_file(program_path);
         current_line_ = 1;
         step_index_ = 0;
@@ -202,7 +203,7 @@ class MockSessionBackend final : public SessionBackend {
 
         if (session_state_ == "exited" || session_state_ == "disconnected") {
             if (op == "restart") {
-                launch(program_path_);
+                launch(program_path_, program_args_);
                 return true;
             }
             if (op == "terminate") {
@@ -463,6 +464,26 @@ class MockSessionBackend final : public SessionBackend {
         return true;
     }
 
+    bool set_function_breakpoints(const std::string& breakpoints_json, std::string& error_out,
+                                  std::string& results_out) override {
+        if (!launched_) {
+            error_out = "mock session not launched";
+            return false;
+        }
+        (void)breakpoints_json;
+        results_out = "[]";
+        return true;
+    }
+
+    bool set_exception_breakpoints(const std::string& filters_json, std::string& error_out) override {
+        if (!launched_) {
+            error_out = "mock session not launched";
+            return false;
+        }
+        enabled_exception_filters_json_ = filters_json;
+        return true;
+    }
+
     std::optional<std::string> fetch_source(std::int64_t source_reference) override {
         if (!launched_ || source_reference <= 0) {
             return std::nullopt;
@@ -551,7 +572,7 @@ class MockSessionBackend final : public SessionBackend {
 
     std::string build_snapshot() const {
         std::ostringstream json;
-        json << R"({"type":"snapshot","snapshot":{"capabilities":{"supports_step_back":true,"supports_step_in_targets":true,"supports_goto_targets":true,"supports_data_breakpoints":true},)";
+        json << R"({"type":"snapshot","snapshot":{"capabilities":{"supports_step_back":true,"supports_step_in_targets":true,"supports_goto_targets":true,"supports_data_breakpoints":true,"supports_function_breakpoints":true,"exception_breakpoint_filters":[{"filter":"raised","label":"Raised Exceptions","default":false},{"filter":"uncaught","label":"Uncaught Exceptions","default":true},{"filter":"cxx-throw","label":"C++ Throw","default":false,"supports_condition":true}]},)";
         if (session_state_ == "exited") {
             json << R"("state":"Exited","threads":[],"stack_frames":[],"scopes":[],"variables":[]}})";
             return json.str();
@@ -573,6 +594,7 @@ class MockSessionBackend final : public SessionBackend {
     }
 
     std::string program_path_;
+    std::vector<std::string> program_args_;
     std::string source_text_;
     bool launched_ = false;
     bool stopped_ = true;
@@ -582,6 +604,7 @@ class MockSessionBackend final : public SessionBackend {
     std::unordered_set<int> breakpoints_;
     std::unordered_map<std::string, std::string> variable_overrides_;
     std::vector<std::string> console_pending_;
+    std::string enabled_exception_filters_json_;
 };
 
 std::unique_ptr<SessionBackend> create_mock_session_backend() {

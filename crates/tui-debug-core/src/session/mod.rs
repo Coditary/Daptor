@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use tracing::{info, warn};
 
 use crate::dap::protocol::{
@@ -40,6 +40,27 @@ pub enum DebugAdapterKind {
     Lldb,
 }
 
+/// One enabled exception breakpoint filter (and optional per-filter condition).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExceptionBreakpointSetting {
+    pub filter: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition: Option<String>,
+}
+
+/// One exception breakpoint filter from DAP `exceptionBreakpointFilters`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExceptionBreakpointFilter {
+    pub filter: String,
+    pub label: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub default: bool,
+    #[serde(default)]
+    pub supports_condition: bool,
+}
+
 /// Adapter features advertised to the UI (from DAP initialize).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct AdapterCapabilities {
@@ -51,6 +72,10 @@ pub struct AdapterCapabilities {
     pub supports_goto_targets: bool,
     #[serde(default)]
     pub supports_data_breakpoints: bool,
+    #[serde(default)]
+    pub supports_function_breakpoints: bool,
+    #[serde(default)]
+    pub exception_breakpoint_filters: Vec<ExceptionBreakpointFilter>,
 }
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -61,6 +86,28 @@ const WATCH_EVAL_TIMEOUT: Duration = Duration::from_secs(15);
 /// keys belong in [`Self::adapter_launch_extras`].
 pub(crate) fn debuggee_includes_library_sources() -> bool {
     true
+}
+
+fn is_runtime_library_source_path(path: &str) -> bool {
+    path.is_empty()
+        || path.contains(".so")
+        || path.contains("/lib/")
+        || path.contains("/usr/lib")
+        || path.contains("/lib64/")
+}
+
+fn preferred_stack_frame(stack_frames: &[StackFrame]) -> Option<&StackFrame> {
+    stack_frames
+        .iter()
+        .find(|frame| {
+            let path = frame
+                .source
+                .as_ref()
+                .and_then(|source| source.path.as_deref())
+                .unwrap_or("");
+            !is_runtime_library_source_path(path) && frame.line > 0
+        })
+        .or_else(|| stack_frames.first())
 }
 
 fn adapter_launch_extras() -> serde_json::Value {
@@ -202,6 +249,22 @@ pub struct DataBreakpointResult {
     pub message: Option<String>,
 }
 
+/// Function breakpoint sent to the debug adapter (`setFunctionBreakpoints`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionBreakpoint {
+    pub name: String,
+    pub condition: Option<String>,
+    pub hit_condition: Option<String>,
+}
+
+/// Adapter response for one function breakpoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionBreakpointResult {
+    pub name: String,
+    pub verified: bool,
+    pub message: Option<String>,
+}
+
 /// Snapshot of debugger state at a stop point.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionSnapshot {
@@ -222,6 +285,7 @@ pub struct SessionSnapshot {
 pub struct DebugSession {
     transport: DapTransport,
     program: PathBuf,
+    program_args: Vec<String>,
     state: SessionState,
     active_thread: Option<i64>,
     active_frame: Option<i64>,
@@ -231,6 +295,8 @@ pub struct DebugSession {
     supports_step_back: bool,
     supports_goto_targets: bool,
     supports_data_breakpoints: bool,
+    supports_function_breakpoints: bool,
+    exception_breakpoint_filters: Vec<ExceptionBreakpointFilter>,
     adapter: DebugAdapterKind,
     breakpoint_hit_counts: HashMap<(String, u32), u32>,
     breakpoint_ids: HashMap<i64, (String, u32)>,
@@ -240,6 +306,11 @@ pub struct DebugSession {
 impl DebugSession {
     /// Connect to debugpy and launch `program`.
     pub fn launch_python(program: impl AsRef<Path>) -> Result<Self> {
+        Self::launch_python_with_args(program, &[])
+    }
+
+    /// Connect to debugpy and launch `program` with CLI arguments.
+    pub fn launch_python_with_args(program: impl AsRef<Path>, args: &[String]) -> Result<Self> {
         let program = program.as_ref().canonicalize().with_context(|| {
             format!("failed to resolve program path: {}", program.as_ref().display())
         })?;
@@ -252,6 +323,7 @@ impl DebugSession {
         let mut session = Self {
             transport,
             program,
+            program_args: args.to_vec(),
             state: SessionState::Disconnected,
             active_thread: None,
             active_frame: None,
@@ -260,6 +332,8 @@ impl DebugSession {
             supports_step_back: false,
             supports_goto_targets: false,
             supports_data_breakpoints: false,
+            supports_function_breakpoints: false,
+            exception_breakpoint_filters: Vec::new(),
             adapter: DebugAdapterKind::Debugpy,
             breakpoint_hit_counts: HashMap::new(),
             breakpoint_ids: HashMap::new(),
@@ -272,6 +346,11 @@ impl DebugSession {
 
     /// Connect to lldb-dap and launch a native binary.
     pub fn launch_native(program: impl AsRef<Path>) -> Result<Self> {
+        Self::launch_native_with_args(program, &[])
+    }
+
+    /// Connect to lldb-dap and launch a native binary with CLI arguments.
+    pub fn launch_native_with_args(program: impl AsRef<Path>, args: &[String]) -> Result<Self> {
         let program = program.as_ref().canonicalize().with_context(|| {
             format!("failed to resolve program path: {}", program.as_ref().display())
         })?;
@@ -284,6 +363,7 @@ impl DebugSession {
         let mut session = Self {
             transport,
             program,
+            program_args: args.to_vec(),
             state: SessionState::Disconnected,
             active_thread: None,
             active_frame: None,
@@ -292,6 +372,8 @@ impl DebugSession {
             supports_step_back: false,
             supports_goto_targets: false,
             supports_data_breakpoints: false,
+            supports_function_breakpoints: false,
+            exception_breakpoint_filters: Vec::new(),
             adapter: DebugAdapterKind::Lldb,
             breakpoint_hit_counts: HashMap::new(),
             breakpoint_ids: HashMap::new(),
@@ -336,9 +418,16 @@ impl DebugSession {
         )?;
         let init_body = self.transport.wait_response(init_seq, REQUEST_TIMEOUT)?;
         self.merge_capabilities_from_value(&init_body);
+        if self.adapter == DebugAdapterKind::Lldb && !self.supports_function_breakpoints {
+            // lldb-dap supports setFunctionBreakpoints even when initialize omits the flag.
+            self.supports_function_breakpoints = true;
+        }
         info!(
-            "DAP initialize complete (step_back={}, step_in_targets={}, goto_targets={}), launching debuggee",
-            self.supports_step_back, self.supports_step_in_targets, self.supports_goto_targets
+            "DAP initialize complete (step_back={}, step_in_targets={}, goto_targets={}, function_bps={}), launching debuggee",
+            self.supports_step_back,
+            self.supports_step_in_targets,
+            self.supports_goto_targets,
+            self.supports_function_breakpoints
         );
 
         // debugpy expects launch in-flight before configurationDone; initialized may
@@ -352,6 +441,10 @@ impl DebugSession {
                 DebugAdapterKind::Debugpy => true,
             },
         });
+
+        if !self.program_args.is_empty() {
+            launch_args["args"] = json!(self.program_args);
+        }
 
         match self.adapter {
             DebugAdapterKind::Debugpy => {
@@ -434,6 +527,53 @@ impl DebugSession {
         {
             self.supports_data_breakpoints = enabled;
         }
+        if let Some(enabled) = value
+            .get("supportsFunctionBreakpoints")
+            .and_then(|value| value.as_bool())
+        {
+            self.supports_function_breakpoints = enabled;
+        }
+        if let Some(filters) = value
+            .get("exceptionBreakpointFilters")
+            .and_then(|value| value.as_array())
+        {
+            self.exception_breakpoint_filters = filters
+                .iter()
+                .filter_map(|item| {
+                    let filter = item
+                        .get("filter")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string)
+                        .filter(|value| !value.is_empty())?;
+                    let label = item
+                        .get("label")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string)
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or_else(|| filter.clone());
+                    let description = item
+                        .get("description")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string)
+                        .filter(|value| !value.is_empty());
+                    let default = item
+                        .get("default")
+                        .and_then(|value| value.as_bool())
+                        .unwrap_or(false);
+                    let supports_condition = item
+                        .get("supportsCondition")
+                        .and_then(|value| value.as_bool())
+                        .unwrap_or(false);
+                    Some(ExceptionBreakpointFilter {
+                        filter,
+                        label,
+                        description,
+                        default,
+                        supports_condition,
+                    })
+                })
+                .collect();
+        }
     }
 
     fn attach_capabilities(&self, mut snapshot: SessionSnapshot) -> SessionSnapshot {
@@ -442,6 +582,8 @@ impl DebugSession {
             supports_step_in_targets: self.supports_step_in_targets,
             supports_goto_targets: self.supports_goto_targets,
             supports_data_breakpoints: self.supports_data_breakpoints,
+            supports_function_breakpoints: self.supports_function_breakpoints,
+            exception_breakpoint_filters: self.exception_breakpoint_filters.clone(),
         };
         snapshot.breakpoint_hits = self.collect_breakpoint_hits();
         snapshot
@@ -774,10 +916,8 @@ impl DebugSession {
             .find(|trace| trace.thread_id == thread_id)
             .map(|trace| trace.stack_frames.clone())
             .unwrap_or_default();
-        let frame_id = stack_frames
-            .first()
-            .map(|frame| frame.id)
-            .context("no stack frames available")?;
+        let frame = preferred_stack_frame(&stack_frames).context("no stack frames available")?;
+        let frame_id = frame.id;
         self.active_frame = Some(frame_id);
 
         let scopes = self.scopes(frame_id)?;
@@ -1322,6 +1462,112 @@ impl DebugSession {
             .collect())
     }
 
+    /// Build the DAP `setExceptionBreakpoints` request body.
+    pub fn build_exception_breakpoints_request(settings: &[ExceptionBreakpointSetting]) -> Value {
+        let filters: Vec<String> = settings
+            .iter()
+            .map(|setting| setting.filter.clone())
+            .collect();
+        let filter_options: Vec<Value> = settings
+            .iter()
+            .filter_map(|setting| {
+                setting
+                    .condition
+                    .as_ref()
+                    .map(|condition| condition.trim())
+                    .filter(|condition| !condition.is_empty())
+                    .map(|condition| {
+                        json!({
+                            "filterId": setting.filter,
+                            "condition": condition,
+                        })
+                    })
+            })
+            .collect();
+
+        let mut payload = json!({ "filters": filters });
+        if !filter_options.is_empty() {
+            payload["filterOptions"] = Value::Array(filter_options);
+        }
+        payload
+    }
+
+    /// Configure which exception breakpoint filters are active.
+    pub fn set_exception_breakpoints(&mut self, settings: &[ExceptionBreakpointSetting]) -> Result<()> {
+        if self.exception_breakpoint_filters.is_empty() {
+            bail!("debug adapter does not advertise exception breakpoint filters");
+        }
+
+        let payload = Self::build_exception_breakpoints_request(settings);
+        let seq = self
+            .transport
+            .send_request("setExceptionBreakpoints", payload)?;
+        self.transport.wait_response(seq, REQUEST_TIMEOUT)?;
+        Ok(())
+    }
+
+    /// Push UI function breakpoints to the debug adapter.
+    pub fn set_function_breakpoints(
+        &mut self,
+        breakpoints: &[FunctionBreakpoint],
+    ) -> Result<Vec<FunctionBreakpointResult>> {
+        if !self.supports_function_breakpoints && self.adapter != DebugAdapterKind::Lldb {
+            bail!("debug adapter does not support function breakpoints");
+        }
+
+        let payload: Vec<serde_json::Value> = breakpoints
+            .iter()
+            .map(|breakpoint| {
+                let mut entry = json!({ "name": breakpoint.name });
+                if let Some(condition) = &breakpoint.condition {
+                    if !condition.is_empty() {
+                        entry["condition"] = json!(condition);
+                    }
+                }
+                if let Some(hit_condition) = &breakpoint.hit_condition {
+                    if !hit_condition.is_empty() {
+                        entry["hitCondition"] = json!(hit_condition);
+                    }
+                }
+                entry
+            })
+            .collect();
+
+        let seq = self
+            .transport
+            .send_request("setFunctionBreakpoints", json!({ "breakpoints": payload }))?;
+        let body = self.transport.wait_response(seq, REQUEST_TIMEOUT)?;
+
+        #[derive(Deserialize)]
+        struct BpResponse {
+            breakpoints: Vec<BpInfo>,
+        }
+        #[derive(Deserialize)]
+        struct BpInfo {
+            verified: Option<bool>,
+            message: Option<String>,
+        }
+
+        let parsed =
+            serde_json::from_value::<BpResponse>(body).context("invalid setFunctionBreakpoints response")?;
+        Ok(parsed
+            .breakpoints
+            .into_iter()
+            .enumerate()
+            .map(|(index, bp)| {
+                let name = breakpoints
+                    .get(index)
+                    .map(|entry| entry.name.clone())
+                    .unwrap_or_default();
+                FunctionBreakpointResult {
+                    name,
+                    verified: bp.verified.unwrap_or(false),
+                    message: bp.message,
+                }
+            })
+            .collect())
+    }
+
     pub fn shutdown(&mut self) -> Result<()> {
         self.transport.shutdown()?;
         self.state = SessionState::Disconnected;
@@ -1334,11 +1580,12 @@ impl DebugSession {
     /// Spawn a fresh session for the same program (after exit/disconnect).
     pub fn relaunch(&mut self) -> Result<()> {
         let program = self.program.clone();
+        let program_args = self.program_args.clone();
         let adapter = self.adapter;
         let _ = self.shutdown();
         *self = match adapter {
-            DebugAdapterKind::Debugpy => Self::launch_python(&program)?,
-            DebugAdapterKind::Lldb => Self::launch_native(&program)?,
+            DebugAdapterKind::Debugpy => Self::launch_python_with_args(&program, &program_args)?,
+            DebugAdapterKind::Lldb => Self::launch_native_with_args(&program, &program_args)?,
         };
         Ok(())
     }
@@ -1814,5 +2061,51 @@ mod lldb_launch_tests {
             "unexpected error: {err:#}"
         );
         session.shutdown().expect("shutdown");
+    }
+}
+
+#[cfg(test)]
+mod exception_breakpoint_request_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn build_exception_breakpoints_request_without_conditions() {
+        let payload = DebugSession::build_exception_breakpoints_request(&[
+            ExceptionBreakpointSetting {
+                filter: "cxx-throw".to_string(),
+                condition: None,
+            },
+            ExceptionBreakpointSetting {
+                filter: "cxx-catch".to_string(),
+                condition: None,
+            },
+        ]);
+        assert_eq!(
+            payload,
+            json!({
+                "filters": ["cxx-throw", "cxx-catch"]
+            })
+        );
+    }
+
+    #[test]
+    fn build_exception_breakpoints_request_with_filter_options() {
+        let payload = DebugSession::build_exception_breakpoints_request(&[
+            ExceptionBreakpointSetting {
+                filter: "cxx-throw".to_string(),
+                condition: Some("std::runtime_error".to_string()),
+            },
+        ]);
+        assert_eq!(
+            payload,
+            json!({
+                "filters": ["cxx-throw"],
+                "filterOptions": [{
+                    "filterId": "cxx-throw",
+                    "condition": "std::runtime_error"
+                }]
+            })
+        );
     }
 }

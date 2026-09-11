@@ -2,7 +2,7 @@ use std::sync::Once;
 
 use anyhow::Result;
 
-use super::tree_sitter::{register_language_static, try_load_language};
+use super::tree_sitter::{language_dir, normalize_language, register_language_from_dir, register_language_static};
 
 static INIT: Once = Once::new();
 
@@ -12,10 +12,24 @@ pub fn init() {
 }
 
 fn bootstrap_languages() {
-    // External grammars in DAP_TREE_SITTER_DIR take precedence when present.
-    if try_load_language("python").is_err() {
-        let _ = register_builtin_python();
+    let _ = register_builtin_python();
+    let _ = register_builtin_c();
+    let _ = register_builtin_cpp();
+    let _ = register_builtin_rust();
+
+    // External grammars in DAP_TREE_SITTER_DIR override the built-ins when present.
+    for language in ["python", "c", "cpp", "rust"] {
+        let _ = try_load_external_grammar(language);
     }
+}
+
+fn try_load_external_grammar(language: &str) -> Result<()> {
+    let language = normalize_language(language);
+    let dir = language_dir(language);
+    if !dir.is_dir() {
+        anyhow::bail!("grammar directory not found: {}", dir.display());
+    }
+    register_language_from_dir(language, &dir)
 }
 
 fn register_builtin_python() -> Result<()> {
@@ -28,10 +42,40 @@ fn register_builtin_python() -> Result<()> {
     )
 }
 
+fn register_builtin_c() -> Result<()> {
+    register_language_static(
+        "c",
+        tree_sitter_c::LANGUAGE.into(),
+        tree_sitter_c::HIGHLIGHT_QUERY,
+        "",
+        "",
+    )
+}
+
+fn register_builtin_cpp() -> Result<()> {
+    register_language_static(
+        "cpp",
+        tree_sitter_cpp::LANGUAGE.into(),
+        tree_sitter_cpp::HIGHLIGHT_QUERY,
+        "",
+        "",
+    )
+}
+
+fn register_builtin_rust() -> Result<()> {
+    register_language_static(
+        "rust",
+        tree_sitter_rust::LANGUAGE.into(),
+        tree_sitter_rust::HIGHLIGHTS_QUERY,
+        tree_sitter_rust::INJECTIONS_QUERY,
+        "",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::highlight::{highlight_viewport, language_is_loaded};
+    use crate::highlight::{function_name_at_line, highlight_viewport, language_is_loaded};
 
     #[test]
     fn init_registers_python_when_external_grammar_missing() {
@@ -44,5 +88,17 @@ mod tests {
             .spans
             .iter()
             .any(|span| span.kind == crate::highlight::HighlightKind::Keyword));
+    }
+
+    #[test]
+    fn init_registers_c_for_function_detection() {
+        init();
+        assert!(language_is_loaded("c"));
+
+        let source = "static int add(int a, int b) {\n    return a + b;\n}\n";
+        assert_eq!(
+            function_name_at_line("c", source, 1),
+            Some("add".to_string())
+        );
     }
 }

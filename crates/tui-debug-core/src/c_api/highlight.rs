@@ -3,7 +3,8 @@ use std::os::raw::c_char;
 use serde::Serialize;
 
 use crate::highlight::{
-    HighlightKind, HighlightedLine, highlight_viewport, init, language_is_loaded, try_load_language,
+    HighlightKind, HighlightedLine, function_definition_line, function_name_at_line, highlight_viewport,
+    identifier_at_position, init, language_is_loaded, try_load_language,
 };
 
 use super::{clear_last_error, c_str_to_rust, set_last_error, write_json_to_buffer};
@@ -137,6 +138,152 @@ pub extern "C" fn tui_debug_highlight_viewport(
     }
 
     0
+}
+
+/// Resolve a function name on `line` (1-based) using tree-sitter when the grammar is loaded.
+///
+/// Returns `0` when a name was written to `name_out`, `1` when no function was found,
+/// and `-1` on error (see [`tui_debug_last_error`]).
+#[no_mangle]
+pub extern "C" fn tui_debug_function_name_at_line(
+    language: *const c_char,
+    source: *const c_char,
+    line: u32,
+    name_out: *mut c_char,
+    name_cap: usize,
+) -> i32 {
+    init();
+    clear_last_error();
+
+    let language = match c_str_to_rust(language, "language") {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err);
+            return -1;
+        }
+    };
+    let source = match c_str_to_rust(source, "source") {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err);
+            return -1;
+        }
+    };
+
+    match function_name_at_line(language, source, line) {
+        Some(name) => {
+            if let Err(err) = write_json_to_buffer(&name, name_out, name_cap) {
+                set_last_error(err);
+                return -1;
+            }
+            0
+        }
+        None => 1,
+    }
+}
+
+/// Find the first definition line (1-based) of `name` using tree-sitter.
+///
+/// Returns `0` when `line_out` was set, `1` when not found, and `-1` on error.
+#[no_mangle]
+pub extern "C" fn tui_debug_function_definition_line(
+    language: *const c_char,
+    source: *const c_char,
+    name: *const c_char,
+    line_out: *mut u32,
+) -> i32 {
+    init();
+    clear_last_error();
+
+    if line_out.is_null() {
+        set_last_error("line_out must not be null");
+        return -1;
+    }
+
+    let language = match c_str_to_rust(language, "language") {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err);
+            return -1;
+        }
+    };
+    let source = match c_str_to_rust(source, "source") {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err);
+            return -1;
+        }
+    };
+    let name = match c_str_to_rust(name, "name") {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err);
+            return -1;
+        }
+    };
+
+    match function_definition_line(language, source, name) {
+        Some(line) => {
+            unsafe {
+                *line_out = line;
+            }
+            0
+        }
+        None => 1,
+    }
+}
+
+/// Resolve a watch expression at `line` (1-based) and `byte_column` (UTF-8 byte offset in the line).
+///
+/// Returns `0` when `expression_out` was written. When the position refers to a simple identifier,
+/// `simple_out` receives the same name (for data breakpoints on locals). Returns `1` when nothing
+/// was found and `-1` on error.
+#[no_mangle]
+pub extern "C" fn tui_debug_identifier_at_position(
+    language: *const c_char,
+    source: *const c_char,
+    line: u32,
+    byte_column: u32,
+    expression_out: *mut c_char,
+    expression_cap: usize,
+    simple_out: *mut c_char,
+    simple_cap: usize,
+) -> i32 {
+    init();
+    clear_last_error();
+
+    let language = match c_str_to_rust(language, "language") {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err);
+            return -1;
+        }
+    };
+    let source = match c_str_to_rust(source, "source") {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err);
+            return -1;
+        }
+    };
+
+    match identifier_at_position(language, source, line, byte_column) {
+        Some(found) => {
+            if let Err(err) = write_json_to_buffer(&found.expression, expression_out, expression_cap) {
+                set_last_error(err);
+                return -1;
+            }
+            if !simple_out.is_null() && simple_cap > 0 {
+                let simple = found.simple_name.as_deref().unwrap_or("");
+                if let Err(err) = write_json_to_buffer(simple, simple_out, simple_cap) {
+                    set_last_error(err);
+                    return -1;
+                }
+            }
+            0
+        }
+        None => 1,
+    }
 }
 
 #[cfg(test)]

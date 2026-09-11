@@ -11,6 +11,44 @@
 namespace tui_debug_ui {
 namespace {
 
+bool is_runtime_library_source_path(const std::string& path) {
+    if (path.empty()) {
+        return true;
+    }
+    if (path.rfind("dap:source:", 0) == 0) {
+        return false;
+    }
+    return path.find(".so") != std::string::npos || path.find("/lib/") != std::string::npos ||
+           path.find("/usr/lib") != std::string::npos || path.find("/lib64/") != std::string::npos;
+}
+
+const StackFrameInfo* preferred_user_stack_frame(const std::vector<StackFrameInfo>& frames) {
+    for (const StackFrameInfo& frame : frames) {
+        if (frame.line <= 0) {
+            continue;
+        }
+        if (!frame.path.empty() && !is_runtime_library_source_path(frame.path)) {
+            return &frame;
+        }
+        if (frame.path.empty() && frame.source_reference > 0) {
+            return &frame;
+        }
+    }
+    return frames.empty() ? nullptr : &frames.front();
+}
+
+void set_execution_from_frame(DebugUiModel& model, const StackFrameInfo& frame) {
+    if (!frame.path.empty()) {
+        model.execution_path = frame.path;
+    } else if (frame.source_reference > 0) {
+        model.execution_path = "dap:source:" + std::to_string(frame.source_reference);
+    }
+    model.execution_source_reference = frame.source_reference;
+    if (frame.line > 0) {
+        model.execution_line = static_cast<std::uint32_t>(frame.line);
+    }
+}
+
 #ifdef TUI_DEBUG_UI_HAS_NLOHMANN_JSON
 using Json = nlohmann::json;
 
@@ -104,6 +142,27 @@ void apply_snapshot_object(DebugUiModel& model, const Json& snapshot) {
         model.supports_step_in_targets = capabilities.value("supports_step_in_targets", false);
         model.supports_goto_targets = capabilities.value("supports_goto_targets", false);
         model.supports_data_breakpoints = capabilities.value("supports_data_breakpoints", false);
+        model.supports_function_breakpoints = capabilities.value("supports_function_breakpoints", false);
+
+        model.exception_breakpoint_filters.clear();
+        if (capabilities.contains("exception_breakpoint_filters") &&
+            capabilities.at("exception_breakpoint_filters").is_array()) {
+            for (const Json& filter : capabilities.at("exception_breakpoint_filters")) {
+                if (!filter.is_object()) {
+                    continue;
+                }
+                DebugUiModel::ExceptionBreakpointFilterInfo info{};
+                info.filter = filter.value("filter", std::string{});
+                if (info.filter.empty()) {
+                    continue;
+                }
+                info.label = filter.value("label", info.filter);
+                info.description = filter.value("description", std::string{});
+                info.default_enabled = filter.value("default", false);
+                info.supports_condition = filter.value("supports_condition", false);
+                model.exception_breakpoint_filters.push_back(std::move(info));
+            }
+        }
     }
 
     model.threads.clear();
@@ -181,17 +240,8 @@ void apply_snapshot_object(DebugUiModel& model, const Json& snapshot) {
         }
     }
 
-    if (!model.stack_frames.empty()) {
-        const StackFrameInfo& frame = model.stack_frames.front();
-        if (!frame.path.empty()) {
-            model.execution_path = frame.path;
-        } else if (frame.source_reference > 0) {
-            model.execution_path = "dap:source:" + std::to_string(frame.source_reference);
-        }
-        model.execution_source_reference = frame.source_reference;
-        if (frame.line > 0) {
-            model.execution_line = static_cast<std::uint32_t>(frame.line);
-        }
+    if (const StackFrameInfo* frame = preferred_user_stack_frame(model.stack_frames); frame != nullptr) {
+        set_execution_from_frame(model, *frame);
     }
 
     model.connection_state = ConnectionState::Connected;
@@ -360,17 +410,9 @@ bool manual_apply_poll_json(DebugUiModel& model, const std::string& json) {
         }
 
         model.stack_frames.push_back(std::move(frame));
-        if (!model.stack_frames.empty()) {
-            const StackFrameInfo& top = model.stack_frames.front();
-            if (!top.path.empty()) {
-                model.execution_path = top.path;
-            } else if (top.source_reference > 0) {
-                model.execution_path = "dap:source:" + std::to_string(top.source_reference);
-            }
-            model.execution_source_reference = top.source_reference;
-            if (top.line > 0) {
-                model.execution_line = static_cast<std::uint32_t>(top.line);
-            }
+        if (const StackFrameInfo* preferred = preferred_user_stack_frame(model.stack_frames);
+            preferred != nullptr) {
+            set_execution_from_frame(model, *preferred);
         }
     }
 

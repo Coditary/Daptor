@@ -10,6 +10,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace tuinator {
@@ -51,6 +52,7 @@ class SourcePanel : public tuinator::Widget {
 
     const std::unordered_map<int, std::string>& breakpoints() const { return breakpoints_; }
     void set_breakpoints(std::unordered_map<int, std::string> breakpoints);
+    void set_function_breakpoint_lines(std::unordered_set<int> lines);
 
     int file_line_count() const { return file_line_count_; }
     void set_file_line_count(int count);
@@ -110,6 +112,7 @@ class SourcePanel : public tuinator::Widget {
     StepInTargetClickCallback on_step_in_target_click_;
     std::vector<HighlightedLine> lines_;
     std::unordered_map<int, std::string> breakpoints_;
+    std::unordered_set<int> function_breakpoint_lines_;
     int scroll_offset_ = 0;
     tuinator::ScrollView* scroll_parent_ = nullptr;
     int execution_line_ = 0;

@@ -149,6 +149,11 @@ void SourcePanel::set_breakpoints(std::unordered_map<int, std::string> breakpoin
     mark_dirty();
 }
 
+void SourcePanel::set_function_breakpoint_lines(std::unordered_set<int> lines) {
+    function_breakpoint_lines_ = std::move(lines);
+    mark_dirty();
+}
+
 void SourcePanel::set_file_line_count(int count) {
     file_line_count_ = std::max(1, count);
     cursor_line_ = std::clamp(cursor_line_, 1, file_line_count_);
@@ -537,12 +542,16 @@ void SourcePanel::paint_line(PaintContext& ctx, int row, const HighlightedLine& 
     const bool has_breakpoint = breakpoint_it != breakpoints_.end();
     const bool is_conditional =
         has_breakpoint && !breakpoint_it->second.empty();
+    const bool has_function_breakpoint = function_breakpoint_lines_.contains(line.line_number);
     const bool is_execution = execution_line_ > 0 && line.line_number == execution_line_;
     const bool is_cursor = line.line_number == cursor_line_;
 
     std::string breakpoint_text = "  ";
     tuinator::Style breakpoint_style = theme_.line_number;
-    if (has_breakpoint) {
+    if (has_function_breakpoint) {
+        breakpoint_text = "\u0192 ";
+        breakpoint_style = theme_.breakpoint_marker;
+    } else if (has_breakpoint) {
         breakpoint_text = (is_conditional ? kConditionalBreakpointGlyph : kBreakpointGlyph);
         breakpoint_text += " ";
         breakpoint_style = is_conditional ? theme_.breakpoint_conditional_marker : theme_.breakpoint_marker;

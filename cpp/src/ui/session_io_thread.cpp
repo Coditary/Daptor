@@ -48,9 +48,15 @@ void SessionIoThread::maybe_begin_launch() {
         launch_started_.store(true, std::memory_order_release);
     }
 
-    launch_worker_ = std::thread([this, path = std::move(path)]() {
+    std::vector<std::string> args;
+    {
+        std::lock_guard lock(mutex_);
+        args = program_args_;
+    }
+
+    launch_worker_ = std::thread([this, path = std::move(path), args = std::move(args)]() {
         try {
-            backend_->launch(path);
+            backend_->launch(path, args);
             const bool active = backend_->is_active();
             backend_active_.store(active, std::memory_order_release);
             adapter_live_.store(active, std::memory_order_release);
@@ -78,10 +84,12 @@ void SessionIoThread::maybe_begin_launch() {
     });
 }
 
-void SessionIoThread::start_launch(const std::string& program_path) {
+void SessionIoThread::start_launch(const std::string& program_path,
+                                   const std::vector<std::string>& program_args) {
     {
         std::lock_guard lock(mutex_);
         program_path_ = program_path;
+        program_args_ = program_args;
     }
     cv_.notify_all();
 }
@@ -166,6 +174,24 @@ void SessionIoThread::post_set_data_breakpoints(const std::string& breakpoints_j
         std::lock_guard lock(mutex_);
         pending_data_breakpoints_json_ = breakpoints_json;
         data_breakpoints_posted_at_ = std::chrono::steady_clock::now();
+    }
+    cv_.notify_all();
+}
+
+void SessionIoThread::post_set_function_breakpoints(const std::string& breakpoints_json) {
+    {
+        std::lock_guard lock(mutex_);
+        pending_function_breakpoints_json_ = breakpoints_json;
+        function_breakpoints_posted_at_ = std::chrono::steady_clock::now();
+    }
+    cv_.notify_all();
+}
+
+void SessionIoThread::post_set_exception_breakpoints(const std::string& filters_json) {
+    {
+        std::lock_guard lock(mutex_);
+        pending_exception_breakpoints_json_ = filters_json;
+        exception_breakpoints_posted_at_ = std::chrono::steady_clock::now();
     }
     cv_.notify_all();
 }
@@ -585,6 +611,57 @@ void SessionIoThread::process_pending_data_breakpoints() {
                               ok ? std::move(results) : std::string{}, ok ? std::move(*json) : std::move(error)});
 }
 
+void SessionIoThread::process_pending_function_breakpoints() {
+    if (!adapter_live_.load(std::memory_order_acquire) || has_pending_execution_command()) {
+        return;
+    }
+
+    std::optional<std::string> json;
+    {
+        std::lock_guard lock(mutex_);
+        if (!pending_function_breakpoints_json_.has_value()) {
+            return;
+        }
+        const auto elapsed = std::chrono::steady_clock::now() - function_breakpoints_posted_at_;
+        if (elapsed < kBreakpointDebounce) {
+            return;
+        }
+        json = std::move(pending_function_breakpoints_json_);
+        pending_function_breakpoints_json_.reset();
+    }
+
+    std::string error;
+    std::string results;
+    const bool ok = backend_->set_function_breakpoints(*json, error, results);
+    push_event(SessionIoEvent{SessionIoEventKind::FunctionBreakpointsFinished, ok,
+                              ok ? std::move(results) : std::string{}, ok ? std::move(*json) : std::move(error)});
+}
+
+void SessionIoThread::process_pending_exception_breakpoints() {
+    if (!adapter_live_.load(std::memory_order_acquire) || has_pending_execution_command()) {
+        return;
+    }
+
+    std::optional<std::string> json;
+    {
+        std::lock_guard lock(mutex_);
+        if (!pending_exception_breakpoints_json_.has_value()) {
+            return;
+        }
+        const auto elapsed = std::chrono::steady_clock::now() - exception_breakpoints_posted_at_;
+        if (elapsed < kBreakpointDebounce) {
+            return;
+        }
+        json = std::move(pending_exception_breakpoints_json_);
+        pending_exception_breakpoints_json_.reset();
+    }
+
+    std::string error;
+    const bool ok = backend_->set_exception_breakpoints(*json, error);
+    push_event(SessionIoEvent{SessionIoEventKind::ExceptionBreakpointsFinished, ok, {},
+                              ok ? std::move(*json) : std::move(error)});
+}
+
 void SessionIoThread::process_pending_breakpoints() {
     if (!adapter_live_.load(std::memory_order_acquire)) {
         return;
@@ -791,6 +868,8 @@ void SessionIoThread::thread_main() {
                 }
                 process_pending_breakpoints();
                 process_pending_data_breakpoints();
+                process_pending_function_breakpoints();
+                process_pending_exception_breakpoints();
                 if (!has_pending_execution_command()) {
                     process_data_breakpoint_info_fetch();
                 }

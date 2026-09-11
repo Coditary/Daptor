@@ -5,7 +5,8 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::session::{
-    DataBreakpoint, DebugSession, RrDebugSession, SessionSnapshot, SessionState, SourceBreakpoint,
+    DataBreakpoint, DebugSession, ExceptionBreakpointSetting, FunctionBreakpoint, RrDebugSession,
+    SessionSnapshot, SessionState, SourceBreakpoint,
 };
 
 enum SessionEngine {
@@ -19,24 +20,24 @@ pub struct CSession {
 }
 
 impl CSession {
-    pub fn launch(program: &str) -> Result<Self> {
-        let inner = DebugSession::launch_python(Path::new(program))
+    pub fn launch(program: &str, args: &[String]) -> Result<Self> {
+        let inner = DebugSession::launch_python_with_args(Path::new(program), args)
             .with_context(|| format!("failed to launch debug session for {program}"))?;
         Ok(Self {
             inner: SessionEngine::Dap(inner),
         })
     }
 
-    pub fn launch_lldb(program: &str) -> Result<Self> {
-        let inner = DebugSession::launch_native(Path::new(program))
+    pub fn launch_lldb(program: &str, args: &[String]) -> Result<Self> {
+        let inner = DebugSession::launch_native_with_args(Path::new(program), args)
             .with_context(|| format!("failed to launch lldb debug session for {program}"))?;
         Ok(Self {
             inner: SessionEngine::Dap(inner),
         })
     }
 
-    pub fn launch_rr(program: &str) -> Result<Self> {
-        let inner = RrDebugSession::launch(Path::new(program))
+    pub fn launch_rr(program: &str, args: &[String]) -> Result<Self> {
+        let inner = RrDebugSession::launch_with_args(Path::new(program), args)
             .with_context(|| format!("failed to launch rr debug session for {program}"))?;
         Ok(Self {
             inner: SessionEngine::Rr(inner),
@@ -210,6 +211,36 @@ impl CSession {
                 serde_json::to_string(&json).context("failed to serialize data breakpoint results")
             }
             SessionEngine::Rr(_) => anyhow::bail!("data breakpoints are not supported in rr sessions"),
+        }
+    }
+
+    pub fn set_exception_breakpoints(
+        &mut self,
+        settings: &[ExceptionBreakpointSetting],
+    ) -> Result<()> {
+        match &mut self.inner {
+            SessionEngine::Dap(session) => session.set_exception_breakpoints(settings),
+            SessionEngine::Rr(_) => anyhow::bail!("exception breakpoints are not supported in rr sessions"),
+        }
+    }
+
+    pub fn set_function_breakpoints(&mut self, breakpoints: &[FunctionBreakpoint]) -> Result<String> {
+        match &mut self.inner {
+            SessionEngine::Dap(session) => {
+                let results = session.set_function_breakpoints(breakpoints)?;
+                let json = results
+                    .iter()
+                    .map(|breakpoint| {
+                        json!({
+                            "name": breakpoint.name,
+                            "verified": breakpoint.verified,
+                            "message": breakpoint.message,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                serde_json::to_string(&json).context("failed to serialize function breakpoint results")
+            }
+            SessionEngine::Rr(_) => anyhow::bail!("function breakpoints are not supported in rr sessions"),
         }
     }
 

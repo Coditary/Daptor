@@ -59,8 +59,16 @@ BreakpointsPanel::BreakpointsPanel(const DapUiTheme& theme, tuinator::ScrollView
             }
             return;
         case DisplayLineKind::DataBreakpoint:
+        case DisplayLineKind::FunctionBreakpoint:
+        case DisplayLineKind::ExceptionBreakpoint:
             if (action == RowActionType::Remove && on_remove_ != nullptr) {
                 on_remove_(*row);
+            } else if (action == RowActionType::Add) {
+                if (row->exception_enabled && on_add_condition_ != nullptr) {
+                    on_add_condition_(*row, index, anchor);
+                } else if (!row->exception_enabled && on_activate_ != nullptr) {
+                    on_activate_(*row);
+                }
             }
             return;
         case DisplayLineKind::Breakpoint:
@@ -76,7 +84,22 @@ BreakpointsPanel::BreakpointsPanel(const DapUiTheme& theme, tuinator::ScrollView
             break;
         }
     });
+    list_->set_on_row_click([this](int index, const std::string& /*item*/) {
+        const DisplayLineKind kind = display_kind_at(index);
+        if (kind == DisplayLineKind::GroupHeader) {
+            return try_toggle_expand(index);
+        }
+        const BreakpointRow* row = breakpoint_at_display_index(index);
+        if (row != nullptr && row_has_collapsible_conditions(*row)) {
+            return try_toggle_expand(index);
+        }
+        return false;
+    });
     list_->set_on_activate([this](int index) {
+        if (display_kind_at(index) == DisplayLineKind::GroupHeader) {
+            (void)try_toggle_expand(index);
+            return;
+        }
         const BreakpointRow* row = breakpoint_at_display_index(index);
         if (row != nullptr && on_activate_ != nullptr) {
             on_activate_(*row);
@@ -122,11 +145,26 @@ bool BreakpointsPanel::paths_match(const std::string& left, const std::string& r
 
 void BreakpointsPanel::set_breakpoints(std::vector<BreakpointRow> rows) {
     rows_ = std::move(rows);
-    std::sort(rows_.begin(), rows_.end(), [](const BreakpointRow& left, const BreakpointRow& right) {
-        if (left.kind != right.kind) {
-            return left.kind == BreakpointRowKind::Data;
+    const auto kind_order = [](BreakpointRowKind kind) {
+        switch (kind) {
+        case BreakpointRowKind::Data:
+            return 0;
+        case BreakpointRowKind::Function:
+            return 1;
+        case BreakpointRowKind::Source:
+            return 2;
+        case BreakpointRowKind::Exception:
+            return 3;
         }
-        if (left.kind == BreakpointRowKind::Data) {
+        return 3;
+    };
+
+    std::sort(rows_.begin(), rows_.end(), [&](const BreakpointRow& left, const BreakpointRow& right) {
+        if (left.kind != right.kind) {
+            return kind_order(left.kind) < kind_order(right.kind);
+        }
+        if (left.kind == BreakpointRowKind::Data || left.kind == BreakpointRowKind::Function ||
+            left.kind == BreakpointRowKind::Exception) {
             return left.source_text < right.source_text;
         }
         if (left.path != right.path) {
@@ -135,6 +173,89 @@ void BreakpointsPanel::set_breakpoints(std::vector<BreakpointRow> rows) {
         return left.line < right.line;
     });
 
+    rebuild_display();
+}
+
+std::string BreakpointsPanel::breakpoint_condition_key(const BreakpointRow& row) {
+    if (row.kind == BreakpointRowKind::Exception) {
+        return "exception:" + row.data_id;
+    }
+    return "source:" + row.path + '\x1F' + std::to_string(row.line);
+}
+
+bool BreakpointsPanel::row_has_collapsible_conditions(const BreakpointRow& row) const {
+    if (row.kind == BreakpointRowKind::Exception) {
+        if (!row.condition.empty()) {
+            return true;
+        }
+        return inline_edit_.active && inline_edit_.exception && row.data_id == inline_edit_.exception_filter;
+    }
+    if (row.kind != BreakpointRowKind::Source) {
+        return false;
+    }
+    if (!row.condition.empty() || !row.hit_condition.empty()) {
+        return true;
+    }
+    return inline_edit_.active && !inline_edit_.exception && paths_match(row.path, inline_edit_.path) &&
+           row.line == inline_edit_.line;
+}
+
+bool BreakpointsPanel::conditions_expanded_for_row(const BreakpointRow& row) const {
+    if (!row_has_collapsible_conditions(row)) {
+        return true;
+    }
+    if (inline_edit_.active) {
+        if (row.kind == BreakpointRowKind::Exception && inline_edit_.exception &&
+            row.data_id == inline_edit_.exception_filter) {
+            return true;
+        }
+        if (row.kind == BreakpointRowKind::Source && !inline_edit_.exception &&
+            paths_match(row.path, inline_edit_.path) && row.line == inline_edit_.line) {
+            return true;
+        }
+    }
+    return collapsed_condition_keys_.count(breakpoint_condition_key(row)) == 0;
+}
+
+bool BreakpointsPanel::try_toggle_expand(int display_index) {
+    if (has_inline_edit()) {
+        return false;
+    }
+    if (display_index < 0 || display_index >= static_cast<int>(display_expand_keys_.size())) {
+        return false;
+    }
+
+    const std::string& key = display_expand_keys_[static_cast<std::size_t>(display_index)];
+    if (key.empty()) {
+        return false;
+    }
+
+    if (key.rfind("file:", 0) == 0 || key.rfind("section:", 0) == 0) {
+        if (collapsed_group_keys_.count(key) > 0) {
+            collapsed_group_keys_.erase(key);
+        } else {
+            collapsed_group_keys_.insert(key);
+        }
+    } else {
+        if (collapsed_condition_keys_.count(key) > 0) {
+            collapsed_condition_keys_.erase(key);
+        } else {
+            collapsed_condition_keys_.insert(key);
+        }
+    }
+
+    const int previous_index = selected_index();
+    rebuild_display();
+    if (list_ != nullptr) {
+        const int item_count = static_cast<int>(display_to_row_.size());
+        if (previous_index >= 0 && previous_index < item_count) {
+            list_->set_selected_index(previous_index);
+        }
+    }
+    return true;
+}
+
+void BreakpointsPanel::rebuild_display() {
     if (list_ == nullptr) {
         return;
     }
@@ -142,26 +263,47 @@ void BreakpointsPanel::set_breakpoints(std::vector<BreakpointRow> rows) {
     std::vector<std::string> items;
     std::vector<int> display_to_row;
     std::vector<DisplayLineKind> display_kind;
+    std::vector<std::string> display_expand_keys;
     items.reserve(rows_.size() * 2);
     display_to_row.reserve(rows_.size() * 2);
     display_kind.reserve(rows_.size() * 2);
+    display_expand_keys.reserve(rows_.size() * 2);
     inline_edit_display_index_ = -1;
 
+    auto section_expanded = [this](const char* section_key) {
+        return collapsed_group_keys_.count(std::string("section:") + section_key) == 0;
+    };
+    auto add_group_header = [&](const std::string& title, const std::string& group_key, bool expanded) {
+        if (!items.empty()) {
+            items.push_back("");
+            display_to_row.push_back(-1);
+            display_kind.push_back(DisplayLineKind::None);
+            display_expand_keys.push_back({});
+        }
+        items.push_back(std::string(expanded ? kScopeExpandExpanded : kScopeExpandCollapsed) + title);
+        display_to_row.push_back(-1);
+        display_kind.push_back(DisplayLineKind::GroupHeader);
+        display_expand_keys.push_back(group_key);
+    };
+
     bool data_header_added = false;
+    bool function_header_added = false;
+    bool exception_header_added = false;
+    bool data_section_collapsed = false;
+    bool function_section_collapsed = false;
+    bool exception_section_collapsed = false;
     std::string current_path;
+    bool current_file_collapsed = false;
     for (std::size_t index = 0; index < rows_.size(); ++index) {
         const BreakpointRow& row = rows_[index];
         if (row.kind == BreakpointRowKind::Data) {
             if (!data_header_added) {
-                if (!items.empty()) {
-                    items.push_back("");
-                    display_to_row.push_back(-1);
-                    display_kind.push_back(DisplayLineKind::None);
-                }
-                items.push_back("Data:");
-                display_to_row.push_back(-1);
-                display_kind.push_back(DisplayLineKind::None);
+                data_section_collapsed = !section_expanded("data");
+                add_group_header("Data:", "section:data", !data_section_collapsed);
                 data_header_added = true;
+            }
+            if (data_section_collapsed) {
+                continue;
             }
 
             std::string entry = "  \u2295 " + row.source_text;
@@ -171,6 +313,71 @@ void BreakpointsPanel::set_breakpoints(std::vector<BreakpointRow> rows) {
             items.push_back(std::move(entry));
             display_to_row.push_back(static_cast<int>(index));
             display_kind.push_back(DisplayLineKind::DataBreakpoint);
+            display_expand_keys.push_back({});
+            continue;
+        }
+
+        if (row.kind == BreakpointRowKind::Function) {
+            if (!function_header_added) {
+                function_section_collapsed = !section_expanded("function");
+                add_group_header("Functions:", "section:function", !function_section_collapsed);
+                function_header_added = true;
+            }
+            if (function_section_collapsed) {
+                continue;
+            }
+
+            std::string entry = "  \u0192 " + row.source_text;
+            items.push_back(std::move(entry));
+            display_to_row.push_back(static_cast<int>(index));
+            display_kind.push_back(DisplayLineKind::FunctionBreakpoint);
+            display_expand_keys.push_back({});
+            continue;
+        }
+
+        if (row.kind == BreakpointRowKind::Exception) {
+            if (!exception_header_added) {
+                exception_section_collapsed = !section_expanded("exception");
+                if (inline_edit_.active && inline_edit_.exception) {
+                    exception_section_collapsed = false;
+                }
+                add_group_header("Exceptions:", "section:exception", !exception_section_collapsed);
+                exception_header_added = true;
+            }
+            if (exception_section_collapsed) {
+                continue;
+            }
+
+            const bool editing_when = inline_edit_.active && inline_edit_.exception &&
+                                      row.data_id == inline_edit_.exception_filter;
+            const bool has_collapsible = row_has_collapsible_conditions(row);
+            const bool conditions_expanded = conditions_expanded_for_row(row);
+
+            std::string entry = "  ";
+            if (has_collapsible) {
+                entry += conditions_expanded ? kScopeExpandExpanded : kScopeExpandCollapsed;
+            }
+            entry += row.exception_enabled ? "\u2713 " : "\u00b7 ";
+            entry += row.source_text;
+            items.push_back(std::move(entry));
+            display_to_row.push_back(static_cast<int>(index));
+            display_kind.push_back(DisplayLineKind::ExceptionBreakpoint);
+            display_expand_keys.push_back(has_collapsible ? breakpoint_condition_key(row) : std::string{});
+
+            if (conditions_expanded) {
+                if (editing_when) {
+                    items.push_back(kInlineWhenEditRow);
+                    display_to_row.push_back(static_cast<int>(index));
+                    display_kind.push_back(DisplayLineKind::WhenConditionEditing);
+                    display_expand_keys.push_back({});
+                    inline_edit_display_index_ = static_cast<int>(items.size()) - 1;
+                } else if (!row.condition.empty()) {
+                    items.push_back("    when " + row.condition);
+                    display_to_row.push_back(static_cast<int>(index));
+                    display_kind.push_back(DisplayLineKind::WhenCondition);
+                    display_expand_keys.push_back({});
+                }
+            }
             continue;
         }
 
@@ -179,23 +386,28 @@ void BreakpointsPanel::set_breakpoints(std::vector<BreakpointRow> rows) {
         }
 
         if (row.path != current_path) {
-            if (!items.empty()) {
-                items.push_back("");
-                display_to_row.push_back(-1);
-                display_kind.push_back(DisplayLineKind::None);
-            }
-            items.push_back(basename_from_path(row.path) + ":");
-            display_to_row.push_back(-1);
-            display_kind.push_back(DisplayLineKind::None);
             current_path = row.path;
+            const std::string file_group_key = "file:" + row.path;
+            current_file_collapsed = collapsed_group_keys_.count(file_group_key) > 0;
+            add_group_header(basename_from_path(row.path) + ":", file_group_key, !current_file_collapsed);
+        }
+
+        if (current_file_collapsed) {
+            continue;
         }
 
         const bool editing_when = inline_edit_.active && !inline_edit_.hit &&
                                   paths_match(row.path, inline_edit_.path) && row.line == inline_edit_.line;
         const bool editing_hit = inline_edit_.active && inline_edit_.hit &&
                                  paths_match(row.path, inline_edit_.path) && row.line == inline_edit_.line;
+        const bool has_collapsible = row_has_collapsible_conditions(row);
+        const bool conditions_expanded = conditions_expanded_for_row(row);
 
-        std::string entry = "  " + std::to_string(row.line);
+        std::string entry = "  ";
+        if (has_collapsible) {
+            entry += conditions_expanded ? kScopeExpandExpanded : kScopeExpandCollapsed;
+        }
+        entry += std::to_string(row.line);
         if (!row.source_text.empty()) {
             entry += " " + row.source_text;
         }
@@ -205,33 +417,41 @@ void BreakpointsPanel::set_breakpoints(std::vector<BreakpointRow> rows) {
         items.push_back(std::move(entry));
         display_to_row.push_back(static_cast<int>(index));
         display_kind.push_back(DisplayLineKind::Breakpoint);
+        display_expand_keys.push_back(has_collapsible ? breakpoint_condition_key(row) : std::string{});
 
-        if (editing_when) {
-            items.push_back(kInlineWhenEditRow);
-            display_to_row.push_back(static_cast<int>(index));
-            display_kind.push_back(DisplayLineKind::WhenConditionEditing);
-            inline_edit_display_index_ = static_cast<int>(items.size()) - 1;
-        } else if (!row.condition.empty()) {
-            items.push_back("    when " + row.condition);
-            display_to_row.push_back(static_cast<int>(index));
-            display_kind.push_back(DisplayLineKind::WhenCondition);
-        }
+        if (conditions_expanded) {
+            if (editing_when) {
+                items.push_back(kInlineWhenEditRow);
+                display_to_row.push_back(static_cast<int>(index));
+                display_kind.push_back(DisplayLineKind::WhenConditionEditing);
+                display_expand_keys.push_back({});
+                inline_edit_display_index_ = static_cast<int>(items.size()) - 1;
+            } else if (!row.condition.empty()) {
+                items.push_back("    when " + row.condition);
+                display_to_row.push_back(static_cast<int>(index));
+                display_kind.push_back(DisplayLineKind::WhenCondition);
+                display_expand_keys.push_back({});
+            }
 
-        if (editing_hit) {
-            items.push_back(kInlineHitEditRow);
-            display_to_row.push_back(static_cast<int>(index));
-            display_kind.push_back(DisplayLineKind::HitConditionEditing);
-            inline_edit_display_index_ = static_cast<int>(items.size()) - 1;
-        } else if (!row.hit_condition.empty()) {
-            std::string hit_line = "    hit " + row.hit_condition + " (" + std::to_string(row.hit_count) + ")";
-            items.push_back(std::move(hit_line));
-            display_to_row.push_back(static_cast<int>(index));
-            display_kind.push_back(DisplayLineKind::HitCondition);
+            if (editing_hit) {
+                items.push_back(kInlineHitEditRow);
+                display_to_row.push_back(static_cast<int>(index));
+                display_kind.push_back(DisplayLineKind::HitConditionEditing);
+                display_expand_keys.push_back({});
+                inline_edit_display_index_ = static_cast<int>(items.size()) - 1;
+            } else if (!row.hit_condition.empty()) {
+                std::string hit_line = "    hit " + row.hit_condition + " (" + std::to_string(row.hit_count) + ")";
+                items.push_back(std::move(hit_line));
+                display_to_row.push_back(static_cast<int>(index));
+                display_kind.push_back(DisplayLineKind::HitCondition);
+                display_expand_keys.push_back({});
+            }
         }
     }
 
     display_to_row_ = std::move(display_to_row);
     display_kind_ = std::move(display_kind);
+    display_expand_keys_ = std::move(display_expand_keys);
     list_->assign_items(std::move(items));
     sync_inline_edit_to_list();
     list_->mark_dirty();
@@ -263,6 +483,18 @@ void BreakpointsPanel::set_inline_edit(const std::string& path, int line, bool h
     inline_edit_.path = path;
     inline_edit_.line = line;
     inline_edit_.hit = hit;
+    inline_edit_.exception = false;
+    inline_edit_.exception_filter.clear();
+    inline_edit_.value = std::move(value);
+    inline_edit_.active = true;
+}
+
+void BreakpointsPanel::set_exception_inline_edit(const std::string& filter, std::string value) {
+    inline_edit_.path.clear();
+    inline_edit_.line = 0;
+    inline_edit_.hit = false;
+    inline_edit_.exception = true;
+    inline_edit_.exception_filter = filter;
     inline_edit_.value = std::move(value);
     inline_edit_.active = true;
 }

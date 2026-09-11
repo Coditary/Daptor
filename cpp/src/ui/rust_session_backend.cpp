@@ -5,9 +5,39 @@ extern "C" {
 }
 
 #include <cstring>
+#include <sstream>
 #include <vector>
 
 namespace tui_debug_ui {
+
+namespace {
+
+std::string serialize_program_args_json(const std::vector<std::string>& program_args) {
+    if (program_args.empty()) {
+        return {};
+    }
+    std::ostringstream json;
+    json << '[';
+    bool first = true;
+    for (const std::string& arg : program_args) {
+        if (!first) {
+            json << ',';
+        }
+        first = false;
+        json << '"';
+        for (char ch : arg) {
+            if (ch == '"' || ch == '\\') {
+                json << '\\';
+            }
+            json << ch;
+        }
+        json << '"';
+    }
+    json << ']';
+    return json.str();
+}
+
+}  // namespace
 
 class RustSessionBackend final : public SessionBackend {
   public:
@@ -15,14 +45,16 @@ class RustSessionBackend final : public SessionBackend {
 
     ~RustSessionBackend() override { shutdown(); }
 
-    void launch(const std::string& program_path) override {
+    void launch(const std::string& program_path, const std::vector<std::string>& program_args) override {
         shutdown();
+        const std::string args_json = serialize_program_args_json(program_args);
+        const char* args_ptr = args_json.empty() ? nullptr : args_json.c_str();
         if (adapter_ == DebugAdapter::Lldb) {
-            session_ = tui_debug_session_launch_lldb(program_path.c_str());
+            session_ = tui_debug_session_launch_lldb(program_path.c_str(), args_ptr);
         } else if (adapter_ == DebugAdapter::Rr) {
-            session_ = tui_debug_session_launch_rr(program_path.c_str());
+            session_ = tui_debug_session_launch_rr(program_path.c_str(), args_ptr);
         } else {
-            session_ = tui_debug_session_launch(program_path.c_str());
+            session_ = tui_debug_session_launch(program_path.c_str(), args_ptr);
         }
     }
 
@@ -210,6 +242,38 @@ class RustSessionBackend final : public SessionBackend {
         if (tui_debug_set_data_breakpoints(session_, breakpoints_json.c_str(), results_buffer,
                                            sizeof(results_buffer)) == 0) {
             results_out = results_buffer;
+            return true;
+        }
+
+        error_out = adapter_last_error();
+        return false;
+    }
+
+    bool set_function_breakpoints(const std::string& breakpoints_json, std::string& error_out,
+                                  std::string& results_out) override {
+        if (session_ == nullptr) {
+            error_out = "no session";
+            return false;
+        }
+
+        char results_buffer[4096];
+        if (tui_debug_set_function_breakpoints(session_, breakpoints_json.c_str(), results_buffer,
+                                               sizeof(results_buffer)) == 0) {
+            results_out = results_buffer;
+            return true;
+        }
+
+        error_out = adapter_last_error();
+        return false;
+    }
+
+    bool set_exception_breakpoints(const std::string& filters_json, std::string& error_out) override {
+        if (session_ == nullptr) {
+            error_out = "no session";
+            return false;
+        }
+
+        if (tui_debug_set_exception_breakpoints(session_, filters_json.c_str()) == 0) {
             return true;
         }
 

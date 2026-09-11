@@ -27,12 +27,17 @@ include = [
     "tui_debug_set_breakpoints",
     "tui_debug_data_breakpoint_info",
     "tui_debug_set_data_breakpoints",
+    "tui_debug_set_function_breakpoints",
+    "tui_debug_set_exception_breakpoints",
     "tui_debug_fetch_variables",
     "tui_debug_set_variable",
     "tui_debug_fetch_source",
     "tui_debug_fetch_step_in_targets",
     "tui_debug_fetch_goto_targets",
     "tui_debug_highlight_viewport",
+    "tui_debug_function_name_at_line",
+    "tui_debug_function_definition_line",
+    "tui_debug_identifier_at_position",
 ]
 
 [fn]

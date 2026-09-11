@@ -129,6 +129,16 @@ class DebugUiModel {
     bool supports_step_in_targets = false;
     bool supports_goto_targets = false;
     bool supports_data_breakpoints = false;
+    bool supports_function_breakpoints = false;
+
+    struct ExceptionBreakpointFilterInfo {
+        std::string filter;
+        std::string label;
+        std::string description;
+        bool default_enabled = false;
+        bool supports_condition = false;
+    };
+    std::vector<ExceptionBreakpointFilterInfo> exception_breakpoint_filters;
 
     /// Apply a JSON snapshot from the Rust session.
     void apply_snapshot_json(const std::string& json);

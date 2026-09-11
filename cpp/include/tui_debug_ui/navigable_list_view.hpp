@@ -124,6 +124,8 @@ class NavigableListView : public tuinator::ListView {
     [[nodiscard]] tuinator::Point to_terminal_point(tuinator::Point event_position) const;
     [[nodiscard]] static bool is_breakpoint_condition_row(const std::string& item);
     [[nodiscard]] static bool is_breakpoint_data_row(const std::string& item);
+    [[nodiscard]] static bool is_breakpoint_function_row(const std::string& item);
+    [[nodiscard]] static bool is_breakpoint_exception_row(const std::string& item);
 
     tuinator::Style row_background_;
     tuinator::Style item_style_;

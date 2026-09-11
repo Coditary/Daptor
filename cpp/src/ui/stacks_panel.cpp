@@ -51,6 +51,12 @@ StacksPanel::StacksPanel(const DapUiTheme& theme, tuinator::ScrollViewOptions sc
         }
         return false;
     });
+    list_->set_on_row_context([this](int index, const std::string& /*item*/, tuinator::Point anchor) {
+        const StackFrameRow* frame = frame_at_display_index(index);
+        if (frame != nullptr && on_context_ != nullptr) {
+            on_context_(*frame, anchor);
+        }
+    });
 
     pane_ = std::make_unique<TitledScrollPane>(title, std::move(list), theme.title_stacks, theme.panel_background,
                                                std::move(scroll_options));
@@ -125,6 +131,8 @@ void StacksPanel::set_lines(std::vector<std::string> lines) {
 void StacksPanel::set_on_activate(ActivateCallback callback) { on_activate_ = std::move(callback); }
 
 void StacksPanel::set_on_continue(std::function<void()> callback) { on_continue_ = std::move(callback); }
+
+void StacksPanel::set_on_context(ContextCallback callback) { on_context_ = std::move(callback); }
 
 const StackFrameRow* StacksPanel::frame_at_display_index(int index) const {
     if (index < 0 || index >= static_cast<int>(display_to_frame_.size())) {

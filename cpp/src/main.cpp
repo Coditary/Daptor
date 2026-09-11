@@ -11,6 +11,7 @@ extern "C" {
 #include <cstring>
 #include <fstream>
 #include <string>
+#include <vector>
 #include <unistd.h>
 
 namespace {
@@ -88,12 +89,13 @@ std::string resolve_native_launch_path(const std::string& program_path) {
 }
 
 void print_usage(const char* argv0) {
-    std::fprintf(stderr, "Usage: %s [--mock] [--lldb] [--rr] <program>\n", argv0);
+    std::fprintf(stderr, "Usage: %s [--mock] [--lldb] [--rr] <program> [program-args...]\n", argv0);
     std::fprintf(stderr, "  --mock   Frontend-only mode (no Rust/DAP backend)\n");
     std::fprintf(stderr, "  --lldb   Force lldb-dap for native binaries\n");
     std::fprintf(stderr, "  --rr     Use rr record+replay (reverse debugging, Linux)\n");
     std::fprintf(stderr, "  Python:  %s fixtures/step_in_demo.py\n", argv0);
     std::fprintf(stderr, "  C/C++:   %s fixtures/reverse_demo\n", argv0);
+    std::fprintf(stderr, "  C++ ex:  %s fixtures/exception_demo 2  (build: fixtures/build-exception-demo.sh)\n", argv0);
     std::fprintf(stderr, "           (native ELF binaries auto-select lldb-dap)\n");
     std::fprintf(stderr, "  Reverse: %s --rr fixtures/reverse_demo\n", argv0);
     std::fprintf(stderr, "tui-debug-ui 0.1.0\n");
@@ -105,6 +107,7 @@ int main(int argc, char* argv[]) {
     tui_debug_ui::SessionMode mode = tui_debug_ui::SessionMode::Rust;
     tui_debug_ui::DebugAdapter adapter = tui_debug_ui::DebugAdapter::Debugpy;
     const char* program_path = nullptr;
+    std::vector<std::string> program_args;
 
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--mock") == 0) {
@@ -128,9 +131,7 @@ int main(int argc, char* argv[]) {
             program_path = argv[i];
             continue;
         }
-        std::fprintf(stderr, "Unexpected argument: %s\n", argv[i]);
-        print_usage(argv[0]);
-        return EXIT_FAILURE;
+        program_args.push_back(argv[i]);
     }
 
     if (program_path == nullptr) {
@@ -187,6 +188,6 @@ int main(int argc, char* argv[]) {
         tui_debug_init();
     }
 
-    tui_debug_ui::DebugApp app(launch_path, mode, adapter);
+    tui_debug_ui::DebugApp app(launch_path, mode, adapter, std::move(program_args));
     return app.run();
 }

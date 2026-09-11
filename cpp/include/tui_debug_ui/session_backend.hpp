@@ -4,6 +4,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace tui_debug_ui {
 
@@ -23,7 +24,7 @@ class SessionBackend {
   public:
     virtual ~SessionBackend() = default;
 
-    virtual void launch(const std::string& program_path) = 0;
+    virtual void launch(const std::string& program_path, const std::vector<std::string>& program_args) = 0;
     virtual void shutdown() = 0;
     virtual bool is_active() const = 0;
     virtual std::string last_error() const { return {}; }
@@ -50,6 +51,9 @@ class SessionBackend {
                                     std::string& error_out) = 0;
     virtual bool set_data_breakpoints(const std::string& breakpoints_json, std::string& error_out,
                                       std::string& results_out) = 0;
+    virtual bool set_function_breakpoints(const std::string& breakpoints_json, std::string& error_out,
+                                          std::string& results_out) = 0;
+    virtual bool set_exception_breakpoints(const std::string& filters_json, std::string& error_out) = 0;
     virtual std::optional<std::string> fetch_variables_json(std::int64_t variables_reference,
                                                             const std::string& scope_name = {}) = 0;
     virtual std::optional<std::string> fetch_source(std::int64_t source_reference) = 0;

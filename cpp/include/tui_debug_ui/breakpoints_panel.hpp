@@ -8,6 +8,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace tuinator {
@@ -25,6 +26,8 @@ namespace tui_debug_ui {
 enum class BreakpointRowKind {
     Source,
     Data,
+    Function,
+    Exception,
 };
 
 struct BreakpointRow {
@@ -37,6 +40,8 @@ struct BreakpointRow {
     std::uint64_t hit_count = 0;
     std::string data_id;
     std::string access_type;
+    bool exception_enabled = false;
+    bool exception_supports_condition = false;
 };
 
 struct DapUiTheme;
@@ -70,6 +75,7 @@ class BreakpointsPanel {
     void set_on_change(ChangeCallback callback);
     void set_on_inline_edit_cancel(std::function<void()> callback);
     void set_inline_edit(const std::string& path, int line, bool hit, std::string value);
+    void set_exception_inline_edit(const std::string& filter, std::string value);
     void clear_inline_edit();
     [[nodiscard]] bool has_inline_edit() const;
     [[nodiscard]] std::string inline_edit_value() const;
@@ -89,14 +95,22 @@ class BreakpointsPanel {
   private:
     enum class DisplayLineKind {
         None,
+        GroupHeader,
         Breakpoint,
         WhenCondition,
         HitCondition,
         WhenConditionEditing,
         HitConditionEditing,
         DataBreakpoint,
+        FunctionBreakpoint,
+        ExceptionBreakpoint,
     };
 
+    void rebuild_display();
+    [[nodiscard]] bool try_toggle_expand(int display_index);
+    [[nodiscard]] static std::string breakpoint_condition_key(const BreakpointRow& row);
+    [[nodiscard]] bool row_has_collapsible_conditions(const BreakpointRow& row) const;
+    [[nodiscard]] bool conditions_expanded_for_row(const BreakpointRow& row) const;
     [[nodiscard]] const BreakpointRow* breakpoint_at_display_index(int index) const;
     [[nodiscard]] DisplayLineKind display_kind_at(int index) const;
 
@@ -104,6 +118,8 @@ class BreakpointsPanel {
         std::string path;
         int line = 0;
         bool hit = false;
+        std::string exception_filter;
+        bool exception = false;
         std::string value;
         bool active = false;
     };
@@ -118,6 +134,9 @@ class BreakpointsPanel {
     std::vector<BreakpointRow> rows_;
     std::vector<int> display_to_row_;
     std::vector<DisplayLineKind> display_kind_;
+    std::vector<std::string> display_expand_keys_;
+    std::unordered_set<std::string> collapsed_group_keys_;
+    std::unordered_set<std::string> collapsed_condition_keys_;
     ActivateCallback on_activate_;
     ContextCallback on_context_;
     RemoveCallback on_remove_;
