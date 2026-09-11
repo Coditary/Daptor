@@ -1290,12 +1290,12 @@ void DebugApp::build_ui() {
     watches_widget->set_flex(1);
 
     std::vector<StackedPane::Entry> sidebar_entries;
-    sidebar_entries.push_back({"Locals", std::move(scopes_widget)});
+    sidebar_entries.push_back({"Variables", std::move(scopes_widget)});
     sidebar_entries.push_back({"Threads", std::move(stacks_widget)});
     sidebar_entries.push_back({"Breakpoints", std::move(breakpoints_widget)});
     sidebar_entries.push_back({"Watches", std::move(watches_widget)});
     auto sidebar = std::make_unique<StackedPane>(std::move(sidebar_entries), dap_theme_.panel_background,
-                                                 dap_theme_.label, dap_theme_.title_focused);
+                                                 dap_theme_.label, dap_theme_.title_focused, dap_theme_.divider);
     sidebar_stack_ = sidebar.get();
     sidebar_stack_->set_active_index(sidebar_stack_index_);
     sidebar_stack_->set_on_active_changed([this](int index) {
@@ -1437,7 +1437,7 @@ void DebugApp::build_ui() {
 
     auto console_section = std::make_unique<TitledScrollPane>("Console", std::move(console_panel),
                                                               dap_theme_.title_console, dap_theme_.panel_background,
-                                                              scroll_options, false);
+                                                              scroll_options, false, false);
     console_scroll_view_ = console_section->scroll_view();
     auto console_shell = console_section->release_widget();
     console_shell->set_flex(1);
@@ -1446,7 +1446,7 @@ void DebugApp::build_ui() {
     bottom_entries.push_back({"REPL", std::move(repl_shell)});
     bottom_entries.push_back({"Console", std::move(console_shell)});
     auto bottom_tray = std::make_unique<StackedPane>(std::move(bottom_entries), dap_theme_.panel_background,
-                                                     dap_theme_.label, dap_theme_.title_focused);
+                                                     dap_theme_.label, dap_theme_.title_focused, dap_theme_.divider);
     bottom_stack_ = bottom_tray.get();
     bottom_stack_->set_active_index(bottom_stack_index_);
     bottom_stack_->set_on_active_changed([this](int index) {

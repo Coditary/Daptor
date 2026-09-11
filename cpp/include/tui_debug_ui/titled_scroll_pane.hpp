@@ -16,7 +16,7 @@ class TitledScrollPane {
   public:
     TitledScrollPane(std::string title, std::unique_ptr<tuinator::Widget> content, tuinator::Style title_style,
                      tuinator::Style background, tuinator::ScrollViewOptions scroll_options, bool scrollable = true,
-                     std::unique_ptr<tuinator::Widget> header = nullptr,
+                     bool show_title = true, std::unique_ptr<tuinator::Widget> header = nullptr,
                      std::unique_ptr<tuinator::Widget> footer = nullptr);
 
     void set_title(std::string title);

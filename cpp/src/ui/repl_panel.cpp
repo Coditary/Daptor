@@ -255,7 +255,7 @@ ReplPanel::ReplPanel(const DapUiTheme& theme, tuinator::ScrollViewOptions scroll
     root->add_child(std::move(input_shell));
 
     pane_ = std::make_unique<TitledScrollPane>("REPL", std::move(root), theme.title_repl, theme.panel_background,
-                                                std::move(scroll_options), false);
+                                                std::move(scroll_options), false, false);
 }
 
 std::unique_ptr<tuinator::Widget> ReplPanel::release_widget() {

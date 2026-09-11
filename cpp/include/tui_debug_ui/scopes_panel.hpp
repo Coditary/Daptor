@@ -22,11 +22,11 @@ namespace tui_debug_ui {
 
 struct DapUiTheme;
 
-/// Locals / scope variables as a titled, scrollable list.
+/// Scope variables as a titled, scrollable list.
 class ScopesPanel {
   public:
     ScopesPanel(const DapUiTheme& theme, tuinator::ScrollViewOptions scroll_options,
-                const std::string& title = "Locals");
+                const std::string& title = "Variables");
 
     std::unique_ptr<tuinator::Widget> release_widget();
     void set_scope_names(std::vector<std::string> names, std::vector<bool> show_edit = {});

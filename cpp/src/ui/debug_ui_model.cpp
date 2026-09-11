@@ -35,7 +35,7 @@ std::string DebugUiModel::focus_label() const {
     case Focus::Source:
         return "source";
     case Focus::Scopes:
-        return "scopes";
+        return "variables";
     case Focus::Breakpoints:
         return "breakpoints";
     case Focus::Stacks:

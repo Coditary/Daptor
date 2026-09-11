@@ -21,7 +21,7 @@ class StackedPane : public tuinator::Widget {
     using ActiveChangedCallback = std::function<void(int index)>;
 
     StackedPane(std::vector<Entry> entries, tuinator::Style background, tuinator::Style chrome_label,
-                tuinator::Style chrome_hint);
+                tuinator::Style chrome_hint, tuinator::Style chrome_divider);
 
     [[nodiscard]] int active_index() const { return active_index_; }
     [[nodiscard]] int count() const { return static_cast<int>(entries_.size()); }
@@ -42,7 +42,9 @@ class StackedPane : public tuinator::Widget {
     void for_each_child(const std::function<void(tuinator::Widget*)>& visitor) override;
 
   private:
-    static constexpr int kChromeHeight = 1;
+    static constexpr int kChromeLabelRows = 1;
+    static constexpr int kChromeDividerRows = 1;
+    static constexpr int kChromeHeight = kChromeLabelRows + kChromeDividerRows;
 
     enum class ChromeMode {
         AllTabs,
@@ -100,6 +102,7 @@ class StackedPane : public tuinator::Widget {
     tuinator::Style background_;
     tuinator::Style chrome_label_;
     tuinator::Style chrome_hint_;
+    tuinator::Style chrome_divider_;
     int active_index_ = 0;
     int tab_scroll_offset_ = 0;
     ActiveChangedCallback on_active_changed_;

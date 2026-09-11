@@ -1,5 +1,7 @@
 #include "tui_debug_ui/stacked_pane.hpp"
 
+#include "tui_debug_ui/divider_paint.hpp"
+
 #include <tuinator/core/event.hpp>
 #include <tuinator/render/paint_context.hpp>
 #include <tuinator/render/text.hpp>
@@ -20,10 +22,11 @@ constexpr int kArrowGap = 1;
 }  // namespace
 
 StackedPane::StackedPane(std::vector<Entry> entries, tuinator::Style background, tuinator::Style chrome_label,
-                         tuinator::Style chrome_hint)
+                         tuinator::Style chrome_hint, tuinator::Style chrome_divider)
     : background_(std::move(background)),
       chrome_label_(std::move(chrome_label)),
-      chrome_hint_(std::move(chrome_hint)) {
+      chrome_hint_(std::move(chrome_hint)),
+      chrome_divider_(std::move(chrome_divider)) {
     for (Entry& entry : entries) {
         entries_.push_back(EntryData{std::move(entry.label), std::move(entry.widget)});
     }
@@ -327,8 +330,11 @@ void StackedPane::paint(tuinator::PaintContext& ctx) const {
     tuinator::Canvas& canvas = ctx.canvas;
     canvas.fill_rect({{0, 0}, bounds_.size()}, ' ', background_);
 
-    if (bounds_.height >= kChromeHeight) {
+    if (bounds_.height >= kChromeLabelRows) {
         paint_chrome(canvas);
+    }
+    if (bounds_.height >= kChromeHeight) {
+        draw_thin_hline(canvas, 0, kChromeLabelRows, bounds_.width, chrome_divider_);
     }
 
     const EntryData& active = entries_[static_cast<std::size_t>(active_index_)];

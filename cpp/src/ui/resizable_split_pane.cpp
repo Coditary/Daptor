@@ -1,5 +1,7 @@
 #include "tui_debug_ui/resizable_split_pane.hpp"
 
+#include "tui_debug_ui/divider_paint.hpp"
+
 #include <tuinator/core/event.hpp>
 #include <tuinator/render/paint_context.hpp>
 
@@ -182,19 +184,16 @@ void ResizableSplitPane::paint(tuinator::PaintContext& ctx) const {
     paint_child(first_.get());
     paint_child(second_.get());
 
-    tuinator::Style divider = options_.divider_style;
-    if (divider.foreground == tuinator::Color::Default) {
-        divider.foreground = tuinator::Color::Cyan;
-    }
+    const tuinator::Style divider = options_.divider_style;
 
     if (options_.orientation == tuinator::SplitOrientation::Horizontal) {
         const int x = divider_position();
-        canvas.draw_vline(x, 0, bounds_.height, divider);
+        draw_thick_vline(canvas, x, 0, bounds_.height, divider);
         return;
     }
 
     const int y = divider_position();
-    canvas.draw_hline(0, y, bounds_.width, divider);
+    draw_thick_hline(canvas, 0, y, bounds_.width, divider);
 }
 
 tuinator::Widget* ResizableSplitPane::hit_test(tuinator::Point point) {

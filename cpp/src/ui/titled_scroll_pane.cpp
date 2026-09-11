@@ -38,6 +38,9 @@ class PanelTitleBar : public tuinator::Widget {
     }
 
     tuinator::Size preferred_size() const override {
+        if (title_.empty() && action_symbol_.empty()) {
+            return {0, 0};
+        }
         const int title_width = tuinator::text_display_width(title_);
         const int action_width = action_symbol_.empty() ? 0 : tuinator::text_display_width(action_symbol_);
         return {title_width + action_width, 1};
@@ -46,7 +49,7 @@ class PanelTitleBar : public tuinator::Widget {
     void layout(tuinator::Rect bounds) override { bounds_ = bounds; }
 
     void paint(tuinator::PaintContext& ctx) const override {
-        if (bounds_.width <= 0 || bounds_.height <= 0) {
+        if (bounds_.width <= 0 || bounds_.height <= 0 || (title_.empty() && action_symbol_.empty())) {
             return;
         }
 
@@ -99,15 +102,21 @@ class PanelTitleBar : public tuinator::Widget {
 
 TitledScrollPane::TitledScrollPane(std::string title, std::unique_ptr<tuinator::Widget> content,
                                    tuinator::Style title_style, tuinator::Style background,
-                                   tuinator::ScrollViewOptions scroll_options, bool scrollable,
+                                   tuinator::ScrollViewOptions scroll_options, bool scrollable, bool show_title,
                                    std::unique_ptr<tuinator::Widget> header,
                                    std::unique_ptr<tuinator::Widget> footer) {
     auto column = std::make_unique<tuinator::VBox>(tuinator::BoxOptions{.gap = 0, .padding = 0});
     column->set_flex(1);
 
-    auto label = std::make_unique<PanelTitleBar>(std::move(title), title_style, "", title_style, nullptr);
-    title_label_ = label.get();
-    column->add_child(std::move(label));
+    if (show_title) {
+        auto label = std::make_unique<PanelTitleBar>(std::move(title), title_style, "", title_style, nullptr);
+        title_label_ = label.get();
+        column->add_child(std::move(label));
+    } else {
+        auto label = std::make_unique<PanelTitleBar>("", title_style, "", title_style, nullptr);
+        title_label_ = label.get();
+        column->add_child(std::move(label));
+    }
 
     if (header != nullptr) {
         header->set_flex(0);

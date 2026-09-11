@@ -43,7 +43,7 @@ WatchesPanel::WatchesPanel(const DapUiTheme& theme, tuinator::ScrollViewOptions 
     });
 
     pane_ = std::make_unique<TitledScrollPane>("Watches", std::move(list), theme.title_watches,
-                                                theme.panel_background, std::move(scroll_options), true);
+                                                theme.panel_background, std::move(scroll_options), true, false);
     if (tuinator::ScrollView* scroll = pane_->scroll_view()) {
         list_->set_scroll_parent(scroll);
     }

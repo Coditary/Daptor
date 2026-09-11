@@ -59,7 +59,7 @@ StacksPanel::StacksPanel(const DapUiTheme& theme, tuinator::ScrollViewOptions sc
     });
 
     pane_ = std::make_unique<TitledScrollPane>(title, std::move(list), theme.title_stacks, theme.panel_background,
-                                               std::move(scroll_options));
+                                               std::move(scroll_options), true, false);
     if (tuinator::ScrollView* scroll = pane_->scroll_view()) {
         list_->set_scroll_parent(scroll);
     }

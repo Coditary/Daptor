@@ -131,7 +131,7 @@ BreakpointsPanel::BreakpointsPanel(const DapUiTheme& theme, tuinator::ScrollView
     });
 
     pane_ = std::make_unique<TitledScrollPane>(title, std::move(list), theme.title_breakpoints, theme.panel_background,
-                                               std::move(scroll_options), true);
+                                               std::move(scroll_options), true, false);
     if (tuinator::ScrollView* scroll = pane_->scroll_view()) {
         list_->set_scroll_parent(scroll);
     }
