@@ -12,7 +12,10 @@ use tree_sitter_highlight::{
     Highlight, HighlightConfiguration, HighlightEvent, Highlighter,
 };
 
+use super::language_id::{highlight_language_candidates, normalize_language as normalize_language_id};
 use super::spans::{HighlightKind, StyledSpan};
+
+pub use super::language_id::normalize_language;
 
 type LanguageFn = unsafe extern "C" fn() -> *const ();
 
@@ -213,16 +216,8 @@ pub(crate) fn language_dir(language: &str) -> PathBuf {
     default_tree_sitter_dir().join(language)
 }
 
-/// Map file-extension language ids to registered grammar keys.
-pub fn normalize_language(language: &str) -> &str {
-    match language {
-        "cc" | "cxx" => "cpp",
-        _ => language,
-    }
-}
-
 pub fn language_is_loaded(language: &str) -> bool {
-    let language = normalize_language(language);
+    let language = normalize_language_id(language);
     state()
         .lock()
         .expect("tree-sitter state lock")
@@ -262,12 +257,38 @@ fn try_load_from_default_dir(language: &str) -> bool {
     try_load_language(language).is_ok()
 }
 
+/// Minimum ratio of non-default bytes before accepting a highlight result.
+const MIN_COLORED_BYTE_RATIO: f64 = 0.03;
+
 /// Highlight `source` into styled spans when a grammar is available.
+///
+/// Tries the requested language first, then any configured fallbacks (e.g. C for C++),
+/// and keeps the result with the most semantic coloring.
 pub fn highlight_source(language: &str, source: &str) -> Option<Vec<StyledSpan>> {
     if source.is_empty() {
         return Some(Vec::new());
     }
 
+    let mut best: Option<Vec<StyledSpan>> = None;
+    let mut best_ratio = 0.0;
+
+    for candidate in highlight_language_candidates(language) {
+        if let Some(spans) = highlight_source_for_language(&candidate, source) {
+            let ratio = colored_byte_ratio(&spans);
+            if ratio >= MIN_COLORED_BYTE_RATIO {
+                return Some(spans);
+            }
+            if ratio > best_ratio {
+                best_ratio = ratio;
+                best = Some(spans);
+            }
+        }
+    }
+
+    best
+}
+
+fn highlight_source_for_language(language: &str, source: &str) -> Option<Vec<StyledSpan>> {
     let language = normalize_language(language);
     {
         let guard = state().lock().expect("tree-sitter state lock");
@@ -289,6 +310,19 @@ pub fn highlight_source(language: &str, source: &str) -> Option<Vec<StyledSpan>>
         .ok()?;
 
     Some(spans_from_events(source, events))
+}
+
+fn colored_byte_ratio(spans: &[StyledSpan]) -> f64 {
+    let total = spans.iter().map(|span| span.text.len()).sum::<usize>();
+    if total == 0 {
+        return 0.0;
+    }
+    let colored = spans
+        .iter()
+        .filter(|span| span.kind != HighlightKind::Default)
+        .map(|span| span.text.len())
+        .sum::<usize>();
+    colored as f64 / total as f64
 }
 
 /// Parse-only helper for diagnostics.

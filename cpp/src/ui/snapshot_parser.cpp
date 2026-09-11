@@ -133,6 +133,26 @@ void apply_snapshot_object(DebugUiModel& model, const Json& snapshot) {
             model.stopped_thread_id = state.at("Stopped").value("thread_id", static_cast<std::int64_t>(0));
         } else if (model.session_state != "stopped") {
             model.stopped_thread_id = 0;
+            model.exception_info.reset();
+        }
+    }
+
+    model.exception_info.reset();
+    if (snapshot.contains("exception_info") && snapshot.at("exception_info").is_object()) {
+        const Json& info = snapshot.at("exception_info");
+        ExceptionInfo parsed{};
+        parsed.exception_id = info.value("exceptionId", std::string{});
+        parsed.break_mode = info.value("breakMode", std::string{});
+        parsed.description = info.value("description", std::string{});
+        if (info.contains("details") && info.at("details").is_object()) {
+            const Json& details = info.at("details");
+            parsed.type_name = details.value("typeName", std::string{});
+            parsed.message = details.value("message", std::string{});
+            parsed.evaluate_name = details.value("evaluateName", std::string{});
+            parsed.stack_trace = details.value("stackTrace", std::string{});
+        }
+        if (!parsed.exception_id.empty() || !parsed.description.empty() || !parsed.message.empty()) {
+            model.exception_info = std::move(parsed);
         }
     }
 

@@ -8,7 +8,8 @@ use serde_json::{Value, json};
 use tracing::{info, warn};
 
 use crate::dap::protocol::{
-    InboundMessage, OutputEventBody, Scope, StackFrame, StoppedEventBody, Thread, Variable,
+    ExceptionInfo, InboundMessage, OutputEventBody, Scope, StackFrame, StoppedEventBody, Thread,
+    Variable,
 };
 use crate::terminal::{DebuggeeIo, DebuggeeTerminal, LldbStdioChannels, parse_run_in_terminal};
 use std::sync::{Arc, Mutex};
@@ -78,6 +79,8 @@ pub struct AdapterCapabilities {
     pub supports_function_breakpoints: bool,
     #[serde(default)]
     pub supports_completions_request: bool,
+    #[serde(default)]
+    pub supports_exception_info_request: bool,
     #[serde(default)]
     pub exception_breakpoint_filters: Vec<ExceptionBreakpointFilter>,
 }
@@ -297,6 +300,8 @@ pub struct SessionSnapshot {
     pub capabilities: AdapterCapabilities,
     #[serde(default)]
     pub breakpoint_hits: Vec<BreakpointHitInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exception_info: Option<ExceptionInfo>,
 }
 
 /// Owns the Dap transport and implements the debug session lifecycle.
@@ -315,6 +320,7 @@ pub struct DebugSession {
     supports_data_breakpoints: bool,
     supports_function_breakpoints: bool,
     supports_completions_request: bool,
+    supports_exception_info_request: bool,
     exception_breakpoint_filters: Vec<ExceptionBreakpointFilter>,
     adapter: DebugAdapterKind,
     breakpoint_hit_counts: HashMap<(String, u32), u32>,
@@ -354,6 +360,7 @@ impl DebugSession {
             supports_data_breakpoints: false,
             supports_function_breakpoints: false,
             supports_completions_request: false,
+            supports_exception_info_request: false,
             exception_breakpoint_filters: Vec::new(),
             adapter: DebugAdapterKind::Debugpy,
             breakpoint_hit_counts: HashMap::new(),
@@ -396,6 +403,7 @@ impl DebugSession {
             supports_data_breakpoints: false,
             supports_function_breakpoints: false,
             supports_completions_request: false,
+            supports_exception_info_request: false,
             exception_breakpoint_filters: Vec::new(),
             adapter: DebugAdapterKind::Lldb,
             breakpoint_hit_counts: HashMap::new(),
@@ -602,6 +610,12 @@ impl DebugSession {
         {
             self.supports_completions_request = enabled;
         }
+        if let Some(enabled) = value
+            .get("supportsExceptionInfoRequest")
+            .and_then(|value| value.as_bool())
+        {
+            self.supports_exception_info_request = enabled;
+        }
         if let Some(filters) = value
             .get("exceptionBreakpointFilters")
             .and_then(|value| value.as_array())
@@ -653,6 +667,7 @@ impl DebugSession {
             supports_data_breakpoints: self.supports_data_breakpoints,
             supports_function_breakpoints: self.supports_function_breakpoints,
             supports_completions_request: self.supports_completions_request,
+            supports_exception_info_request: self.supports_exception_info_request,
             exception_breakpoint_filters: self.exception_breakpoint_filters.clone(),
         };
         snapshot.breakpoint_hits = self.collect_breakpoint_hits();
@@ -790,7 +805,11 @@ impl DebugSession {
             reason: stopped.reason.clone(),
         };
         self.active_thread = Some(stopped.thread_id);
-        self.enrich_stopped_snapshot()
+        let mut snapshot = self.enrich_stopped_snapshot()?;
+        if stopped.reason == "exception" && self.supports_exception_info_request {
+            snapshot.exception_info = self.exception_info(stopped.thread_id).ok();
+        }
+        Ok(snapshot)
     }
 
     fn empty_state_snapshot(&self, state: SessionState) -> SessionSnapshot {
@@ -803,6 +822,7 @@ impl DebugSession {
             variables: vec![],
             capabilities: AdapterCapabilities::default(),
             breakpoint_hits: vec![],
+            exception_info: None,
         })
     }
 
@@ -1007,6 +1027,7 @@ impl DebugSession {
             variables,
             capabilities: AdapterCapabilities::default(),
             breakpoint_hits: vec![],
+            exception_info: None,
         }))
     }
 
@@ -1433,6 +1454,25 @@ impl DebugSession {
     }
 
     /// Resolve a variable to a DAP `dataId` for `setDataBreakpoints`.
+    /// Fetch structured exception details for the thread that raised `stopped`.
+    pub fn exception_info(&self, thread_id: i64) -> Result<ExceptionInfo> {
+        if !self.supports_exception_info_request {
+            bail!("debug adapter does not support exceptionInfo");
+        }
+        if !matches!(self.state, SessionState::Stopped { .. }) {
+            bail!("cannot query exception info while program is running");
+        }
+
+        let seq = self.transport.send_request(
+            "exceptionInfo",
+            json!({
+                "threadId": thread_id,
+            }),
+        )?;
+        let body = self.wait_dap_response(seq, REQUEST_TIMEOUT)?;
+        serde_json::from_value::<ExceptionInfo>(body).context("invalid exceptionInfo response")
+    }
+
     pub fn data_breakpoint_info(
         &mut self,
         variables_reference: i64,

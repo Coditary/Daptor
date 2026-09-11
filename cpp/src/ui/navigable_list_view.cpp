@@ -299,6 +299,15 @@ void NavigableListView::set_inline_variable_row_edit(int row, std::string name, 
     mark_dirty();
 }
 
+void NavigableListView::set_inline_watch_row_edit(int row, std::string expression, std::string display_suffix) {
+    inline_row_edit_.row = row;
+    inline_row_edit_.prefix.clear();
+    inline_row_edit_.label = std::move(display_suffix);
+    inline_row_edit_.value = std::move(expression);
+    inline_row_edit_.cursor = inline_row_edit_.value.size();
+    mark_dirty();
+}
+
 void NavigableListView::clear_inline_row_edit() {
     inline_row_edit_ = {};
     mark_dirty();
@@ -318,6 +327,10 @@ bool NavigableListView::is_inline_hit_edit_row(const std::string& item) { return
 
 bool NavigableListView::is_inline_variable_edit_row(const std::string& item) {
     return item == kInlineVariableEditRow;
+}
+
+bool NavigableListView::is_inline_watch_edit_row(const std::string& item) {
+    return item == kInlineWatchEditRow;
 }
 
 void NavigableListView::set_on_inline_edit_change(InlineEditChangeCallback callback) {
@@ -384,6 +397,34 @@ void NavigableListView::paint_inline_variable_row_edit(tuinator::Canvas& canvas,
         draw_segment(canvas, column, row, "_", field_style, max_width);
     }
     draw_segment(canvas, column, row, "]", field_style, max_width);
+}
+
+void NavigableListView::paint_inline_watch_row_edit(tuinator::Canvas& canvas, int row, int max_width) const {
+    if (theme_ == nullptr || max_width <= 0) {
+        return;
+    }
+
+    tuinator::Style field_style = theme_->label;
+    field_style.reverse = true;
+
+    int column = 0;
+    draw_segment(canvas, column, row, "[", field_style, max_width);
+
+    const int bracket_width = 2;
+    const int value_max_width = std::max(0, max_width - column - bracket_width);
+    const std::size_t value_bytes =
+        tuinator::text_byte_length_for_width(inline_row_edit_.value, value_max_width);
+    const std::string visible_value = inline_row_edit_.value.substr(0, value_bytes);
+    draw_segment(canvas, column, row, visible_value, field_style, max_width);
+    if (inline_row_edit_.cursor >= inline_row_edit_.value.size() && column + bracket_width <= max_width) {
+        draw_segment(canvas, column, row, "_", field_style, max_width);
+    }
+    draw_segment(canvas, column, row, "]", field_style, max_width);
+    draw_segment(canvas, column, row, " = ", item_style_, max_width);
+
+    const tuinator::Style& suffix_style =
+        inline_row_edit_.label.rfind("<error:", 0) == 0 ? theme_->console_stderr : theme_->variable_value;
+    draw_segment(canvas, column, row, inline_row_edit_.label, suffix_style, max_width);
 }
 
 bool NavigableListView::handle_inline_row_edit_key(const tuinator::KeyPress& key) {
@@ -616,6 +657,9 @@ bool NavigableListView::row_shows_actions(int index, const std::string& item) co
         }
         return item.rfind("  ", 0) == 0 && !is_scope_header_row(item);
     case ListRowActionLayout::WatchRow:
+        if (is_inline_watch_edit_row(item)) {
+            return false;
+        }
         return parse_watch_row(item).has_value();
     case ListRowActionLayout::VariableRow:
         if (is_inline_variable_edit_row(item)) {
@@ -1018,6 +1062,10 @@ void NavigableListView::paint_themed_row(tuinator::Canvas& canvas, int row, int 
             break;
         }
         case ListPaintMode::Watches: {
+            if (is_inline_watch_edit_row(item)) {
+                paint_inline_watch_row_edit(canvas, row, max_width);
+                return;
+            }
             if (const auto parsed = parse_watch_row(item)) {
                 draw_segment(canvas, column, row, parsed->first, theme_->variable_name, content_max_width);
                 draw_segment(canvas, column, row, " = ", item_style_, content_max_width);

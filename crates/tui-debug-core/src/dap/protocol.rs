@@ -157,3 +157,31 @@ pub struct OutputEventBody {
     pub category: Option<String>,
     pub output: String,
 }
+
+/// DAP `ExceptionDetails` from an `exceptionInfo` response.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ExceptionDetails {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(rename = "typeName", default, skip_serializing_if = "Option::is_none")]
+    pub type_name: Option<String>,
+    #[serde(rename = "fullTypeName", default, skip_serializing_if = "Option::is_none")]
+    pub full_type_name: Option<String>,
+    #[serde(rename = "evaluateName", default, skip_serializing_if = "Option::is_none")]
+    pub evaluate_name: Option<String>,
+    #[serde(rename = "stackTrace", default, skip_serializing_if = "Option::is_none")]
+    pub stack_trace: Option<String>,
+}
+
+/// DAP `exceptionInfo` response body.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExceptionInfo {
+    #[serde(rename = "exceptionId")]
+    pub exception_id: String,
+    #[serde(rename = "breakMode")]
+    pub break_mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<ExceptionDetails>,
+}

@@ -663,6 +663,9 @@ class DebugChromeRoot : public tuinator::Widget {
             if (debug_app_ != nullptr && debug_app_->handle_scope_input_key(event)) {
                 return true;
             }
+            if (debug_app_ != nullptr && debug_app_->handle_watch_input_key(event)) {
+                return true;
+            }
         }
 
         if (const auto* mouse = std::get_if<tuinator::MouseEvent>(&event)) {
@@ -1040,30 +1043,6 @@ bool is_breakpointable_line(const tui_debug_ui::SourcePanel* panel, const std::s
     return !is_blank_source_line(line_text);
 }
 
-std::string language_from_path(const std::string& path) {
-    if (path.size() >= 3 && path.compare(path.size() - 3, 3, ".py") == 0) {
-        return "python";
-    }
-    const std::size_t dot = path.find_last_of('.');
-    if (dot == std::string::npos || dot + 1 >= path.size()) {
-        return "python";
-    }
-    const std::string ext = path.substr(dot + 1);
-    if (ext == "py" || ext == "pyw") {
-        return "python";
-    }
-    if (ext == "rs") {
-        return "rust";
-    }
-    if (ext == "cc" || ext == "cxx") {
-        return "cpp";
-    }
-    if (ext == "js" || ext == "ts") {
-        return "javascript";
-    }
-    return ext;
-}
-
 std::string lowercase_copy(std::string value) {
     for (char& ch : value) {
         ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
@@ -1303,8 +1282,11 @@ void DebugApp::build_ui() {
     });
     watches_panel_->set_on_remove([this](int index) { remove_watch_at(static_cast<std::size_t>(index)); });
     watches_panel_->set_on_edit([this](int index) { begin_edit_watch_at(index); });
+    watches_panel_->set_on_add([this]() { begin_add_watch(); });
+    watches_panel_->set_on_inline_edit_cancel([this]() { blur_watch_input(); });
     if (!watch_input_draft_.empty()) {
-        watches_panel_->set_input_value(watch_input_draft_);
+        watches_panel_->set_inline_edit(-1, watch_input_draft_, "?");
+        sync_watches_panel();
     }
 
     auto scopes_widget = scopes_panel_->release_widget();
@@ -1726,10 +1708,13 @@ void DebugApp::apply_snapshot_json_payload(const std::string& json) {
         if (model_.stop_reason == "exception" && previous_state == "running") {
             navigate_to_user_stop_frame();
         }
+        handle_exception_info_from_snapshot();
         sync_execution_location_ui();
         record_breakpoint_hit();
         maybe_finish_ephemeral_catch_skip();
         refresh_breakpoint_hit_counts_from_session();
+    } else {
+        last_logged_exception_key_.clear();
     }
     sync_breakpoints_list_panel();
     mark_all_panels_dirty();
@@ -2847,8 +2832,7 @@ bool DebugApp::handle_layout_resize_key(const tuinator::KeyPress& key) {
 }
 
 bool DebugApp::is_watch_input_focused() const {
-    return watches_panel_ != nullptr && watches_panel_->input_widget() != nullptr &&
-           watches_panel_->input_widget()->is_focused();
+    return watches_panel_ != nullptr && watches_panel_->has_active_inline_edit();
 }
 
 bool DebugApp::is_repl_input_focused() const {
@@ -2894,13 +2878,12 @@ void DebugApp::blur_watch_input() {
 void DebugApp::finish_watch_input() {
     watch_input_draft_.clear();
     watch_input_focused_ = false;
+    editing_watch_index_ = -1;
     if (watches_panel_ == nullptr) {
         return;
     }
-    if (watches_panel_->input_widget() != nullptr) {
-        watches_panel_->input_widget()->set_value("");
-        watches_panel_->input_widget()->set_focused(false);
-    }
+    watches_panel_->clear_inline_edit();
+    sync_watches_panel();
     if (watches_panel_->list_widget() != nullptr) {
         watches_panel_->list_widget()->set_focused(true);
     }
@@ -3100,8 +3083,7 @@ bool DebugApp::handle_global_key(const tuinator::KeyPress& key) {
             return true;
         }
         if (key.character == 'w' || key.key == tuinator::Key::Enter) {
-            watch_input_focused_ = true;
-            watches_panel_->focus_input();
+            begin_add_watch();
             return true;
         }
     }
@@ -3548,13 +3530,8 @@ void DebugApp::apply_focus() {
     if (breakpoints_panel_ != nullptr && breakpoints_panel_->list_widget() != nullptr) {
         widgets.push_back(breakpoints_panel_->list_widget());
     }
-    if (watches_panel_ != nullptr) {
-        if (watches_panel_->list_widget() != nullptr) {
-            widgets.push_back(watches_panel_->list_widget());
-        }
-        if (watches_panel_->input_widget() != nullptr) {
-            widgets.push_back(watches_panel_->input_widget());
-        }
+    if (watches_panel_ != nullptr && watches_panel_->list_widget() != nullptr) {
+        widgets.push_back(watches_panel_->list_widget());
     }
     if (repl_panel_ != nullptr) {
         if (repl_panel_->shell_widget() != nullptr) {
@@ -3590,10 +3567,9 @@ void DebugApp::apply_focus() {
         target = breakpoints_panel_ != nullptr ? breakpoints_panel_->list_widget() : nullptr;
         break;
     case Focus::Watches:
-        if (watch_input_focused_ && watches_panel_ != nullptr && watches_panel_->input_widget() != nullptr) {
-            target = watches_panel_->input_widget();
-        } else {
-            target = watches_panel_ != nullptr ? watches_panel_->list_widget() : nullptr;
+        target = watches_panel_ != nullptr ? watches_panel_->list_widget() : nullptr;
+        if (watch_input_focused_ && watches_panel_ != nullptr && watches_panel_->has_inline_edit()) {
+            watches_panel_->focus_inline_edit();
         }
         break;
     case Focus::Repl:
@@ -3629,14 +3605,10 @@ void DebugApp::sync_focus_from_ui() {
         breakpoints_panel_->list_widget()->is_focused()) {
         detected = Focus::Breakpoints;
         breakpoint_input_focused_ = breakpoints_panel_->has_inline_edit();
-    } else if (watches_panel_ != nullptr && watches_panel_->input_widget() != nullptr &&
-        watches_panel_->input_widget()->is_focused()) {
-        detected = Focus::Watches;
-        watch_input_focused_ = true;
     } else if (watches_panel_ != nullptr && watches_panel_->list_widget() != nullptr &&
                watches_panel_->list_widget()->is_focused()) {
         detected = Focus::Watches;
-        watch_input_focused_ = false;
+        watch_input_focused_ = watches_panel_->has_inline_edit();
     } else if (scopes_panel_ != nullptr && scopes_panel_->list_widget() != nullptr &&
                scopes_panel_->list_widget()->is_focused()) {
         detected = Focus::Scopes;
@@ -3704,13 +3676,8 @@ void DebugApp::mark_all_panels_dirty() {
     if (breakpoints_panel_ != nullptr && breakpoints_panel_->list_widget() != nullptr) {
         breakpoints_panel_->list_widget()->mark_dirty();
     }
-    if (watches_panel_ != nullptr) {
-        if (watches_panel_->list_widget() != nullptr) {
-            watches_panel_->list_widget()->mark_dirty();
-        }
-        if (watches_panel_->input_widget() != nullptr) {
-            watches_panel_->input_widget()->mark_dirty();
-        }
+    if (watches_panel_ != nullptr && watches_panel_->list_widget() != nullptr) {
+        watches_panel_->list_widget()->mark_dirty();
     }
     if (repl_panel_ != nullptr) {
         if (repl_panel_->history_widget() != nullptr) {
@@ -5626,6 +5593,13 @@ bool DebugApp::handle_scope_input_key(const tuinator::Event& event) {
     return scopes_panel_->handle_inline_edit_key(event);
 }
 
+bool DebugApp::handle_watch_input_key(const tuinator::Event& event) {
+    if (watches_panel_ == nullptr || !watches_panel_->has_active_inline_edit()) {
+        return false;
+    }
+    return watches_panel_->handle_inline_edit_key(event);
+}
+
 bool DebugApp::handle_repl_input_key(const tuinator::Event& event) {
     if (repl_panel_ == nullptr || model_.focus != Focus::Repl || !repl_panel_->input_active()) {
         return false;
@@ -5834,20 +5808,24 @@ std::optional<std::int64_t> DebugApp::scope_container_for_local(const std::strin
     return std::nullopt;
 }
 
-void DebugApp::begin_watch_expression(const std::string& seed) {
+void DebugApp::begin_watch_expression(const std::string& seed) { begin_add_watch(seed); }
+
+void DebugApp::begin_add_watch(const std::string& seed) {
     editing_watch_index_ = -1;
     watch_input_draft_ = seed;
     watch_input_focused_ = true;
     model_.focus = Focus::Watches;
 
     if (watches_panel_ != nullptr) {
-        watches_panel_->set_input_value(seed);
-        watches_panel_->focus_input();
+        watches_panel_->set_inline_edit(-1, seed, "?");
+        sync_watches_panel();
+        watches_panel_->focus_inline_edit();
     }
 
     model_.status_message = seed.empty() ? "Add watch expression" : "Watch expression";
     apply_focus();
     sync_status_bar();
+    request_repaint();
 }
 
 void DebugApp::show_breakpoint_context_menu(const std::string& path, int line, tuinator::Point anchor,
@@ -6191,8 +6169,8 @@ void DebugApp::capture_watch_input_state() {
     if (watches_panel_ == nullptr) {
         return;
     }
-    watch_input_draft_ = watches_panel_->input_value();
-    if (watches_panel_->input_widget() != nullptr && watches_panel_->input_widget()->is_focused()) {
+    if (watches_panel_->has_inline_edit()) {
+        watch_input_draft_ = watches_panel_->inline_edit_value();
         watch_input_focused_ = true;
         model_.focus = Focus::Watches;
     }
@@ -6202,14 +6180,25 @@ void DebugApp::restore_watch_input_state() {
     if (watches_panel_ == nullptr) {
         return;
     }
-    if (!watch_input_draft_.empty()) {
-        watches_panel_->set_input_value(watch_input_draft_);
+    if (watch_input_focused_) {
+        if (editing_watch_index_ >= 0 && editing_watch_index_ < static_cast<int>(model_.watches.size())) {
+            const WatchEntry& watch = model_.watches[static_cast<std::size_t>(editing_watch_index_)];
+            std::string suffix;
+            if (!watch.error.empty()) {
+                suffix = "<error: " + watch.error + ">";
+            } else if (watch.value.empty()) {
+                suffix = "?";
+            } else {
+                suffix = watch.value;
+            }
+            watches_panel_->set_inline_edit(editing_watch_index_, watch_input_draft_, suffix);
+        } else {
+            watches_panel_->set_inline_edit(-1, watch_input_draft_, "?");
+        }
+        sync_watches_panel();
+        watches_panel_->focus_inline_edit();
+        model_.focus = Focus::Watches;
     }
-    if (!watch_input_focused_) {
-        apply_focus();
-        return;
-    }
-    model_.focus = Focus::Watches;
     apply_focus();
 }
 
@@ -6524,15 +6513,27 @@ void DebugApp::begin_edit_watch_at(int index) {
         return;
     }
 
+    const WatchEntry& watch = model_.watches[static_cast<std::size_t>(index)];
+    std::string suffix;
+    if (!watch.error.empty()) {
+        suffix = "<error: " + watch.error + ">";
+    } else if (watch.value.empty()) {
+        suffix = "?";
+    } else {
+        suffix = watch.value;
+    }
+
     editing_watch_index_ = index;
-    watch_input_draft_ = model_.watches[static_cast<std::size_t>(index)].expression;
+    watch_input_draft_ = watch.expression;
     watch_input_focused_ = true;
     model_.focus = Focus::Watches;
-    watches_panel_->set_input_value(watch_input_draft_);
-    watches_panel_->focus_input();
+    watches_panel_->set_inline_edit(index, watch_input_draft_, suffix);
+    sync_watches_panel();
+    watches_panel_->focus_inline_edit();
     model_.status_message = "Edit watch expression";
     apply_focus();
     sync_status_bar();
+    request_repaint();
 }
 
 void DebugApp::submit_watch_expression(const std::string& expression) {
@@ -6544,12 +6545,12 @@ void DebugApp::submit_watch_expression(const std::string& expression) {
         trimmed.pop_back();
     }
 
+    if (trimmed.empty()) {
+        finish_watch_input();
+        return;
+    }
+
     if (editing_watch_index_ >= 0 && editing_watch_index_ < static_cast<int>(model_.watches.size())) {
-        if (trimmed.empty()) {
-            editing_watch_index_ = -1;
-            finish_watch_input();
-            return;
-        }
 
         WatchEntry& watch = model_.watches[static_cast<std::size_t>(editing_watch_index_)];
         watch.expression = normalize_watch_expression(trimmed);
@@ -6599,12 +6600,7 @@ void DebugApp::remove_watch_at(std::size_t index) {
         return;
     }
     if (editing_watch_index_ == static_cast<int>(index)) {
-        editing_watch_index_ = -1;
-        watch_input_draft_.clear();
-        watch_input_focused_ = false;
-        if (watches_panel_ != nullptr) {
-            watches_panel_->set_input_value("");
-        }
+        finish_watch_input();
     } else if (editing_watch_index_ > static_cast<int>(index)) {
         --editing_watch_index_;
     }
@@ -6654,6 +6650,105 @@ void DebugApp::resolve_watches_from_locals() {
     if (changed) {
         sync_watches_panel();
     }
+}
+
+void DebugApp::append_console_text(const std::string& text, const std::string& category) {
+    if (text.empty()) {
+        return;
+    }
+
+    ConsoleLine entry{};
+    entry.category = category;
+    entry.text = text;
+    model_.console_lines.push_back(entry);
+
+    if (console_panel_ != nullptr) {
+        console_panel_->feed_output(text);
+        console_synced_line_count_ = model_.console_lines.size();
+    }
+}
+
+void DebugApp::remove_dollar_exception_watches() {
+    bool changed = false;
+    for (auto it = model_.watches.begin(); it != model_.watches.end();) {
+        if (normalize_watch_expression(it->expression) != "$exception") {
+            ++it;
+            continue;
+        }
+
+        const int index = static_cast<int>(std::distance(model_.watches.begin(), it));
+        if (editing_watch_index_ == index) {
+            finish_watch_input();
+        } else if (editing_watch_index_ > index) {
+            --editing_watch_index_;
+        }
+
+        it = model_.watches.erase(it);
+        changed = true;
+    }
+
+    if (changed) {
+        sync_watches_panel();
+    }
+}
+
+void DebugApp::handle_exception_info_from_snapshot() {
+    if (model_.stop_reason != "exception") {
+        return;
+    }
+
+    remove_dollar_exception_watches();
+
+    if (!model_.exception_info.has_value()) {
+        return;
+    }
+
+    const ExceptionInfo& info = *model_.exception_info;
+    const std::string key = info.exception_id + "|" + info.description + "|" + info.message + "|" +
+                            info.type_name + "|" + std::to_string(model_.stopped_thread_id);
+    if (key == last_logged_exception_key_) {
+        return;
+    }
+    last_logged_exception_key_ = key;
+
+    std::string output = "[exception]";
+    if (!info.description.empty()) {
+        output += " " + info.description;
+    } else if (!info.exception_id.empty()) {
+        output += " " + info.exception_id;
+    }
+    if (!info.break_mode.empty()) {
+        output += " (" + info.break_mode + ")";
+    }
+    output += "\n";
+    if (!info.type_name.empty()) {
+        output += "  type: " + info.type_name + "\n";
+    }
+    if (!info.message.empty()) {
+        output += "  message: " + info.message + "\n";
+    }
+    if (!info.stack_trace.empty()) {
+        output += "  stack:\n";
+        std::string trace = info.stack_trace;
+        std::size_t start = 0;
+        while (start < trace.size()) {
+            const std::size_t end = trace.find('\n', start);
+            const std::string_view line(trace.data() + start,
+                                        end == std::string::npos ? trace.size() - start : end - start);
+            output += "    ";
+            output.append(line.begin(), line.end());
+            output += "\n";
+            if (end == std::string::npos) {
+                break;
+            }
+            start = end + 1;
+        }
+    }
+
+    append_console_text(output, "exception");
+
+    model_.focus = Focus::Console;
+    apply_focus();
 }
 
 }  // namespace tui_debug_ui

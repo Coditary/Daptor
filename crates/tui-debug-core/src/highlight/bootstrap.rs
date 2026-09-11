@@ -53,10 +53,17 @@ fn register_builtin_c() -> Result<()> {
 }
 
 fn register_builtin_cpp() -> Result<()> {
+    // tree-sitter-cpp's stock query omits most shared C syntax; the C highlights
+    // query matches the same node names on the C++ grammar.
+    let highlights_query = format!(
+        "{}{}",
+        tree_sitter_c::HIGHLIGHT_QUERY,
+        include_str!("cpp_highlights_extra.scm"),
+    );
     register_language_static(
         "cpp",
         tree_sitter_cpp::LANGUAGE.into(),
-        tree_sitter_cpp::HIGHLIGHT_QUERY,
+        &highlights_query,
         "",
         "",
     )

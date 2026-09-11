@@ -116,6 +116,14 @@ inline bool highlight_language_is_loaded(const std::string& language) {
     return tui_debug_language_is_loaded(language.c_str()) != 0;
 }
 
+inline std::string language_from_path(const std::string& path) {
+    char buffer[64] = {};
+    if (tui_debug_language_from_path(path.c_str(), buffer, sizeof(buffer)) != 0) {
+        return "python";
+    }
+    return std::string{buffer};
+}
+
 inline std::optional<std::string> fetch_highlight_json(const std::string& language, const std::string& source,
                                                        int first_line, int line_count,
                                                        std::size_t buffer_capacity = 65536) {

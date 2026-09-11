@@ -88,6 +88,7 @@ class DebugApp {
     void blur_scope_input();
     bool handle_breakpoint_input_key(const tuinator::Event& event);
     bool handle_scope_input_key(const tuinator::Event& event);
+    bool handle_watch_input_key(const tuinator::Event& event);
     bool handle_repl_input_key(const tuinator::Event& event);
     void blur_repl_input();
     void handle_pointer_pick(const tuinator::MouseEvent& mouse);
@@ -154,6 +155,7 @@ class DebugApp {
     void sync_execution_location_ui();
     [[nodiscard]] bool scope_prompt_active() const;
     void begin_watch_expression(const std::string& seed);
+    void begin_add_watch(const std::string& seed = "");
     void show_breakpoint_context_menu(const std::string& path, int line, tuinator::Point anchor,
                                       const std::optional<SourceContextIdentifier>& source_identifier);
     void begin_source_context_menu(const std::string& path, int line, int code_column, tuinator::Point anchor,
@@ -251,6 +253,9 @@ class DebugApp {
     void rebuild_repl_completion_matches();
     void clear_repl_completion_state();
     void resolve_watches_from_locals();
+    void append_console_text(const std::string& text, const std::string& category = "exception");
+    void remove_dollar_exception_watches();
+    void handle_exception_info_from_snapshot();
     void capture_watch_input_state();
     void restore_watch_input_state();
     void finish_watch_input();
@@ -354,6 +359,7 @@ class DebugApp {
     int cached_highlight_scroll_y_ = -1;
     int highlight_request_scroll_y_ = -1;
     std::uint64_t snapshot_generation_ = 0;
+    std::string last_logged_exception_key_;
     std::string scope_variables_signature_;
     std::string scope_variables_fetch_signature_;
     bool scope_variables_fetch_pending_ = false;

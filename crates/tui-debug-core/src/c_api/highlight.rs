@@ -4,7 +4,7 @@ use serde::Serialize;
 
 use crate::highlight::{
     HighlightKind, HighlightedLine, function_definition_line, function_name_at_line, highlight_viewport,
-    identifier_at_position, init, language_is_loaded, try_load_language,
+    identifier_at_position, init, language_from_path, language_is_loaded, try_load_language,
 };
 
 use super::{clear_last_error, c_str_to_rust, set_last_error, write_json_to_buffer};
@@ -46,6 +46,34 @@ fn lines_to_json(lines: &[HighlightedLine]) -> Result<String, String> {
 #[no_mangle]
 pub extern "C" fn tui_debug_init() {
     init();
+}
+
+/// Write the tree-sitter language id for `path` into `language_out`.
+///
+/// Returns `0` on success, `-1` on error.
+#[no_mangle]
+pub extern "C" fn tui_debug_language_from_path(
+    path: *const c_char,
+    language_out: *mut c_char,
+    cap: usize,
+) -> i32 {
+    clear_last_error();
+
+    let path = match c_str_to_rust(path, "path") {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err);
+            return -1;
+        }
+    };
+
+    match write_json_to_buffer(language_from_path(path), language_out, cap) {
+        Ok(()) => 0,
+        Err(err) => {
+            set_last_error(err);
+            -1
+        }
+    }
 }
 
 /// Returns `1` when a grammar for `language` is loaded, otherwise `0`.

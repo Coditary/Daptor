@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -100,6 +101,16 @@ struct WatchEntry {
     std::string error;
 };
 
+struct ExceptionInfo {
+    std::string exception_id;
+    std::string break_mode;
+    std::string description;
+    std::string type_name;
+    std::string message;
+    std::string evaluate_name;
+    std::string stack_trace;
+};
+
 /// View model mirroring debugger state for the Tuinator UI layer.
 class DebugUiModel {
   public:
@@ -118,6 +129,7 @@ class DebugUiModel {
     std::string session_state;
     std::string stop_reason;
     std::int64_t stopped_thread_id = 0;
+    std::optional<ExceptionInfo> exception_info;
     std::vector<ThreadInfo> threads;
     std::vector<StackFrameInfo> stack_frames;
     std::vector<ThreadStackInfo> thread_stacks;

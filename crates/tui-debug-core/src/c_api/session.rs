@@ -367,6 +367,7 @@ mod tests {
             variables: vec![],
             capabilities: Default::default(),
             breakpoint_hits: vec![],
+            exception_info: None,
         };
 
         let json = snapshot_to_json(&snapshot).unwrap();
