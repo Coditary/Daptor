@@ -32,6 +32,7 @@ add_executable(tui-debug-ui
     src/ui/source_panel.cpp
     src/ui/step_in_selection.cpp
     src/ui/console_panel.cpp
+    src/ui/repl_panel.cpp
     src/ui/tty_setup.cpp
     src/ui/session_backend.cpp
     src/ui/session_io_thread.cpp

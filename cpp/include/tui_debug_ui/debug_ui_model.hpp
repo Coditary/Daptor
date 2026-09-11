@@ -19,13 +19,15 @@ enum class Focus {
     Breakpoints,
     Stacks,
     Watches,
+    Repl,
     Console,
 };
 
 struct LayoutConfig {
     std::uint16_t sidebar_pct = 25;
     std::uint16_t bottom_pct = 35;
-    std::uint16_t watches_pct = 30;
+    std::uint16_t watches_pct = 25;
+    std::uint16_t repl_pct = 30;
     std::uint16_t scopes_pct = 55;
 
     void widen_sidebar();
@@ -34,6 +36,8 @@ struct LayoutConfig {
     void shrink_bottom();
     void widen_watches();
     void narrow_watches();
+    void widen_repl();
+    void narrow_repl();
     void grow_scopes();
     void shrink_scopes();
 };
@@ -122,6 +126,7 @@ class DebugUiModel {
     /// Variables keyed by DAP `variablesReference` (lazy-loaded per scope).
     std::unordered_map<std::int64_t, std::vector<VariableInfo>> scope_variables;
     std::vector<ConsoleLine> console_lines;
+    std::vector<std::string> repl_history;
     std::vector<WatchEntry> watches;
     std::uint64_t next_watch_id = 1;
 

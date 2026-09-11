@@ -37,6 +37,7 @@ class ControlsBar;
 class ResizableSplitPane;
 class ScopesPanel;
 class ConsolePanel;
+class ReplPanel;
 class SourcePanel;
 class StacksPanel;
 class BreakpointsPanel;
@@ -79,12 +80,16 @@ class DebugApp {
     [[nodiscard]] bool is_breakpoint_input_focused() const;
     [[nodiscard]] bool is_scope_input_focused() const;
     [[nodiscard]] bool console_input_active() const;
+    [[nodiscard]] bool is_repl_input_focused() const;
     [[nodiscard]] bool should_block_app_quit_key(const tuinator::KeyPress& key) const;
     void blur_watch_input();
     void blur_breakpoint_input(bool cancelled = true);
     void blur_scope_input();
     bool handle_breakpoint_input_key(const tuinator::Event& event);
     bool handle_scope_input_key(const tuinator::Event& event);
+    bool handle_repl_input_key(const tuinator::Event& event);
+    void blur_repl_input();
+    void handle_pointer_pick(const tuinator::MouseEvent& mouse);
 
   private:
     void ensure_ui_built();
@@ -234,6 +239,9 @@ class DebugApp {
     void begin_edit_watch_at(int index);
     void remove_watch_at(std::size_t index);
     void sync_watches_panel();
+    void sync_repl_panel();
+    void submit_repl_expression(const std::string& expression);
+    void deactivate_repl_input(bool clear_draft);
     void resolve_watches_from_locals();
     void capture_watch_input_state();
     void restore_watch_input_state();
@@ -284,12 +292,16 @@ class DebugApp {
     ConsolePanel* console_panel_ = nullptr;
     tuinator::ScrollView* console_scroll_view_ = nullptr;
     std::size_t console_synced_line_count_ = 0;
+    std::unique_ptr<ReplPanel> repl_panel_;
+    ResizableSplitPane* repl_console_split_ = nullptr;
     ResizableSplitPane* sidebar_split_ = nullptr;
+    ResizableSplitPane* sidebar_watches_split_ = nullptr;
     ResizableSplitPane* main_row_split_ = nullptr;
-    ResizableSplitPane* bottom_tray_split_ = nullptr;
     ResizableSplitPane* content_split_ = nullptr;
     std::string watch_input_draft_;
     bool watch_input_focused_ = false;
+    std::string repl_input_draft_;
+    bool repl_input_focused_ = false;
     int editing_watch_index_ = -1;
     std::string breakpoint_input_draft_;
     bool breakpoint_input_focused_ = false;

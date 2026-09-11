@@ -26,6 +26,7 @@ DapUiTheme::DapUiTheme() {
     title_breakpoints = bold(title_breakpoints);
     title_source = bold(title_source);
     title_console = bold(title_console);
+    title_repl = bold(title_repl);
     frame_current = bold(frame_current);
 }
 

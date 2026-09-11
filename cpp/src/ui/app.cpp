@@ -14,6 +14,7 @@
 #include "tui_debug_ui/context_menu.hpp"
 #include "tui_debug_ui/stacks_panel.hpp"
 #include "tui_debug_ui/watches_panel.hpp"
+#include "tui_debug_ui/repl_panel.hpp"
 #include "tui_debug_ui/titled_scroll_pane.hpp"
 #include "tui_debug_ui/tty_setup.hpp"
 
@@ -561,6 +562,10 @@ class DebugChromeRoot : public tuinator::Widget {
                     debug_app_->blur_watch_input();
                     return true;
                 }
+                if (debug_app_->is_repl_input_focused()) {
+                    debug_app_->blur_repl_input();
+                    return true;
+                }
                 if (debug_app_->is_scope_input_focused()) {
                     debug_app_->blur_scope_input();
                     return true;
@@ -571,6 +576,9 @@ class DebugChromeRoot : public tuinator::Widget {
                 }
             }
             if (debug_app_ != nullptr && debug_app_->handle_global_key(*key)) {
+                return true;
+            }
+            if (debug_app_ != nullptr && debug_app_->handle_repl_input_key(event)) {
                 return true;
             }
             if (debug_app_ != nullptr && debug_app_->handle_breakpoint_input_key(event)) {
@@ -598,6 +606,13 @@ class DebugChromeRoot : public tuinator::Widget {
                 return false;
             }
 
+            const bool pointer_pick = mouse->action == tuinator::MouseAction::Click ||
+                                      mouse->action == tuinator::MouseAction::Release ||
+                                      mouse->action == tuinator::MouseAction::Press;
+            if (pointer_pick && debug_app_ != nullptr) {
+                debug_app_->handle_pointer_pick(*mouse);
+            }
+
             // Status row before content so the bottom chrome row is not shadowed by content hit tests.
             bool handled = false;
             for (tuinator::Widget* child : {controls_.get(), status_.get(), content_.get()}) {
@@ -605,9 +620,7 @@ class DebugChromeRoot : public tuinator::Widget {
                     handled = true;
                 }
             }
-            if (handled && (mouse->action == tuinator::MouseAction::Click ||
-                            mouse->action == tuinator::MouseAction::Release) &&
-                debug_app_ != nullptr) {
+            if (pointer_pick && debug_app_ != nullptr) {
                 debug_app_->sync_focus_from_ui();
             }
             return handled;
@@ -703,9 +716,14 @@ int sidebar_first_size(int terminal_width, std::uint16_t sidebar_pct) {
     return std::max(24, terminal_width * pct / 100);
 }
 
-int watches_first_size(int terminal_width, std::uint16_t watches_pct) {
-    const int pct = static_cast<int>(watches_pct);
+int repl_first_size(int terminal_width, std::uint16_t repl_pct) {
+    const int pct = static_cast<int>(repl_pct);
     return std::max(16, terminal_width * pct / 100);
+}
+
+int watches_sidebar_size(int sidebar_height, std::uint16_t watches_pct) {
+    const int pct = static_cast<int>(watches_pct);
+    return std::max(5, sidebar_height * pct / 100);
 }
 
 int bottom_tray_height(int terminal_height, std::uint16_t bottom_pct) {
@@ -1230,8 +1248,31 @@ void DebugApp::build_ui() {
         dap_theme_.panel_background);
     bind_split_pane(stacks_breakpoints.get());
 
+    auto watches_widget = watches_panel_->release_widget();
+    watches_widget->set_flex(0);
+
+    auto watches_stacks = std::make_unique<ResizableSplitPane>(
+        std::move(watches_widget), std::move(stacks_breakpoints),
+        tuinator::SplitPaneOptions{
+            .orientation = tuinator::SplitOrientation::Vertical,
+            .first_size = watches_sidebar_size(main_h, model_.layout.watches_pct),
+            .divider_style = dap_theme_.divider,
+        },
+        dap_theme_.panel_background);
+    sidebar_watches_split_ = watches_stacks.get();
+    bind_split_pane(sidebar_watches_split_);
+    sidebar_watches_split_->set_on_first_size_changed([this](int /*first*/) {
+        persist_split_size_as_pct(sidebar_watches_split_, model_.layout.watches_pct, false);
+        if (!divider_drag_active_) {
+            model_.status_message = "Watches " + std::to_string(model_.layout.watches_pct) + "%";
+            if (status_bar_ != nullptr) {
+                status_bar_->set_text(format_status_bar_text());
+            }
+        }
+    });
+
     auto sidebar = std::make_unique<ResizableSplitPane>(
-        std::move(scopes_widget), std::move(stacks_breakpoints),
+        std::move(scopes_widget), std::move(watches_stacks),
         tuinator::SplitPaneOptions{
             .orientation = tuinator::SplitOrientation::Vertical,
             .first_size = scopes_first,
@@ -1323,8 +1364,30 @@ void DebugApp::build_ui() {
     });
     main_row->set_flex(1);
 
-    auto watches_widget = watches_panel_->release_widget();
-    watches_widget->set_flex(0);
+    repl_panel_ = std::make_unique<ReplPanel>(dap_theme_, scroll_options);
+    repl_panel_->set_on_submit([this](const std::string& expression) { submit_repl_expression(expression); });
+    repl_panel_->set_on_change([this](const std::string& expression) {
+        repl_input_draft_ = expression;
+        repl_input_focused_ = true;
+        model_.focus = Focus::Repl;
+    });
+    repl_panel_->set_on_activate([this]() {
+        model_.focus = Focus::Repl;
+        repl_input_focused_ = true;
+        if (repl_panel_ != nullptr) {
+            if (!repl_input_draft_.empty()) {
+                repl_panel_->set_input_value(repl_input_draft_);
+            }
+            repl_panel_->focus_input();
+        }
+        apply_focus();
+    });
+    if (!repl_input_draft_.empty()) {
+        repl_panel_->set_input_value(repl_input_draft_);
+    }
+    sync_repl_panel();
+    auto repl_shell = repl_panel_->release_widget();
+    repl_shell->set_flex(1);
 
     auto console_panel = std::make_unique<ConsolePanel>(dap_theme_);
     console_panel_ = console_panel.get();
@@ -1353,19 +1416,19 @@ void DebugApp::build_ui() {
     console_shell->set_flex(1);
 
     auto bottom_tray = std::make_unique<ResizableSplitPane>(
-        std::move(watches_widget), std::move(console_shell),
+        std::move(repl_shell), std::move(console_shell),
         tuinator::SplitPaneOptions{
             .orientation = tuinator::SplitOrientation::Horizontal,
-            .first_size = watches_first_size(term_size.width, model_.layout.watches_pct),
+            .first_size = repl_first_size(term_size.width, model_.layout.repl_pct),
             .divider_style = dap_theme_.divider,
         },
         dap_theme_.panel_background);
-    bottom_tray_split_ = bottom_tray.get();
-    bind_split_pane(bottom_tray_split_);
-    bottom_tray_split_->set_on_first_size_changed([this](int /*first*/) {
-        persist_split_size_as_pct(bottom_tray_split_, model_.layout.watches_pct, true);
+    repl_console_split_ = bottom_tray.get();
+    bind_split_pane(repl_console_split_);
+    repl_console_split_->set_on_first_size_changed([this](int /*first*/) {
+        persist_split_size_as_pct(repl_console_split_, model_.layout.repl_pct, true);
         if (!divider_drag_active_) {
-            model_.status_message = "Watches " + std::to_string(model_.layout.watches_pct) + "%";
+            model_.status_message = "REPL " + std::to_string(model_.layout.repl_pct) + "%";
             if (status_bar_ != nullptr) {
                 status_bar_->set_text(format_status_bar_text());
             }
@@ -1825,6 +1888,19 @@ void DebugApp::handle_session_event(const SessionIoEvent& event) {
         }
         break;
     case SessionIoEventKind::EvaluateFinished:
+        if (!event.detail.empty()) {
+            std::string entry = "> " + event.detail + "\n= ";
+            if (event.success) {
+                entry += event.payload;
+                model_.status_message = "REPL: " + event.detail;
+            } else {
+                entry += "error: " + event.payload;
+                model_.status_message =
+                    event.payload.empty() ? "REPL evaluation failed" : "REPL error: " + event.payload;
+            }
+            model_.repl_history.push_back(std::move(entry));
+            sync_repl_panel();
+        }
         if (is_session_stopped()) {
             resolve_watches_from_locals();
         } else {
@@ -2652,14 +2728,24 @@ bool DebugApp::handle_layout_resize_key(const tuinator::KeyPress& key) {
     }
 
     if (key.character == '[') {
-        model_.layout.narrow_watches();
-        model_.status_message = "Watches " + std::to_string(model_.layout.watches_pct) + "%";
+        if (model_.focus == Focus::Watches) {
+            model_.layout.narrow_watches();
+            model_.status_message = "Watches " + std::to_string(model_.layout.watches_pct) + "%";
+        } else {
+            model_.layout.narrow_repl();
+            model_.status_message = "REPL " + std::to_string(model_.layout.repl_pct) + "%";
+        }
         build_ui();
         return true;
     }
     if (key.character == ']') {
-        model_.layout.widen_watches();
-        model_.status_message = "Watches " + std::to_string(model_.layout.watches_pct) + "%";
+        if (model_.focus == Focus::Watches) {
+            model_.layout.widen_watches();
+            model_.status_message = "Watches " + std::to_string(model_.layout.watches_pct) + "%";
+        } else {
+            model_.layout.widen_repl();
+            model_.status_message = "REPL " + std::to_string(model_.layout.repl_pct) + "%";
+        }
         build_ui();
         return true;
     }
@@ -2670,6 +2756,11 @@ bool DebugApp::handle_layout_resize_key(const tuinator::KeyPress& key) {
 bool DebugApp::is_watch_input_focused() const {
     return watches_panel_ != nullptr && watches_panel_->input_widget() != nullptr &&
            watches_panel_->input_widget()->is_focused();
+}
+
+bool DebugApp::is_repl_input_focused() const {
+    return repl_panel_ != nullptr && repl_panel_->input_widget() != nullptr &&
+           repl_panel_->input_widget()->is_focused();
 }
 
 bool DebugApp::is_breakpoint_input_focused() const {
@@ -2687,10 +2778,14 @@ bool DebugApp::should_block_app_quit_key(const tuinator::KeyPress& key) const {
     if (context_menu_open()) {
         return true;
     }
-    if (is_watch_input_focused() || is_breakpoint_input_focused() || is_scope_input_focused()) {
+    if (is_watch_input_focused() || is_repl_input_focused() || is_breakpoint_input_focused() ||
+        is_scope_input_focused()) {
         return true;
     }
     if (model_.focus == Focus::Console) {
+        return key.character == 'q' || key.character == 'Q' || key.key == tuinator::Key::Escape;
+    }
+    if (model_.focus == Focus::Repl) {
         return key.character == 'q' || key.character == 'Q' || key.key == tuinator::Key::Escape;
     }
     if (model_.focus == Focus::Watches) {
@@ -2747,7 +2842,7 @@ bool DebugApp::handle_global_key(const tuinator::KeyPress& key) {
         return true;
     }
 
-    if (model_.focus == Focus::Console) {
+    if (model_.focus == Focus::Console || model_.focus == Focus::Repl) {
         return false;
     }
 
@@ -2758,7 +2853,8 @@ bool DebugApp::handle_global_key(const tuinator::KeyPress& key) {
         return true;
     }
 
-    if (is_watch_input_focused() || is_breakpoint_input_focused() || is_scope_input_focused()) {
+    if (is_watch_input_focused() || is_repl_input_focused() || is_breakpoint_input_focused() ||
+        is_scope_input_focused()) {
         if (key.alt && handle_layout_resize_key(key)) {
             return true;
         }
@@ -2787,6 +2883,18 @@ bool DebugApp::handle_global_key(const tuinator::KeyPress& key) {
 
     if (key.key == tuinator::Key::Tab) {
         cycle_focus_next();
+        return true;
+    }
+
+    if (key.character == 'r' || key.character == 'R') {
+        model_.focus = Focus::Repl;
+        repl_input_focused_ = true;
+        apply_focus();
+        if (repl_panel_ != nullptr) {
+            repl_panel_->focus_input();
+        }
+        model_.status_message = "REPL — type expression, Enter to evaluate";
+        sync_status_bar();
         return true;
     }
 
@@ -3299,6 +3407,10 @@ void DebugApp::cycle_focus_next() {
         model_.focus = Focus::Watches;
         break;
     case Focus::Watches:
+        model_.focus = Focus::Repl;
+        repl_input_focused_ = true;
+        break;
+    case Focus::Repl:
         model_.focus = Focus::Console;
         break;
     default:
@@ -3313,6 +3425,12 @@ void DebugApp::cycle_focus_next() {
 void DebugApp::apply_focus() {
     if (model_.focus != Focus::Watches) {
         watch_input_focused_ = false;
+    }
+    if (model_.focus != Focus::Repl) {
+        repl_input_focused_ = false;
+        if (repl_panel_ != nullptr) {
+            repl_panel_->set_input_active(false);
+        }
     }
     if (model_.focus != Focus::Breakpoints && !breakpoint_prompt_active()) {
         breakpoint_input_focused_ = false;
@@ -3345,6 +3463,17 @@ void DebugApp::apply_focus() {
             widgets.push_back(watches_panel_->input_widget());
         }
     }
+    if (repl_panel_ != nullptr) {
+        if (repl_panel_->shell_widget() != nullptr) {
+            widgets.push_back(repl_panel_->shell_widget());
+        }
+        if (repl_panel_->history_widget() != nullptr) {
+            widgets.push_back(repl_panel_->history_widget());
+        }
+        if (repl_panel_->input_widget() != nullptr) {
+            widgets.push_back(repl_panel_->input_widget());
+        }
+    }
     if (console_panel_ != nullptr) {
         widgets.push_back(console_panel_);
     }
@@ -3372,6 +3501,18 @@ void DebugApp::apply_focus() {
             target = watches_panel_->input_widget();
         } else {
             target = watches_panel_ != nullptr ? watches_panel_->list_widget() : nullptr;
+        }
+        break;
+    case Focus::Repl:
+        if (repl_input_focused_ && repl_panel_ != nullptr) {
+            repl_panel_->set_input_active(true);
+            target = repl_panel_->input_widget();
+            if (repl_panel_->shell_widget() != nullptr) {
+                repl_panel_->shell_widget()->set_focused(true);
+            }
+        } else if (repl_panel_ != nullptr) {
+            repl_panel_->set_input_active(false);
+            target = repl_panel_->shell_widget();
         }
         break;
     case Focus::Console:
@@ -3410,18 +3551,44 @@ void DebugApp::sync_focus_from_ui() {
     } else if (stacks_panel_ != nullptr && stacks_panel_->list_widget() != nullptr &&
                stacks_panel_->list_widget()->is_focused()) {
         detected = Focus::Stacks;
+    } else if (repl_panel_ != nullptr && repl_panel_->input_widget() != nullptr &&
+               repl_panel_->input_widget()->is_focused()) {
+        detected = Focus::Repl;
+        repl_input_focused_ = repl_panel_->input_active();
+    } else if (repl_panel_ != nullptr && repl_panel_->shell_widget() != nullptr &&
+               repl_panel_->shell_widget()->is_focused()) {
+        detected = Focus::Repl;
+        repl_input_focused_ = repl_panel_->input_active();
+    } else if (repl_panel_ != nullptr && repl_panel_->history_widget() != nullptr &&
+               repl_panel_->history_widget()->is_focused()) {
+        detected = Focus::Repl;
+        repl_input_focused_ = false;
     } else if (console_panel_ != nullptr && console_panel_->is_focused()) {
         detected = Focus::Console;
     } else if (source_panel_ != nullptr && source_panel_->is_focused()) {
         detected = Focus::Source;
     }
 
-    if (detected == model_.focus) {
+    const bool focus_changed = detected != model_.focus;
+    if (focus_changed) {
+        model_.focus = detected;
+        cached_status_bar_text_.clear();
+    }
+
+    bool repl_deactivated = false;
+    if (repl_panel_ != nullptr && repl_panel_->input_active()) {
+        const bool input_focused = repl_panel_->input_widget() != nullptr &&
+                                   repl_panel_->input_widget()->is_focused();
+        if (detected != Focus::Repl || !input_focused) {
+            deactivate_repl_input(false);
+            repl_deactivated = true;
+        }
+    }
+
+    if (!focus_changed && !repl_deactivated) {
         return;
     }
 
-    model_.focus = detected;
-    cached_status_bar_text_.clear();
     apply_focus();
     sync_ui_from_model();
 }
@@ -3450,6 +3617,14 @@ void DebugApp::mark_all_panels_dirty() {
         }
         if (watches_panel_->input_widget() != nullptr) {
             watches_panel_->input_widget()->mark_dirty();
+        }
+    }
+    if (repl_panel_ != nullptr) {
+        if (repl_panel_->history_widget() != nullptr) {
+            repl_panel_->history_widget()->mark_dirty();
+        }
+        if (repl_panel_->input_widget() != nullptr) {
+            repl_panel_->input_widget()->mark_dirty();
         }
     }
     if (console_panel_ != nullptr) {
@@ -5358,6 +5533,67 @@ bool DebugApp::handle_scope_input_key(const tuinator::Event& event) {
     return scopes_panel_->handle_inline_edit_key(event);
 }
 
+bool DebugApp::handle_repl_input_key(const tuinator::Event& event) {
+    if (repl_panel_ == nullptr || model_.focus != Focus::Repl || !repl_panel_->input_active()) {
+        return false;
+    }
+
+    tuinator::TextInput* input = repl_panel_->input_widget();
+    if (input == nullptr) {
+        return false;
+    }
+
+    input->set_focused(true);
+    if (repl_panel_->history_widget() != nullptr) {
+        repl_panel_->history_widget()->set_focused(false);
+    }
+    input->handle_event(event);
+    return true;
+}
+
+void DebugApp::handle_pointer_pick(const tuinator::MouseEvent& mouse) {
+    if (repl_panel_ == nullptr || !repl_panel_->input_active()) {
+        return;
+    }
+
+    if (repl_panel_->contains_point(mouse.position)) {
+        return;
+    }
+
+    deactivate_repl_input(false);
+}
+
+void DebugApp::deactivate_repl_input(bool clear_draft) {
+    if (repl_panel_ == nullptr) {
+        return;
+    }
+
+    if (clear_draft) {
+        repl_input_draft_.clear();
+        repl_panel_->set_input_value("");
+    } else {
+        repl_input_draft_ = repl_panel_->input_value();
+    }
+
+    repl_input_focused_ = false;
+    repl_panel_->set_input_active(false);
+    if (repl_panel_->input_widget() != nullptr) {
+        repl_panel_->input_widget()->set_focused(false);
+    }
+    if (repl_panel_->shell_widget() != nullptr) {
+        repl_panel_->shell_widget()->mark_dirty();
+    }
+    if (repl_panel_->input_widget() != nullptr) {
+        repl_panel_->input_widget()->mark_dirty();
+    }
+}
+
+void DebugApp::blur_repl_input() {
+    deactivate_repl_input(true);
+    apply_focus();
+    request_repaint();
+}
+
 bool DebugApp::context_menu_open() const {
     return context_menu_ != nullptr && context_menu_->is_open();
 }
@@ -5865,6 +6101,70 @@ void DebugApp::restore_watch_input_state() {
     }
     model_.focus = Focus::Watches;
     apply_focus();
+}
+
+void DebugApp::sync_repl_panel() {
+    if (repl_panel_ == nullptr) {
+        return;
+    }
+
+    std::vector<std::string> lines;
+    for (const std::string& entry : model_.repl_history) {
+        std::string::size_type start = 0;
+        while (start <= entry.size()) {
+            const std::string::size_type end = entry.find('\n', start);
+            if (end == std::string::npos) {
+                if (start < entry.size()) {
+                    lines.push_back(entry.substr(start));
+                }
+                break;
+            }
+            lines.push_back(entry.substr(start, end - start));
+            start = end + 1;
+        }
+    }
+    repl_panel_->set_history_lines(std::move(lines));
+}
+
+void DebugApp::submit_repl_expression(const std::string& expression) {
+    std::string trimmed = expression;
+    while (!trimmed.empty() && std::isspace(static_cast<unsigned char>(trimmed.front()))) {
+        trimmed.erase(trimmed.begin());
+    }
+    while (!trimmed.empty() && std::isspace(static_cast<unsigned char>(trimmed.back()))) {
+        trimmed.pop_back();
+    }
+    if (trimmed.empty()) {
+        repl_input_draft_.clear();
+        if (repl_panel_ != nullptr) {
+            repl_panel_->set_input_value("");
+        }
+        return;
+    }
+
+    const std::int64_t frame_id = current_frame_id();
+    if (frame_id <= 0) {
+        model_.repl_history.push_back("> " + trimmed + "\n= (no active frame)");
+        sync_repl_panel();
+        model_.status_message = "No active frame for eval";
+        sync_status_bar();
+        repl_input_draft_.clear();
+        if (repl_panel_ != nullptr) {
+            repl_panel_->set_input_value("");
+        }
+        return;
+    }
+
+    if (session_io_ != nullptr) {
+        session_io_->post_evaluate(trimmed, frame_id, "repl");
+        model_.status_message = "Evaluating: " + trimmed;
+        sync_status_bar();
+    }
+
+    repl_input_draft_.clear();
+    if (repl_panel_ != nullptr) {
+        repl_panel_->set_input_value("");
+    }
 }
 
 void DebugApp::sync_watches_panel() {
