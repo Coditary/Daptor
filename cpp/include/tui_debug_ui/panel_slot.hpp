@@ -14,15 +14,15 @@ enum class SidebarPanelType {
     Watches,
     Threads,
     Breakpoints,
-};
-
-enum class BottomPanelType {
+    Source,
     Repl,
     Console,
 };
 
-enum class SourcePanelType {
-    Source,
+enum class PanelDock {
+    Sidebar,
+    Main,
+    Bottom,
 };
 
 enum class ThreadPanelFilter {
@@ -47,11 +47,10 @@ struct PanelSlotConfig {
 };
 
 [[nodiscard]] std::string panel_type_label(SidebarPanelType type);
-[[nodiscard]] std::string panel_type_label(BottomPanelType type);
-[[nodiscard]] std::string panel_type_label(SourcePanelType type);
 [[nodiscard]] std::string breakpoint_kind_label(BreakpointRowKind kind);
 [[nodiscard]] std::string thread_filter_label(ThreadPanelFilter filter);
 [[nodiscard]] std::string make_panel_tab_label(const PanelSlotConfig& config,
-                                               const std::vector<PanelSlotConfig>& existing);
+                                               const std::vector<PanelSlotConfig>& existing,
+                                               const std::string& preferred_base = {});
 
 }  // namespace tui_debug_ui

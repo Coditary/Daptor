@@ -1154,57 +1154,6 @@ void DebugApp::build_ui() {
     watches_panel_ = nullptr;
     stacks_panel_ = nullptr;
     breakpoints_panel_ = nullptr;
-    for (SidebarSlot& slot : sidebar_slots_) {
-        slot.scopes.reset();
-        slot.watches.reset();
-        slot.stacks.reset();
-        slot.breakpoints.reset();
-        slot.shared_host.reset();
-    }
-    if (sidebar_slots_.empty()) {
-        init_default_sidebar_slots();
-    }
-
-    std::vector<StackedPane::Entry> sidebar_entries;
-    sidebar_entries.reserve(sidebar_slots_.size());
-    for (SidebarSlot& slot : sidebar_slots_) {
-        ensure_sidebar_slot_panels(slot, scroll_options);
-        auto widget = release_sidebar_slot_widget(slot);
-        widget->set_flex(1);
-        sidebar_entries.push_back({slot.config.tab_label, std::move(widget)});
-    }
-    auto sidebar = std::make_unique<StackedPane>(std::move(sidebar_entries), dap_theme_.panel_background,
-                                                 dap_theme_.label, dap_theme_.title_focused, dap_theme_.divider,
-                                                 dap_theme_.breakpoint_line_number, dap_theme_.variable_name);
-    sidebar_stack_ = sidebar.get();
-    sidebar_stack_index_ = std::clamp(sidebar_stack_index_, 0, std::max(0, sidebar_stack_->count() - 1));
-    sidebar_stack_->set_active_index(sidebar_stack_index_);
-    sidebar_stack_->set_add_action([this]() {
-        if (sidebar_stack_ == nullptr) {
-            return;
-        }
-        const tuinator::Rect bounds = sidebar_stack_->bounds();
-        show_add_sidebar_panel_menu({bounds.x + std::max(0, bounds.width - 2), bounds.y + 1});
-    });
-    sidebar_stack_->set_rename_action([this](int index, const std::string& label) {
-        rename_sidebar_panel(index, label);
-    });
-    sidebar_stack_->set_on_active_changed([this](int index) {
-        sidebar_stack_index_ = index;
-        update_active_sidebar_panels();
-        model_.focus = focus_for_sidebar_index(index);
-        apply_focus();
-        model_.status_message = "Sidebar: " + sidebar_stack_->active_label() + " (" + std::to_string(index + 1) +
-                                "/" + std::to_string(sidebar_stack_->count()) + ") — ◄ ► or [ ]";
-        sync_status_bar();
-    });
-    update_active_sidebar_panels();
-    if (!watch_input_draft_.empty() && watches_panel_ != nullptr) {
-        watches_panel_->set_inline_edit(-1, watch_input_draft_, "?");
-        sync_watches_panel();
-    }
-    refresh_all_scope_slots();
-    sidebar->set_flex(0);
 
     auto source_panel = std::make_unique<SourcePanel>();
     source_panel_ = source_panel.get();
@@ -1225,6 +1174,9 @@ void DebugApp::build_ui() {
         begin_source_context_menu(goto_probe_source_path(), line, code_column, anchor, source_identifier);
     });
     source_panel_->set_on_request_viewport([this](int /*center_line*/) {
+        if (divider_drag_active_) {
+            return;
+        }
         cached_highlight_first_line_ = -1;
         cached_highlight_line_count_ = -1;
         highlight_request_first_line_ = -1;
@@ -1256,20 +1208,82 @@ void DebugApp::build_ui() {
         source_panel_->set_scroll_parent(source_scroll_view_);
     }
     source_content_shell_ = source_section_->release_widget();
-    for (SourceSlot& slot : source_slots_) {
+
+    for (SidebarSlot& slot : sidebar_slots_) {
+        slot.scopes.reset();
+        slot.watches.reset();
+        slot.stacks.reset();
+        slot.breakpoints.reset();
         slot.shared_host.reset();
     }
-    if (source_slots_.empty()) {
+    if (sidebar_slots_.empty()) {
+        init_default_sidebar_slots();
+    }
+
+    std::vector<StackedPane::Entry> sidebar_entries;
+    sidebar_entries.reserve(sidebar_slots_.size());
+    for (SidebarSlot& slot : sidebar_slots_) {
+        ensure_sidebar_slot_panels(slot, scroll_options);
+        auto widget = release_sidebar_slot_widget(slot);
+        widget->set_flex(1);
+        sidebar_entries.push_back({slot.config.tab_label, std::move(widget)});
+    }
+    auto sidebar = std::make_unique<StackedPane>(std::move(sidebar_entries), dap_theme_.panel_background,
+                                                 dap_theme_.label, dap_theme_.title_focused, dap_theme_.divider,
+                                                 dap_theme_.breakpoint_line_number, dap_theme_.variable_name);
+    sidebar_stack_ = sidebar.get();
+    sidebar_stack_index_ = std::clamp(sidebar_stack_index_, 0, std::max(0, sidebar_stack_->count() - 1));
+    sidebar_stack_->set_active_index(sidebar_stack_index_);
+    sidebar_stack_->set_add_action([this]() {
+        if (sidebar_stack_ == nullptr) {
+            return;
+        }
+        const tuinator::Rect bounds = sidebar_stack_->bounds();
+        show_add_panel_menu({bounds.x + std::max(0, bounds.width - 2), bounds.y + 1}, PanelDock::Sidebar);
+    });
+    sidebar_stack_->set_rename_action([this](int index, const std::string& label) {
+        rename_dock_panel(PanelDock::Sidebar, index, label);
+    });
+    sidebar_stack_->set_on_active_changed([this](int index) {
+        sidebar_stack_index_ = index;
+        if (SidebarSlot* slot = dock_slot_at(PanelDock::Sidebar, index)) {
+            model_.focus = focus_for_panel_type(slot->config.type);
+        }
+        update_active_panel_pointers();
+        apply_focus();
+        model_.status_message = "Sidebar: " + sidebar_stack_->active_label() + " (" + std::to_string(index + 1) +
+                                "/" + std::to_string(sidebar_stack_->count()) + ") — ◄ ► or [ ]";
+        sync_status_bar();
+    });
+    update_active_panel_pointers();
+    if (!watch_input_draft_.empty() && watches_panel_ != nullptr) {
+        watches_panel_->set_inline_edit(-1, watch_input_draft_, "?");
+        sync_watches_panel();
+    }
+    refresh_all_scope_slots();
+    sidebar->set_flex(0);
+
+    for (SidebarSlot& slot : source_slots_) {
+        if (slot.config.type == SidebarPanelType::Source) {
+            slot.shared_host.reset();
+        }
+    }
+    for (SidebarSlot& slot : bottom_slots_) {
+        if (slot.config.type == SidebarPanelType::Source) {
+            slot.shared_host.reset();
+        }
+    }
+    if (!has_source_panel()) {
         init_default_source_slots();
     }
 
     std::vector<StackedPane::Entry> source_entries;
     source_entries.reserve(source_slots_.size());
-    for (SourceSlot& slot : source_slots_) {
-        ensure_source_slot_widget(slot);
-        auto widget = release_source_slot_widget(slot);
+    for (SidebarSlot& slot : source_slots_) {
+        ensure_sidebar_slot_panels(slot, scroll_options);
+        auto widget = release_sidebar_slot_widget(slot);
         widget->set_flex(1);
-        source_entries.push_back({slot.tab_label, std::move(widget)});
+        source_entries.push_back({slot.config.tab_label, std::move(widget)});
     }
     auto source_stack = std::make_unique<StackedPane>(std::move(source_entries), dap_theme_.panel_background,
                                                       dap_theme_.label, dap_theme_.title_focused, dap_theme_.divider,
@@ -1282,14 +1296,19 @@ void DebugApp::build_ui() {
             return;
         }
         const tuinator::Rect bounds = source_stack_->bounds();
-        show_add_source_panel_menu({bounds.x + std::max(0, bounds.width - 2), bounds.y + 1});
+        show_add_panel_menu({bounds.x + std::max(0, bounds.width - 2), bounds.y + 1}, PanelDock::Main);
     });
     source_stack_->set_rename_action([this](int index, const std::string& label) {
-        rename_source_panel(index, label);
+        rename_dock_panel(PanelDock::Main, index, label);
     });
     source_stack_->set_on_active_changed([this](int index) {
         source_stack_index_ = index;
-        model_.focus = Focus::Source;
+        if (SidebarSlot* slot = dock_slot_at(PanelDock::Main, index)) {
+            model_.focus = focus_for_panel_type(slot->config.type);
+        } else {
+            model_.focus = Focus::Source;
+        }
+        update_active_panel_pointers();
         apply_focus();
     });
     sync_source_stack_title();
@@ -1377,7 +1396,7 @@ void DebugApp::build_ui() {
     console_shell_ = console_section->release_widget();
     console_shell_->set_flex(1);
 
-    for (BottomSlot& slot : bottom_slots_) {
+    for (SidebarSlot& slot : bottom_slots_) {
         slot.shared_host.reset();
     }
     if (bottom_slots_.empty()) {
@@ -1386,11 +1405,11 @@ void DebugApp::build_ui() {
 
     std::vector<StackedPane::Entry> bottom_entries;
     bottom_entries.reserve(bottom_slots_.size());
-    for (BottomSlot& slot : bottom_slots_) {
-        ensure_bottom_slot_widget(slot);
-        auto widget = release_bottom_slot_widget(slot);
+    for (SidebarSlot& slot : bottom_slots_) {
+        ensure_sidebar_slot_panels(slot, scroll_options);
+        auto widget = release_sidebar_slot_widget(slot);
         widget->set_flex(1);
-        bottom_entries.push_back({slot.tab_label, std::move(widget)});
+        bottom_entries.push_back({slot.config.tab_label, std::move(widget)});
     }
     auto bottom_tray = std::make_unique<StackedPane>(std::move(bottom_entries), dap_theme_.panel_background,
                                                      dap_theme_.label, dap_theme_.title_focused, dap_theme_.divider,
@@ -1403,20 +1422,22 @@ void DebugApp::build_ui() {
             return;
         }
         const tuinator::Rect bounds = bottom_stack_->bounds();
-        show_add_bottom_panel_menu({bounds.x + std::max(0, bounds.width - 2), bounds.y + 1});
+        show_add_panel_menu({bounds.x + std::max(0, bounds.width - 2), bounds.y + 1}, PanelDock::Bottom);
     });
     bottom_stack_->set_rename_action([this](int index, const std::string& label) {
-        rename_bottom_panel(index, label);
+        rename_dock_panel(PanelDock::Bottom, index, label);
     });
     bottom_stack_->set_on_active_changed([this](int index) {
         bottom_stack_index_ = index;
-        const BottomPanelType panel_type = index >= 0 && index < static_cast<int>(bottom_slots_.size())
-                                               ? bottom_slots_[static_cast<std::size_t>(index)].type
-                                               : BottomPanelType::Repl;
-        model_.focus = panel_type == BottomPanelType::Console ? Focus::Console : Focus::Repl;
+        if (SidebarSlot* slot = dock_slot_at(PanelDock::Bottom, index)) {
+            model_.focus = focus_for_panel_type(slot->config.type);
+        } else {
+            model_.focus = Focus::Repl;
+        }
         if (model_.focus == Focus::Repl) {
             repl_input_focused_ = false;
         }
+        update_active_panel_pointers();
         apply_focus();
         model_.status_message = "Bottom: " + bottom_stack_->active_label() + " (" + std::to_string(index + 1) +
                                 "/" + std::to_string(bottom_stack_->count()) + ") — ◄ ► or [ ]";
@@ -1452,7 +1473,12 @@ void DebugApp::build_ui() {
     sync_ui_from_model();
     sync_controls_bar();
     sync_breakpoints_list_panel();
-    if (const std::string preview_path = preferred_program_source_path(program_path_); !preview_path.empty()) {
+    if (!model_.source_path.empty()) {
+        const int line =
+            model_.execution_line > 0 ? static_cast<int>(model_.execution_line) : 1;
+        open_source_file(model_.source_path, line, false, model_.source_reference);
+    } else if (const std::string preview_path = preferred_program_source_path(program_path_);
+               !preview_path.empty()) {
         open_source_file(preview_path, 1, false);
         if (!launch_posted_) {
             prefetch_program_source_highlight();
@@ -1465,7 +1491,7 @@ void DebugApp::build_ui() {
     request_full_screen_refresh();
 }
 
-void DebugApp::refresh_scroll_views() {
+void DebugApp::refresh_scroll_views(bool include_source) {
     auto refresh = [](tuinator::ScrollView* scroll) {
         if (scroll != nullptr) {
             scroll->refresh_content();
@@ -1484,7 +1510,9 @@ void DebugApp::refresh_scroll_views() {
     if (watches_panel_ != nullptr) {
         refresh(watches_panel_->scroll_view());
     }
-    refresh(source_scroll_view_);
+    if (include_source) {
+        refresh(source_scroll_view_);
+    }
     refresh(console_scroll_view_);
 }
 
@@ -1717,7 +1745,7 @@ void DebugApp::apply_variable_children_payload(std::int64_t variables_reference,
 }
 
 void DebugApp::toggle_scope_row_expand(std::uint64_t slot_id, int row_index) {
-    SidebarSlot* slot = sidebar_slot_by_id(slot_id);
+    SidebarSlot* slot = slot_by_id(slot_id);
     if (slot == nullptr || slot->scopes == nullptr || slot->scopes->has_active_inline_edit()) {
         return;
     }
@@ -2048,10 +2076,11 @@ void DebugApp::sync_ui_from_model() {
         console_panel_->set_input_active(console_input_active());
     }
     if (!variable_set_in_flight_) {
-        for (SidebarSlot& slot : sidebar_slots_) {
-            if (slot.config.type != SidebarPanelType::Variables) {
-                continue;
-            }
+        for (PanelDock dock : {PanelDock::Sidebar, PanelDock::Main, PanelDock::Bottom}) {
+            for (SidebarSlot& slot : dock_slots(dock)) {
+                if (slot.config.type != SidebarPanelType::Variables) {
+                    continue;
+                }
             std::vector<ScopeVariableRowMeta> meta;
             std::vector<std::string> scope_rows =
                 build_scope_rows(model_, expanded_scope_paths_, pending_scope_paths_, meta, slot.config.scope_filter);
@@ -2065,7 +2094,8 @@ void DebugApp::sync_ui_from_model() {
                 slot.cached_scope_rows = std::move(scope_rows);
                 slot.cached_scope_row_meta = std::move(meta);
             }
-            sync_scope_slot(slot);
+                sync_scope_slot(slot);
+            }
         }
         apply_scope_value_overrides();
     }
@@ -2122,11 +2152,17 @@ void DebugApp::sync_status_bar() {
 }
 
 int DebugApp::source_viewport_height() const {
-    if (source_panel_ != nullptr) {
-        return source_panel_->viewport_height();
-    }
     if (source_scroll_view_ != nullptr && source_scroll_view_->bounds().height > 0) {
         return source_scroll_view_->bounds().height;
+    }
+    if (source_panel_ != nullptr) {
+        const int height = source_panel_->viewport_height();
+        if (height > 0 && (source_scroll_view_ == nullptr || source_scroll_view_->bounds().height > 0)) {
+            return height;
+        }
+    }
+    if (cached_source_viewport_height_ > 0) {
+        return cached_source_viewport_height_;
     }
     return 24;
 }
@@ -2159,9 +2195,11 @@ void DebugApp::invalidate_scope_variables() {
     scope_variables_fetch_signature_.clear();
     scope_variables_fetch_pending_ = false;
     model_.scope_variables.clear();
-    for (SidebarSlot& slot : sidebar_slots_) {
-        slot.cached_scope_rows.clear();
-        slot.cached_scope_row_meta.clear();
+    for (PanelDock dock : {PanelDock::Sidebar, PanelDock::Main, PanelDock::Bottom}) {
+        for (SidebarSlot& slot : dock_slots(dock)) {
+            slot.cached_scope_rows.clear();
+            slot.cached_scope_row_meta.clear();
+        }
     }
     expanded_scope_paths_.clear();
     pending_scope_paths_.clear();
@@ -2188,9 +2226,11 @@ void DebugApp::patch_local_variable_value(const std::string& name, const std::st
         }
     }
 
-    for (SidebarSlot& slot : sidebar_slots_) {
-        if (slot.config.type == SidebarPanelType::Variables) {
-            patch_scope_row_value(slot.cached_scope_rows, name, value);
+    for (PanelDock dock : {PanelDock::Sidebar, PanelDock::Main, PanelDock::Bottom}) {
+        for (SidebarSlot& slot : dock_slots(dock)) {
+            if (slot.config.type == SidebarPanelType::Variables) {
+                patch_scope_row_value(slot.cached_scope_rows, name, value);
+            }
         }
     }
     refresh_all_scope_slots();
@@ -2213,12 +2253,14 @@ void DebugApp::apply_scope_value_overrides() {
             variable.value = it->second;
         }
     }
-    for (SidebarSlot& slot : sidebar_slots_) {
-        if (slot.config.type != SidebarPanelType::Variables) {
-            continue;
-        }
-        for (const auto& [name, value] : scope_value_overrides_) {
-            patch_scope_row_value(slot.cached_scope_rows, name, value);
+    for (PanelDock dock : {PanelDock::Sidebar, PanelDock::Main, PanelDock::Bottom}) {
+        for (SidebarSlot& slot : dock_slots(dock)) {
+            if (slot.config.type != SidebarPanelType::Variables) {
+                continue;
+            }
+            for (const auto& [name, value] : scope_value_overrides_) {
+                patch_scope_row_value(slot.cached_scope_rows, name, value);
+            }
         }
     }
 }
@@ -2279,10 +2321,14 @@ void DebugApp::apply_highlight_payload(int first_line, int line_count, const std
     try {
         if (uses_full_file_source() && source_scroll_view_ != nullptr && highlight_request_scroll_y_ >= 0 &&
             source_scroll_view_->scroll_y() != highlight_request_scroll_y_) {
-            highlight_request_first_line_ = -1;
-            cached_highlight_first_line_ = -1;
-            maybe_request_source_highlight();
-            return;
+            const int requested_first = highlight_request_scroll_y_ + 1;
+            const int current_first = source_scroll_view_->scroll_y() + 1;
+            if (requested_first != current_first) {
+                highlight_request_first_line_ = -1;
+                cached_highlight_first_line_ = -1;
+                maybe_request_source_highlight();
+                return;
+            }
         }
 
         const auto lines = parse_highlight_json(json);
@@ -2308,8 +2354,11 @@ void DebugApp::apply_highlight_payload(int first_line, int line_count, const std
         }
         cached_highlight_first_line_ = first_line;
         cached_highlight_line_count_ = line_count;
+        if (source_scroll_view_ != nullptr && source_scroll_view_->bounds().height > 0) {
+            cached_source_viewport_height_ = source_scroll_view_->bounds().height;
+        }
         if (!divider_drag_active_) {
-            request_full_screen_refresh();
+            mark_source_view_dirty();
         }
     } catch (const std::exception&) {
     }
@@ -2333,25 +2382,28 @@ void DebugApp::scroll_source_to_line(int line) {
 }
 
 void DebugApp::maybe_refresh_source_highlight_for_scroll() {
-    if (divider_drag_active_ || source_scroll_view_ == nullptr || !uses_full_file_source()) {
+    if (divider_drag_active_ || source_layout_settling_ || source_scroll_view_ == nullptr ||
+        !uses_full_file_source()) {
+        return;
+    }
+    if (highlight_request_first_line_ >= 0) {
+        return;
+    }
+    if (source_scroll_view_->bounds().height <= 0) {
         return;
     }
 
     const int scroll_y = source_scroll_view_->scroll_y();
-    if (scroll_y == cached_highlight_scroll_y_) {
+    const int viewport_height = source_scroll_view_->bounds().height;
+    if (scroll_y == cached_highlight_scroll_y_ && viewport_height == cached_source_viewport_height_) {
         return;
     }
 
     cached_highlight_scroll_y_ = scroll_y;
+    cached_source_viewport_height_ = viewport_height;
     cached_highlight_first_line_ = -1;
     highlight_request_first_line_ = -1;
     highlight_request_scroll_y_ = -1;
-
-    if (source_panel_ != nullptr && !cached_source_text_.empty()) {
-        const int first_line = std::max(1, scroll_y + 1);
-        const int line_count = highlight_line_count();
-        source_panel_->reset_plain_spans_for_line_range(first_line, line_count, cached_source_text_);
-    }
 
     maybe_request_source_highlight();
 }
@@ -2412,7 +2464,10 @@ void DebugApp::ensure_source_plain_lines() {
 }
 
 void DebugApp::maybe_request_source_highlight() {
-    if (divider_drag_active_ || source_panel_ == nullptr) {
+    if (divider_drag_active_ || source_layout_settling_ || source_panel_ == nullptr) {
+        return;
+    }
+    if (source_scroll_view_ != nullptr && source_scroll_view_->bounds().height <= 0) {
         return;
     }
 
@@ -2561,7 +2616,6 @@ void DebugApp::bind_split_pane(ResizableSplitPane* split) {
         return;
     }
 
-    split->set_on_screen_refresh([this]() { request_full_screen_refresh(); });
     split->set_on_drag_state_changed([this](bool dragging) {
         divider_drag_active_ = dragging;
         if (!dragging) {
@@ -2586,13 +2640,46 @@ void DebugApp::request_repaint() {
     mark_all_panels_dirty();
 }
 
+void DebugApp::mark_source_view_dirty() {
+    if (source_panel_ != nullptr) {
+        source_panel_->mark_dirty();
+    }
+    if (source_scroll_view_ != nullptr) {
+        source_scroll_view_->mark_dirty();
+    }
+}
+
+void DebugApp::refresh_source_highlight_if_needed() {
+    if (source_scroll_view_ != nullptr) {
+        source_scroll_view_->refresh_content();
+        if (source_scroll_view_->bounds().height > 0) {
+            cached_source_viewport_height_ = source_scroll_view_->bounds().height;
+            cached_highlight_scroll_y_ = source_scroll_view_->scroll_y();
+        }
+    }
+
+    const int next_first_line = highlight_first_line();
+    const int next_line_count = highlight_line_count();
+    const bool highlight_window_changed = next_first_line != cached_highlight_first_line_ ||
+                                          next_line_count != cached_highlight_line_count_;
+
+    if (highlight_window_changed) {
+        cached_highlight_first_line_ = -1;
+        cached_highlight_line_count_ = -1;
+        highlight_request_first_line_ = -1;
+        highlight_request_line_count_ = -1;
+        maybe_request_source_highlight();
+    }
+
+    mark_source_view_dirty();
+}
+
 void DebugApp::on_split_drag_ended() {
     apply_focus();
-    refresh_scroll_views();
-    cached_highlight_first_line_ = -1;
-    cached_highlight_line_count_ = -1;
-    highlight_request_first_line_ = -1;
-    highlight_request_line_count_ = -1;
+
+    source_layout_settling_ = true;
+    refresh_source_highlight_if_needed();
+    source_layout_settling_ = false;
 
     if (status_bar_ == nullptr) {
         sync_ui_from_model();
@@ -2605,7 +2692,6 @@ void DebugApp::on_split_drag_ended() {
         status_bar_->set_text(status_text);
     }
     sync_ui_from_model();
-    maybe_request_source_highlight();
 }
 
 void DebugApp::persist_split_size_as_pct(ResizableSplitPane* split, std::uint16_t& pct_out, bool horizontal,
@@ -2625,19 +2711,83 @@ void DebugApp::persist_split_size_as_pct(ResizableSplitPane* split, std::uint16_
     pct_out = static_cast<std::uint16_t>(std::clamp(value * 100 / total, 1, 99));
 }
 
-std::vector<PanelSlotConfig> DebugApp::sidebar_slot_configs() const {
+std::vector<SidebarSlot>& DebugApp::dock_slots(PanelDock dock) {
+    switch (dock) {
+    case PanelDock::Sidebar:
+        return sidebar_slots_;
+    case PanelDock::Main:
+        return source_slots_;
+    case PanelDock::Bottom:
+        return bottom_slots_;
+    }
+    return sidebar_slots_;
+}
+
+const std::vector<SidebarSlot>& DebugApp::dock_slots(PanelDock dock) const {
+    return const_cast<DebugApp*>(this)->dock_slots(dock);
+}
+
+StackedPane* DebugApp::dock_stack(PanelDock dock) {
+    switch (dock) {
+    case PanelDock::Sidebar:
+        return sidebar_stack_;
+    case PanelDock::Main:
+        return source_stack_;
+    case PanelDock::Bottom:
+        return bottom_stack_;
+    }
+    return nullptr;
+}
+
+int& DebugApp::dock_stack_index(PanelDock dock) {
+    switch (dock) {
+    case PanelDock::Sidebar:
+        return sidebar_stack_index_;
+    case PanelDock::Main:
+        return source_stack_index_;
+    case PanelDock::Bottom:
+        return bottom_stack_index_;
+    }
+    return sidebar_stack_index_;
+}
+
+std::vector<PanelSlotConfig> DebugApp::dock_slot_configs(PanelDock dock) const {
     std::vector<PanelSlotConfig> configs;
-    configs.reserve(sidebar_slots_.size());
-    for (const SidebarSlot& slot : sidebar_slots_) {
+    const std::vector<SidebarSlot>& slots = dock_slots(dock);
+    configs.reserve(slots.size());
+    for (const SidebarSlot& slot : slots) {
         configs.push_back(slot.config);
     }
     return configs;
 }
 
+SidebarSlot* DebugApp::dock_slot_at(PanelDock dock, int index) {
+    std::vector<SidebarSlot>& slots = dock_slots(dock);
+    if (index < 0 || index >= static_cast<int>(slots.size())) {
+        return nullptr;
+    }
+    return &slots[static_cast<std::size_t>(index)];
+}
+
+SidebarSlot* DebugApp::active_dock_slot(PanelDock dock) {
+    return dock_slot_at(dock, dock_stack_index(dock));
+}
+
+SidebarSlot* DebugApp::slot_by_id(std::uint64_t slot_id) {
+    for (PanelDock dock : {PanelDock::Sidebar, PanelDock::Main, PanelDock::Bottom}) {
+        for (SidebarSlot& slot : dock_slots(dock)) {
+            if (slot.config.id == slot_id) {
+                return &slot;
+            }
+        }
+    }
+    return nullptr;
+}
+
 void DebugApp::init_default_sidebar_slots() {
     auto push_slot = [this](PanelSlotConfig config) {
         config.id = next_slot_id_++;
-        config.tab_label = make_panel_tab_label(config, sidebar_slot_configs());
+        config.tab_label = make_panel_tab_label(config, dock_slot_configs(PanelDock::Sidebar));
         SidebarSlot slot;
         slot.config = std::move(config);
         sidebar_slots_.push_back(std::move(slot));
@@ -2826,6 +2976,21 @@ void DebugApp::ensure_sidebar_slot_panels(SidebarSlot& slot, const tuinator::Scr
             wire_breakpoints_panel(*slot.breakpoints);
         }
         break;
+    case SidebarPanelType::Source:
+        if (source_content_shell_ != nullptr && slot.shared_host == nullptr) {
+            slot.shared_host = std::make_unique<SharedWidgetHost>(source_content_shell_.get());
+        }
+        break;
+    case SidebarPanelType::Repl:
+        if (repl_shell_ != nullptr && slot.shared_host == nullptr) {
+            slot.shared_host = std::make_unique<SharedWidgetHost>(repl_shell_.get());
+        }
+        break;
+    case SidebarPanelType::Console:
+        if (console_shell_ != nullptr && slot.shared_host == nullptr) {
+            slot.shared_host = std::make_unique<SharedWidgetHost>(console_shell_.get());
+        }
+        break;
     }
 }
 
@@ -2851,6 +3016,13 @@ std::unique_ptr<tuinator::Widget> DebugApp::release_sidebar_slot_widget(SidebarS
             return slot.breakpoints->release_widget();
         }
         break;
+    case SidebarPanelType::Source:
+    case SidebarPanelType::Repl:
+    case SidebarPanelType::Console:
+        if (slot.shared_host != nullptr) {
+            return std::move(slot.shared_host);
+        }
+        break;
     }
     return std::make_unique<SharedWidgetHost>(nullptr);
 }
@@ -2864,21 +3036,216 @@ SidebarSlot* DebugApp::sidebar_slot_at(int index) {
 
 SidebarSlot* DebugApp::active_sidebar_slot() { return sidebar_slot_at(sidebar_stack_index_); }
 
-SidebarSlot* DebugApp::sidebar_slot_by_id(std::uint64_t slot_id) {
-    for (SidebarSlot& slot : sidebar_slots_) {
-        if (slot.config.id == slot_id) {
-            return &slot;
+SidebarSlot* DebugApp::sidebar_slot_by_id(std::uint64_t slot_id) { return slot_by_id(slot_id); }
+
+bool DebugApp::focus_matches_panel_type(Focus focus, SidebarPanelType type) {
+    switch (type) {
+    case SidebarPanelType::Variables:
+        return focus == Focus::Scopes;
+    case SidebarPanelType::Threads:
+        return focus == Focus::Stacks;
+    case SidebarPanelType::Breakpoints:
+        return focus == Focus::Breakpoints;
+    case SidebarPanelType::Watches:
+        return focus == Focus::Watches;
+    case SidebarPanelType::Source:
+        return focus == Focus::Source;
+    case SidebarPanelType::Repl:
+        return focus == Focus::Repl;
+    case SidebarPanelType::Console:
+        return focus == Focus::Console;
+    }
+    return false;
+}
+
+Focus DebugApp::focus_for_panel_type(SidebarPanelType type) {
+    switch (type) {
+    case SidebarPanelType::Variables:
+        return Focus::Scopes;
+    case SidebarPanelType::Threads:
+        return Focus::Stacks;
+    case SidebarPanelType::Breakpoints:
+        return Focus::Breakpoints;
+    case SidebarPanelType::Watches:
+        return Focus::Watches;
+    case SidebarPanelType::Source:
+        return Focus::Source;
+    case SidebarPanelType::Repl:
+        return Focus::Repl;
+    case SidebarPanelType::Console:
+        return Focus::Console;
+    }
+    return Focus::Scopes;
+}
+
+int DebugApp::dock_index_for_focus(PanelDock dock, Focus focus) const {
+    const std::vector<SidebarSlot>& slots = dock_slots(dock);
+    int current = -1;
+    switch (dock) {
+    case PanelDock::Sidebar:
+        current = sidebar_stack_index_;
+        break;
+    case PanelDock::Main:
+        current = source_stack_index_;
+        break;
+    case PanelDock::Bottom:
+        current = bottom_stack_index_;
+        break;
+    }
+    if (current >= 0 && current < static_cast<int>(slots.size()) &&
+        focus_matches_panel_type(focus, slots[static_cast<std::size_t>(current)].config.type)) {
+        return current;
+    }
+    for (std::size_t i = 0; i < slots.size(); ++i) {
+        if (focus_matches_panel_type(focus, slots[i].config.type)) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+void DebugApp::sync_dock_stack_to_focus(PanelDock dock) {
+    StackedPane* stack = dock_stack(dock);
+    if (stack == nullptr) {
+        return;
+    }
+    const int index = dock_index_for_focus(dock, model_.focus);
+    if (index >= 0 && index != stack->active_index()) {
+        dock_stack_index(dock) = index;
+        stack->set_active_index(index);
+    }
+}
+
+SidebarSlot* DebugApp::active_slot_for_focus() {
+    for (PanelDock dock : {PanelDock::Sidebar, PanelDock::Main, PanelDock::Bottom}) {
+        if (SidebarSlot* slot = active_dock_slot(dock); slot != nullptr &&
+                                                          focus_matches_panel_type(model_.focus, slot->config.type)) {
+            return slot;
+        }
+    }
+    for (PanelDock dock : {PanelDock::Sidebar, PanelDock::Main, PanelDock::Bottom}) {
+        const int index = dock_index_for_focus(dock, model_.focus);
+        if (index >= 0) {
+            return dock_slot_at(dock, index);
         }
     }
     return nullptr;
 }
 
-void DebugApp::update_active_sidebar_panels() {
+std::optional<std::pair<PanelDock, int>> DebugApp::find_source_panel_slot() const {
+    for (PanelDock dock : {PanelDock::Sidebar, PanelDock::Main, PanelDock::Bottom}) {
+        const std::vector<SidebarSlot>& slots = dock_slots(dock);
+        for (std::size_t i = 0; i < slots.size(); ++i) {
+            if (slots[i].config.type == SidebarPanelType::Source) {
+                return std::make_pair(dock, static_cast<int>(i));
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+bool DebugApp::has_source_panel() const { return find_source_panel_slot().has_value(); }
+
+namespace {
+
+const char* dock_area_label(PanelDock dock) {
+    switch (dock) {
+    case PanelDock::Sidebar:
+        return "sidebar";
+    case PanelDock::Main:
+        return "main area";
+    case PanelDock::Bottom:
+        return "bottom tray";
+    }
+    return "panel area";
+}
+
+}  // namespace
+
+void DebugApp::move_source_panel_to_dock(PanelDock target_dock) {
+    StackedPane* target_stack = dock_stack(target_dock);
+    if (target_stack == nullptr) {
+        return;
+    }
+
+    const std::optional<std::pair<PanelDock, int>> current = find_source_panel_slot();
+    if (current.has_value() && current->first == target_dock) {
+        model_.status_message = std::string("Source is already in the ") + dock_area_label(target_dock);
+        sync_status_bar();
+        return;
+    }
+
+    const auto scroll_options = dap_theme_.scroll_view_options();
+
+    if (current.has_value()) {
+        if (StackedPane* from_stack = dock_stack(current->first); from_stack != nullptr) {
+            from_stack->remove_entry(current->second);
+        }
+
+        std::vector<SidebarSlot>& from_slots = dock_slots(current->first);
+        SidebarSlot slot = std::move(from_slots[static_cast<std::size_t>(current->second)]);
+        from_slots.erase(from_slots.begin() + static_cast<std::ptrdiff_t>(current->second));
+
+        int& from_index = dock_stack_index(current->first);
+        if (from_index >= static_cast<int>(from_slots.size())) {
+            from_index = std::max(0, static_cast<int>(from_slots.size()) - 1);
+        }
+
+        std::vector<SidebarSlot>& target_slots = dock_slots(target_dock);
+        target_slots.push_back(std::move(slot));
+        SidebarSlot& moved_slot = target_slots.back();
+        moved_slot.shared_host.reset();
+        ensure_sidebar_slot_panels(moved_slot, scroll_options);
+        auto widget = release_sidebar_slot_widget(moved_slot);
+        widget->set_flex(1);
+        target_stack->append_entry(moved_slot.config.tab_label, std::move(widget));
+    } else {
+        PanelSlotConfig config;
+        config.type = SidebarPanelType::Source;
+        config.id = next_slot_id_++;
+        config.tab_label =
+            make_panel_tab_label(config, dock_slot_configs(target_dock), panel_title_from_path(model_.source_path));
+        std::vector<SidebarSlot>& target_slots = dock_slots(target_dock);
+        target_slots.push_back(SidebarSlot{std::move(config)});
+        SidebarSlot& moved_slot = target_slots.back();
+        ensure_sidebar_slot_panels(moved_slot, scroll_options);
+        auto widget = release_sidebar_slot_widget(moved_slot);
+        widget->set_flex(1);
+        target_stack->append_entry(moved_slot.config.tab_label, std::move(widget));
+    }
+
+    const int new_index = target_stack->count() - 1;
+    target_stack->set_active_index(new_index);
+    dock_stack_index(target_dock) = new_index;
+
+    model_.focus = Focus::Source;
+    update_active_panel_pointers();
+    apply_focus();
+
+    source_layout_settling_ = true;
+    refresh_source_highlight_if_needed();
+    source_layout_settling_ = false;
+
+    if (sidebar_stack_ != nullptr) {
+        sidebar_stack_->mark_dirty();
+    }
+    if (source_stack_ != nullptr) {
+        source_stack_->mark_dirty();
+    }
+    if (bottom_stack_ != nullptr) {
+        bottom_stack_->mark_dirty();
+    }
+
+    model_.status_message = std::string("Moved Source to ") + dock_area_label(target_dock);
+    sync_status_bar();
+}
+
+void DebugApp::update_active_panel_pointers() {
     scopes_panel_ = nullptr;
     watches_panel_ = nullptr;
     stacks_panel_ = nullptr;
     breakpoints_panel_ = nullptr;
-    if (SidebarSlot* slot = active_sidebar_slot()) {
+    if (SidebarSlot* slot = active_slot_for_focus()) {
         if (slot->scopes != nullptr) {
             scopes_panel_ = slot->scopes.get();
         }
@@ -2907,26 +3274,30 @@ void DebugApp::sync_scope_slot(SidebarSlot& slot) {
 }
 
 void DebugApp::refresh_all_scope_slots() {
-    for (SidebarSlot& slot : sidebar_slots_) {
-        if (slot.config.type != SidebarPanelType::Variables) {
-            continue;
+    for (PanelDock dock : {PanelDock::Sidebar, PanelDock::Main, PanelDock::Bottom}) {
+        for (SidebarSlot& slot : dock_slots(dock)) {
+            if (slot.config.type != SidebarPanelType::Variables) {
+                continue;
+            }
+            std::vector<ScopeVariableRowMeta> meta;
+            slot.cached_scope_rows =
+                build_scope_rows(model_, expanded_scope_paths_, pending_scope_paths_, meta, slot.config.scope_filter);
+            slot.cached_scope_row_meta = std::move(meta);
+            sync_scope_slot(slot);
         }
-        std::vector<ScopeVariableRowMeta> meta;
-        slot.cached_scope_rows =
-            build_scope_rows(model_, expanded_scope_paths_, pending_scope_paths_, meta, slot.config.scope_filter);
-        slot.cached_scope_row_meta = std::move(meta);
-        sync_scope_slot(slot);
     }
     apply_scope_value_overrides();
 }
 
 std::vector<WatchEntry>& DebugApp::active_watch_list() {
-    if (SidebarSlot* slot = active_sidebar_slot(); slot != nullptr && slot->config.type == SidebarPanelType::Watches) {
+    if (SidebarSlot* slot = active_slot_for_focus(); slot != nullptr && slot->config.type == SidebarPanelType::Watches) {
         return slot->watches_data;
     }
-    for (SidebarSlot& slot : sidebar_slots_) {
-        if (slot.config.type == SidebarPanelType::Watches) {
-            return slot.watches_data;
+    for (PanelDock dock : {PanelDock::Sidebar, PanelDock::Main, PanelDock::Bottom}) {
+        for (SidebarSlot& slot : dock_slots(dock)) {
+            if (slot.config.type == SidebarPanelType::Watches) {
+                return slot.watches_data;
+            }
         }
     }
     static std::vector<WatchEntry> fallback;
@@ -2978,7 +3349,7 @@ void DebugApp::sync_breakpoint_slot(SidebarSlot& slot, const std::vector<Breakpo
     slot.breakpoints->set_breakpoints(std::move(filtered));
 }
 
-void DebugApp::show_add_sidebar_scope_menu(SidebarPanelType type, tuinator::Point anchor) {
+void DebugApp::show_add_scope_menu(PanelDock dock, SidebarPanelType type, tuinator::Point anchor) {
     if (context_menu_ == nullptr) {
         return;
     }
@@ -2986,12 +3357,12 @@ void DebugApp::show_add_sidebar_scope_menu(SidebarPanelType type, tuinator::Poin
     std::vector<ContextMenu::Item> items;
     items.push_back(ContextMenu::Item{
         "All",
-        [this, type]() { add_sidebar_panel(type, std::nullopt); },
+        [this, dock, type]() { add_panel_to_dock(dock, type, std::nullopt); },
     });
     for (const ScopeInfo& scope : model_.scopes) {
         items.push_back(ContextMenu::Item{
             scope.name,
-            [this, type, name = scope.name]() { add_sidebar_panel(type, name); },
+            [this, dock, type, name = scope.name]() { add_panel_to_dock(dock, type, name); },
         });
     }
 
@@ -3000,7 +3371,7 @@ void DebugApp::show_add_sidebar_scope_menu(SidebarPanelType type, tuinator::Poin
     request_full_screen_refresh();
 }
 
-void DebugApp::show_add_sidebar_panel_menu(tuinator::Point anchor) {
+void DebugApp::show_add_panel_menu(tuinator::Point anchor, PanelDock dock) {
     if (context_menu_ == nullptr) {
         return;
     }
@@ -3008,19 +3379,34 @@ void DebugApp::show_add_sidebar_panel_menu(tuinator::Point anchor) {
     std::vector<ContextMenu::Item> items;
     items.push_back(ContextMenu::Item{
         "Variables ›",
-        [this, anchor]() { show_add_sidebar_scope_menu(SidebarPanelType::Variables, anchor); },
+        [this, dock, anchor]() { show_add_scope_menu(dock, SidebarPanelType::Variables, anchor); },
     });
     items.push_back(ContextMenu::Item{
         "Watches ›",
-        [this, anchor]() { show_add_sidebar_scope_menu(SidebarPanelType::Watches, anchor); },
+        [this, dock, anchor]() { show_add_scope_menu(dock, SidebarPanelType::Watches, anchor); },
     });
     items.push_back(ContextMenu::Item{
         "Threads ›",
-        [this, anchor]() { show_add_sidebar_thread_menu(anchor); },
+        [this, dock, anchor]() { show_add_thread_menu(dock, anchor); },
     });
     items.push_back(ContextMenu::Item{
         "Breakpoints ›",
-        [this, anchor]() { show_add_sidebar_breakpoint_menu(anchor); },
+        [this, dock, anchor]() { show_add_breakpoint_menu(dock, anchor); },
+    });
+    if (const std::optional<std::pair<PanelDock, int>> source_loc = find_source_panel_slot();
+        !source_loc.has_value() || source_loc->first != dock) {
+        items.push_back(ContextMenu::Item{
+            "Source",
+            [this, dock]() { move_source_panel_to_dock(dock); },
+        });
+    }
+    items.push_back(ContextMenu::Item{
+        "REPL",
+        [this, dock]() { add_panel_to_dock(dock, SidebarPanelType::Repl); },
+    });
+    items.push_back(ContextMenu::Item{
+        "Console",
+        [this, dock]() { add_panel_to_dock(dock, SidebarPanelType::Console); },
     });
 
     context_menu_->open(anchor, overlay_clip_bounds(), std::move(items));
@@ -3028,7 +3414,7 @@ void DebugApp::show_add_sidebar_panel_menu(tuinator::Point anchor) {
     request_full_screen_refresh();
 }
 
-void DebugApp::show_add_sidebar_breakpoint_menu(tuinator::Point anchor) {
+void DebugApp::show_add_breakpoint_menu(PanelDock dock, tuinator::Point anchor) {
     if (context_menu_ == nullptr) {
         return;
     }
@@ -3036,14 +3422,14 @@ void DebugApp::show_add_sidebar_breakpoint_menu(tuinator::Point anchor) {
     std::vector<ContextMenu::Item> items;
     items.push_back(ContextMenu::Item{
         "All",
-        [this]() { add_sidebar_panel(SidebarPanelType::Breakpoints, std::nullopt, std::nullopt); },
+        [this, dock]() { add_panel_to_dock(dock, SidebarPanelType::Breakpoints, std::nullopt, std::nullopt); },
     });
     for (BreakpointRowKind kind :
          {BreakpointRowKind::Source, BreakpointRowKind::Data, BreakpointRowKind::Function,
           BreakpointRowKind::Exception}) {
         items.push_back(ContextMenu::Item{
             breakpoint_kind_label(kind),
-            [this, kind]() { add_sidebar_panel(SidebarPanelType::Breakpoints, std::nullopt, kind); },
+            [this, dock, kind]() { add_panel_to_dock(dock, SidebarPanelType::Breakpoints, std::nullopt, kind); },
         });
     }
 
@@ -3052,7 +3438,7 @@ void DebugApp::show_add_sidebar_breakpoint_menu(tuinator::Point anchor) {
     request_full_screen_refresh();
 }
 
-void DebugApp::show_add_sidebar_thread_menu(tuinator::Point anchor) {
+void DebugApp::show_add_thread_menu(PanelDock dock, tuinator::Point anchor) {
     if (context_menu_ == nullptr) {
         return;
     }
@@ -3060,26 +3446,30 @@ void DebugApp::show_add_sidebar_thread_menu(tuinator::Point anchor) {
     std::vector<ContextMenu::Item> items;
     items.push_back(ContextMenu::Item{
         "All",
-        [this]() { add_sidebar_panel(SidebarPanelType::Threads); },
+        [this, dock]() { add_panel_to_dock(dock, SidebarPanelType::Threads); },
     });
     items.push_back(ContextMenu::Item{
         thread_filter_label(ThreadPanelFilter::Stopped),
-        [this]() { add_sidebar_panel(SidebarPanelType::Threads, std::nullopt, std::nullopt,
-                                      ThreadPanelFilter::Stopped); },
+        [this, dock]() {
+            add_panel_to_dock(dock, SidebarPanelType::Threads, std::nullopt, std::nullopt,
+                              ThreadPanelFilter::Stopped);
+        },
     });
     items.push_back(ContextMenu::Item{
         thread_filter_label(ThreadPanelFilter::Running),
-        [this]() { add_sidebar_panel(SidebarPanelType::Threads, std::nullopt, std::nullopt,
-                                      ThreadPanelFilter::Running); },
+        [this, dock]() {
+            add_panel_to_dock(dock, SidebarPanelType::Threads, std::nullopt, std::nullopt,
+                              ThreadPanelFilter::Running);
+        },
     });
     for (const ThreadInfo& thread : model_.threads) {
         const std::string label =
             thread.name.empty() ? ("Thread " + std::to_string(thread.id)) : thread.name;
         items.push_back(ContextMenu::Item{
             label,
-            [this, thread_id = thread.id, name = label]() {
-                add_sidebar_panel(SidebarPanelType::Threads, std::nullopt, std::nullopt, std::nullopt, thread_id,
-                                  name);
+            [this, dock, thread_id = thread.id, name = label]() {
+                add_panel_to_dock(dock, SidebarPanelType::Threads, std::nullopt, std::nullopt, std::nullopt,
+                                  thread_id, name);
             },
         });
     }
@@ -3089,12 +3479,18 @@ void DebugApp::show_add_sidebar_thread_menu(tuinator::Point anchor) {
     request_full_screen_refresh();
 }
 
-void DebugApp::add_sidebar_panel(SidebarPanelType type, std::optional<std::string> scope_filter,
+void DebugApp::add_panel_to_dock(PanelDock dock, SidebarPanelType type, std::optional<std::string> scope_filter,
                                  std::optional<BreakpointRowKind> breakpoint_filter,
                                  std::optional<ThreadPanelFilter> thread_filter,
                                  std::optional<std::int64_t> thread_id_filter,
                                  std::optional<std::string> thread_name_filter) {
-    if (sidebar_stack_ == nullptr) {
+    if (type == SidebarPanelType::Source) {
+        move_source_panel_to_dock(dock);
+        return;
+    }
+
+    StackedPane* stack = dock_stack(dock);
+    if (stack == nullptr) {
         return;
     }
 
@@ -3106,12 +3502,12 @@ void DebugApp::add_sidebar_panel(SidebarPanelType type, std::optional<std::strin
     config.thread_filter = thread_filter;
     config.thread_id_filter = thread_id_filter;
     config.thread_name_filter = thread_name_filter;
-    config.tab_label = make_panel_tab_label(config, sidebar_slot_configs());
+    config.tab_label = make_panel_tab_label(config, dock_slot_configs(dock));
 
     SidebarSlot slot;
     slot.config = config;
-    sidebar_slots_.push_back(std::move(slot));
-    SidebarSlot& new_slot = sidebar_slots_.back();
+    dock_slots(dock).push_back(std::move(slot));
+    SidebarSlot& new_slot = dock_slots(dock).back();
 
     const auto scroll_options = dap_theme_.scroll_view_options();
     ensure_sidebar_slot_panels(new_slot, scroll_options);
@@ -3127,107 +3523,42 @@ void DebugApp::add_sidebar_panel(SidebarPanelType type, std::optional<std::strin
 
     auto widget = release_sidebar_slot_widget(new_slot);
     widget->set_flex(1);
-    sidebar_stack_->append_entry(new_slot.config.tab_label, std::move(widget));
-    sidebar_stack_->set_active_index(sidebar_stack_->count() - 1);
+    stack->append_entry(new_slot.config.tab_label, std::move(widget));
+    stack->set_active_index(stack->count() - 1);
+    dock_stack_index(dock) = stack->active_index();
 
-    update_active_sidebar_panels();
-    model_.focus = focus_for_sidebar_index(sidebar_stack_->active_index());
+    update_active_panel_pointers();
+    model_.focus = focus_for_panel_type(type);
+    if (model_.focus == Focus::Repl) {
+        repl_input_focused_ = false;
+    }
     apply_focus();
     model_.status_message = "Added panel: " + new_slot.config.tab_label;
     sync_status_bar();
     request_repaint();
 }
 
-namespace {
-
-std::string make_bottom_tab_label(BottomPanelType type, const std::vector<BottomSlot>& existing) {
-    std::string base = panel_type_label(type);
-    int same = 0;
-    for (const BottomSlot& slot : existing) {
-        if (slot.type == type) {
-            ++same;
-        }
-    }
-    if (same > 0) {
-        base += " (" + std::to_string(same + 1) + ")";
-    }
-    return base;
-}
-
-std::string make_source_tab_label(const std::vector<SourceSlot>& existing, const std::string& preferred_title) {
-    std::string base = preferred_title.empty() ? panel_type_label(SourcePanelType::Source) : preferred_title;
-    int same = 0;
-    for (const SourceSlot& slot : existing) {
-        if (slot.tab_label == base || slot.tab_label.rfind(base + " (", 0) == 0) {
-            ++same;
-        }
-    }
-    if (same > 0) {
-        base += " (" + std::to_string(same + 1) + ")";
-    }
-    return base;
-}
-
-tuinator::Widget* bottom_panel_target(BottomPanelType type, tuinator::Widget* repl_shell, tuinator::Widget* console_shell) {
-    switch (type) {
-    case BottomPanelType::Repl:
-        return repl_shell;
-    case BottomPanelType::Console:
-        return console_shell;
-    }
-    return nullptr;
-}
-
-}  // namespace
-
 void DebugApp::init_default_bottom_slots() {
-    auto push_slot = [this](BottomPanelType type) {
-        BottomSlot slot;
-        slot.type = type;
-        slot.tab_label = make_bottom_tab_label(type, bottom_slots_);
+    for (SidebarPanelType type : {SidebarPanelType::Repl, SidebarPanelType::Console}) {
+        PanelSlotConfig config;
+        config.type = type;
+        config.id = next_slot_id_++;
+        config.tab_label = make_panel_tab_label(config, dock_slot_configs(PanelDock::Bottom));
+        SidebarSlot slot;
+        slot.config = std::move(config);
         bottom_slots_.push_back(std::move(slot));
-    };
-    push_slot(BottomPanelType::Repl);
-    push_slot(BottomPanelType::Console);
+    }
 }
 
 void DebugApp::init_default_source_slots() {
-    SourceSlot slot;
-    slot.type = SourcePanelType::Source;
-    slot.tab_label = panel_title_from_path(model_.source_path);
-    if (slot.tab_label.empty()) {
-        slot.tab_label = panel_type_label(SourcePanelType::Source);
-    }
+    PanelSlotConfig config;
+    config.type = SidebarPanelType::Source;
+    config.id = next_slot_id_++;
+    const std::string preferred = panel_title_from_path(model_.source_path);
+    config.tab_label = make_panel_tab_label(config, dock_slot_configs(PanelDock::Main), preferred);
+    SidebarSlot slot;
+    slot.config = std::move(config);
     source_slots_.push_back(std::move(slot));
-}
-
-void DebugApp::ensure_bottom_slot_widget(BottomSlot& slot) {
-    tuinator::Widget* target = bottom_panel_target(slot.type, repl_shell_.get(), console_shell_.get());
-    if (target != nullptr && slot.shared_host == nullptr) {
-        slot.shared_host = std::make_unique<SharedWidgetHost>(target);
-    }
-}
-
-std::unique_ptr<tuinator::Widget> DebugApp::release_bottom_slot_widget(BottomSlot& slot) {
-    ensure_bottom_slot_widget(slot);
-    if (slot.shared_host != nullptr) {
-        return std::move(slot.shared_host);
-    }
-    return std::make_unique<SharedWidgetHost>(nullptr);
-}
-
-void DebugApp::ensure_source_slot_widget(SourceSlot& slot) {
-    if (source_content_shell_ != nullptr && slot.shared_host == nullptr) {
-        slot.shared_host = std::make_unique<SharedWidgetHost>(source_content_shell_.get());
-    }
-}
-
-std::unique_ptr<tuinator::Widget> DebugApp::release_source_slot_widget(SourceSlot& slot) {
-    ensure_source_slot_widget(slot);
-    if (slot.shared_host != nullptr) {
-        return std::move(slot.shared_host);
-    }
-    return std::make_unique<SharedWidgetHost>(nullptr);
 }
 
 void DebugApp::sync_source_stack_title() {
@@ -3239,15 +3570,19 @@ void DebugApp::sync_source_stack_title() {
     if (source_section_ != nullptr) {
         source_section_->set_title(title);
     }
-    if (source_stack_ == nullptr || source_slots_.empty()) {
+    const std::optional<std::pair<PanelDock, int>> source_loc = find_source_panel_slot();
+    if (!source_loc.has_value()) {
         return;
     }
-    const int index = std::clamp(source_stack_index_, 0, static_cast<int>(source_slots_.size()) - 1);
-    if (source_slots_[static_cast<std::size_t>(index)].tab_label_customized) {
+
+    SidebarSlot& slot = dock_slots(source_loc->first)[static_cast<std::size_t>(source_loc->second)];
+    if (slot.tab_label_customized) {
         return;
     }
-    source_slots_[static_cast<std::size_t>(index)].tab_label = title;
-    source_stack_->set_entry_label(index, title);
+    slot.config.tab_label = title;
+    if (StackedPane* stack = dock_stack(source_loc->first); stack != nullptr) {
+        stack->set_entry_label(source_loc->second, title);
+    }
 }
 
 bool DebugApp::handle_stacked_pane_rename_key(const tuinator::Event& event) {
@@ -3259,119 +3594,15 @@ bool DebugApp::handle_stacked_pane_rename_key(const tuinator::Event& event) {
     return false;
 }
 
-void DebugApp::rename_sidebar_panel(int index, const std::string& label) {
-    if (SidebarSlot* slot = sidebar_slot_at(index)) {
+void DebugApp::rename_dock_panel(PanelDock dock, int index, const std::string& label) {
+    if (SidebarSlot* slot = dock_slot_at(dock, index)) {
         slot->config.tab_label = label;
+        if (slot->config.type == SidebarPanelType::Source) {
+            slot->tab_label_customized = true;
+        }
         model_.status_message = "Renamed panel: " + label;
         sync_status_bar();
     }
-}
-
-void DebugApp::rename_bottom_panel(int index, const std::string& label) {
-    if (index < 0 || index >= static_cast<int>(bottom_slots_.size())) {
-        return;
-    }
-    bottom_slots_[static_cast<std::size_t>(index)].tab_label = label;
-    model_.status_message = "Renamed panel: " + label;
-    sync_status_bar();
-}
-
-void DebugApp::rename_source_panel(int index, const std::string& label) {
-    if (index < 0 || index >= static_cast<int>(source_slots_.size())) {
-        return;
-    }
-    source_slots_[static_cast<std::size_t>(index)].tab_label = label;
-    source_slots_[static_cast<std::size_t>(index)].tab_label_customized = true;
-    model_.status_message = "Renamed panel: " + label;
-    sync_status_bar();
-}
-
-void DebugApp::show_add_bottom_panel_menu(tuinator::Point anchor) {
-    if (context_menu_ == nullptr) {
-        return;
-    }
-
-    std::vector<ContextMenu::Item> items;
-    items.push_back(ContextMenu::Item{
-        "REPL",
-        [this]() { add_bottom_panel(BottomPanelType::Repl); },
-    });
-    items.push_back(ContextMenu::Item{
-        "Console",
-        [this]() { add_bottom_panel(BottomPanelType::Console); },
-    });
-
-    context_menu_->open(anchor, overlay_clip_bounds(), std::move(items));
-    context_menu_->layout(overlay_clip_bounds());
-    request_full_screen_refresh();
-}
-
-void DebugApp::show_add_source_panel_menu(tuinator::Point anchor) {
-    if (context_menu_ == nullptr) {
-        return;
-    }
-
-    std::vector<ContextMenu::Item> items;
-    items.push_back(ContextMenu::Item{
-        "Source",
-        [this]() { add_source_panel(); },
-    });
-
-    context_menu_->open(anchor, overlay_clip_bounds(), std::move(items));
-    context_menu_->layout(overlay_clip_bounds());
-    request_full_screen_refresh();
-}
-
-void DebugApp::add_bottom_panel(BottomPanelType type) {
-    if (bottom_stack_ == nullptr) {
-        return;
-    }
-
-    BottomSlot slot;
-    slot.type = type;
-    slot.tab_label = make_bottom_tab_label(type, bottom_slots_);
-    bottom_slots_.push_back(std::move(slot));
-    BottomSlot& new_slot = bottom_slots_.back();
-
-    ensure_bottom_slot_widget(new_slot);
-    auto widget = release_bottom_slot_widget(new_slot);
-    widget->set_flex(1);
-    bottom_stack_->append_entry(new_slot.tab_label, std::move(widget));
-    bottom_stack_->set_active_index(bottom_stack_->count() - 1);
-
-    model_.focus = new_slot.type == BottomPanelType::Repl ? Focus::Repl : Focus::Console;
-    if (model_.focus == Focus::Repl) {
-        repl_input_focused_ = false;
-    }
-    apply_focus();
-    model_.status_message = "Added panel: " + new_slot.tab_label;
-    sync_status_bar();
-    request_repaint();
-}
-
-void DebugApp::add_source_panel() {
-    if (source_stack_ == nullptr) {
-        return;
-    }
-
-    SourceSlot slot;
-    slot.type = SourcePanelType::Source;
-    slot.tab_label = make_source_tab_label(source_slots_, panel_title_from_path(model_.source_path));
-    source_slots_.push_back(std::move(slot));
-    SourceSlot& new_slot = source_slots_.back();
-
-    ensure_source_slot_widget(new_slot);
-    auto widget = release_source_slot_widget(new_slot);
-    widget->set_flex(1);
-    source_stack_->append_entry(new_slot.tab_label, std::move(widget));
-    source_stack_->set_active_index(source_stack_->count() - 1);
-
-    source_stack_index_ = source_stack_->active_index();
-    model_.focus = Focus::Source;
-    apply_focus();
-    model_.status_message = "Added panel: " + new_slot.tab_label;
-    sync_status_bar();
-    request_repaint();
 }
 
 bool DebugApp::is_sidebar_focus(Focus focus) {
@@ -3381,110 +3612,18 @@ bool DebugApp::is_sidebar_focus(Focus focus) {
 
 Focus DebugApp::focus_for_sidebar_index(int index) {
     if (const SidebarSlot* slot = sidebar_slot_at(index)) {
-        switch (slot->config.type) {
-        case SidebarPanelType::Variables:
-            return Focus::Scopes;
-        case SidebarPanelType::Threads:
-            return Focus::Stacks;
-        case SidebarPanelType::Breakpoints:
-            return Focus::Breakpoints;
-        case SidebarPanelType::Watches:
-            return Focus::Watches;
-        }
+        return focus_for_panel_type(slot->config.type);
     }
     return Focus::Scopes;
 }
 
-int DebugApp::sidebar_index_for_focus(Focus focus) {
-    if (sidebar_stack_ != nullptr && sidebar_stack_index_ >= 0 &&
-        sidebar_stack_index_ < static_cast<int>(sidebar_slots_.size())) {
-        const SidebarSlot& active = sidebar_slots_[static_cast<std::size_t>(sidebar_stack_index_)];
-        switch (focus) {
-        case Focus::Scopes:
-            if (active.config.type == SidebarPanelType::Variables) {
-                return sidebar_stack_index_;
-            }
-            break;
-        case Focus::Stacks:
-            if (active.config.type == SidebarPanelType::Threads) {
-                return sidebar_stack_index_;
-            }
-            break;
-        case Focus::Breakpoints:
-            if (active.config.type == SidebarPanelType::Breakpoints) {
-                return sidebar_stack_index_;
-            }
-            break;
-        case Focus::Watches:
-            if (active.config.type == SidebarPanelType::Watches) {
-                return sidebar_stack_index_;
-            }
-            break;
-        default:
-            break;
-        }
-    }
-
-    for (std::size_t i = 0; i < sidebar_slots_.size(); ++i) {
-        const SidebarSlot& slot = sidebar_slots_[i];
-        switch (focus) {
-        case Focus::Scopes:
-            if (slot.config.type == SidebarPanelType::Variables) {
-                return static_cast<int>(i);
-            }
-            break;
-        case Focus::Stacks:
-            if (slot.config.type == SidebarPanelType::Threads) {
-                return static_cast<int>(i);
-            }
-            break;
-        case Focus::Breakpoints:
-            if (slot.config.type == SidebarPanelType::Breakpoints) {
-                return static_cast<int>(i);
-            }
-            break;
-        case Focus::Watches:
-            if (slot.config.type == SidebarPanelType::Watches) {
-                return static_cast<int>(i);
-            }
-            break;
-        default:
-            break;
-        }
-    }
-    return -1;
-}
+int DebugApp::sidebar_index_for_focus(Focus focus) { return dock_index_for_focus(PanelDock::Sidebar, focus); }
 
 void DebugApp::sync_stack_panes_to_focus() {
-    if (sidebar_stack_ != nullptr) {
-        const int sidebar_index = sidebar_index_for_focus(model_.focus);
-        if (sidebar_index >= 0 && sidebar_index != sidebar_stack_->active_index()) {
-            sidebar_stack_index_ = sidebar_index;
-            sidebar_stack_->set_active_index(sidebar_index);
-        }
-    }
-    if (bottom_stack_ != nullptr) {
-        int bottom_index = -1;
-        if (model_.focus == Focus::Repl || model_.focus == Focus::Console) {
-            const BottomPanelType wanted =
-                model_.focus == Focus::Console ? BottomPanelType::Console : BottomPanelType::Repl;
-            if (bottom_stack_index_ >= 0 && bottom_stack_index_ < static_cast<int>(bottom_slots_.size()) &&
-                bottom_slots_[static_cast<std::size_t>(bottom_stack_index_)].type == wanted) {
-                bottom_index = bottom_stack_index_;
-            } else {
-                for (std::size_t i = 0; i < bottom_slots_.size(); ++i) {
-                    if (bottom_slots_[i].type == wanted) {
-                        bottom_index = static_cast<int>(i);
-                        break;
-                    }
-                }
-            }
-        }
-        if (bottom_index >= 0 && bottom_index != bottom_stack_->active_index()) {
-            bottom_stack_index_ = bottom_index;
-            bottom_stack_->set_active_index(bottom_index);
-        }
-    }
+    sync_dock_stack_to_focus(PanelDock::Sidebar);
+    sync_dock_stack_to_focus(PanelDock::Main);
+    sync_dock_stack_to_focus(PanelDock::Bottom);
+    update_active_panel_pointers();
 }
 
 void DebugApp::cycle_sidebar_stack(int delta) {
@@ -4261,12 +4400,20 @@ void DebugApp::apply_focus() {
     if (source_panel_ != nullptr) {
         widgets.push_back(source_panel_);
     }
-    for (const SidebarSlot& slot : sidebar_slots_) {
-        if (slot.scopes != nullptr && slot.scopes->list_widget() != nullptr) {
-            widgets.push_back(slot.scopes->list_widget());
-        }
-        if (slot.watches != nullptr && slot.watches->list_widget() != nullptr) {
-            widgets.push_back(slot.watches->list_widget());
+    for (PanelDock dock : {PanelDock::Sidebar, PanelDock::Main, PanelDock::Bottom}) {
+        for (const SidebarSlot& slot : dock_slots(dock)) {
+            if (slot.scopes != nullptr && slot.scopes->list_widget() != nullptr) {
+                widgets.push_back(slot.scopes->list_widget());
+            }
+            if (slot.watches != nullptr && slot.watches->list_widget() != nullptr) {
+                widgets.push_back(slot.watches->list_widget());
+            }
+            if (slot.stacks != nullptr && slot.stacks->list_widget() != nullptr) {
+                widgets.push_back(slot.stacks->list_widget());
+            }
+            if (slot.breakpoints != nullptr && slot.breakpoints->list_widget() != nullptr) {
+                widgets.push_back(slot.breakpoints->list_widget());
+            }
         }
     }
     if (stacks_panel_ != nullptr && stacks_panel_->list_widget() != nullptr) {
@@ -4348,28 +4495,43 @@ void DebugApp::sync_focus_from_ui() {
         detected = Focus::Breakpoints;
         breakpoint_input_focused_ = breakpoints_panel_->has_inline_edit();
     } else {
-        bool sidebar_list_focused = false;
-        for (const SidebarSlot& slot : sidebar_slots_) {
-            if (slot.watches != nullptr && slot.watches->list_widget() != nullptr &&
-                slot.watches->list_widget()->is_focused()) {
-                detected = Focus::Watches;
-                watch_input_focused_ = slot.watches->has_inline_edit();
-                sidebar_list_focused = true;
-                break;
+        bool panel_list_focused = false;
+        for (PanelDock dock : {PanelDock::Sidebar, PanelDock::Main, PanelDock::Bottom}) {
+            for (const SidebarSlot& slot : dock_slots(dock)) {
+                if (slot.watches != nullptr && slot.watches->list_widget() != nullptr &&
+                    slot.watches->list_widget()->is_focused()) {
+                    detected = Focus::Watches;
+                    watch_input_focused_ = slot.watches->has_inline_edit();
+                    panel_list_focused = true;
+                    break;
+                }
+                if (slot.scopes != nullptr && slot.scopes->list_widget() != nullptr &&
+                    slot.scopes->list_widget()->is_focused()) {
+                    detected = Focus::Scopes;
+                    scope_input_focused_ = slot.scopes->has_inline_edit();
+                    panel_list_focused = true;
+                    break;
+                }
+                if (slot.stacks != nullptr && slot.stacks->list_widget() != nullptr &&
+                    slot.stacks->list_widget()->is_focused()) {
+                    detected = Focus::Stacks;
+                    panel_list_focused = true;
+                    break;
+                }
+                if (slot.breakpoints != nullptr && slot.breakpoints->list_widget() != nullptr &&
+                    slot.breakpoints->list_widget()->is_focused()) {
+                    detected = Focus::Breakpoints;
+                    breakpoint_input_focused_ = slot.breakpoints->has_inline_edit();
+                    panel_list_focused = true;
+                    break;
+                }
             }
-            if (slot.scopes != nullptr && slot.scopes->list_widget() != nullptr &&
-                slot.scopes->list_widget()->is_focused()) {
-                detected = Focus::Scopes;
-                scope_input_focused_ = slot.scopes->has_inline_edit();
-                sidebar_list_focused = true;
+            if (panel_list_focused) {
                 break;
             }
         }
-        if (!sidebar_list_focused) {
-            if (stacks_panel_ != nullptr && stacks_panel_->list_widget() != nullptr &&
-                stacks_panel_->list_widget()->is_focused()) {
-                detected = Focus::Stacks;
-            } else if (repl_panel_ != nullptr && repl_panel_->input_widget() != nullptr &&
+        if (!panel_list_focused) {
+            if (repl_panel_ != nullptr && repl_panel_->input_widget() != nullptr &&
                        repl_panel_->input_widget()->is_focused()) {
                 detected = Focus::Repl;
                 repl_input_focused_ = repl_panel_->input_active();
@@ -4418,18 +4580,24 @@ void DebugApp::mark_all_panels_dirty() {
         source_panel_->mark_dirty();
     }
     if (source_scroll_view_ != nullptr) {
-        source_scroll_view_->refresh_content();
         source_scroll_view_->mark_dirty();
     }
-    for (const SidebarSlot& slot : sidebar_slots_) {
-        if (slot.scopes != nullptr && slot.scopes->list_widget() != nullptr) {
-            slot.scopes->list_widget()->mark_dirty();
-        }
-        if (slot.watches != nullptr && slot.watches->list_widget() != nullptr) {
-            slot.watches->list_widget()->mark_dirty();
+    for (PanelDock dock : {PanelDock::Sidebar, PanelDock::Main, PanelDock::Bottom}) {
+        for (const SidebarSlot& slot : dock_slots(dock)) {
+            if (slot.scopes != nullptr && slot.scopes->list_widget() != nullptr) {
+                slot.scopes->list_widget()->mark_dirty();
+            }
+            if (slot.watches != nullptr && slot.watches->list_widget() != nullptr) {
+                slot.watches->list_widget()->mark_dirty();
+            }
+            if (slot.stacks != nullptr && slot.stacks->list_widget() != nullptr) {
+                slot.stacks->list_widget()->mark_dirty();
+            }
+            if (slot.breakpoints != nullptr && slot.breakpoints->list_widget() != nullptr) {
+                slot.breakpoints->list_widget()->mark_dirty();
+            }
         }
     }
-    refresh_scroll_views();
     if (stacks_panel_ != nullptr && stacks_panel_->list_widget() != nullptr) {
         stacks_panel_->list_widget()->mark_dirty();
     }
@@ -4453,6 +4621,7 @@ void DebugApp::mark_all_panels_dirty() {
     if (status_bar_ != nullptr) {
         status_bar_->mark_dirty();
     }
+    refresh_scroll_views(false);
 }
 
 void DebugApp::open_source_file(const std::string& path, int line, bool pin, std::int64_t source_reference) {
@@ -4541,14 +4710,13 @@ void DebugApp::open_source_file(const std::string& path, int line, bool pin, std
 
     cached_highlight_first_line_ = -1;
     highlight_request_first_line_ = -1;
+    if (source_scroll_view_ != nullptr && source_scroll_view_->bounds().height > 0) {
+        cached_source_viewport_height_ = source_scroll_view_->bounds().height;
+        cached_highlight_scroll_y_ = source_scroll_view_->scroll_y();
+    }
     maybe_request_source_highlight();
 
-    if (source_panel_ != nullptr) {
-        source_panel_->mark_dirty();
-    }
-    if (source_scroll_view_ != nullptr) {
-        source_scroll_view_->mark_dirty();
-    }
+    mark_source_view_dirty();
     sync_status_bar();
 }
 
@@ -4902,9 +5070,11 @@ std::vector<ThreadStackContent> DebugApp::build_thread_stack_contents() const {
 
 void DebugApp::sync_threads_list_panel() {
     const std::vector<ThreadStackContent> threads = build_thread_stack_contents();
-    for (SidebarSlot& slot : sidebar_slots_) {
-        if (slot.config.type == SidebarPanelType::Threads) {
-            sync_thread_slot(slot, threads);
+    for (PanelDock dock : {PanelDock::Sidebar, PanelDock::Main, PanelDock::Bottom}) {
+        for (SidebarSlot& slot : dock_slots(dock)) {
+            if (slot.config.type == SidebarPanelType::Threads) {
+                sync_thread_slot(slot, threads);
+            }
         }
     }
 }
@@ -4974,9 +5144,11 @@ std::vector<BreakpointRow> DebugApp::build_breakpoint_rows() const {
 
 void DebugApp::sync_breakpoints_list_panel() {
     const std::vector<BreakpointRow> rows = build_breakpoint_rows();
-    for (SidebarSlot& slot : sidebar_slots_) {
-        if (slot.config.type == SidebarPanelType::Breakpoints) {
-            sync_breakpoint_slot(slot, rows);
+    for (PanelDock dock : {PanelDock::Sidebar, PanelDock::Main, PanelDock::Bottom}) {
+        for (SidebarSlot& slot : dock_slots(dock)) {
+            if (slot.config.type == SidebarPanelType::Breakpoints) {
+                sync_breakpoint_slot(slot, rows);
+            }
         }
     }
 }
@@ -6616,13 +6788,15 @@ std::optional<std::int64_t> DebugApp::scope_container_for_local(const std::strin
         return std::nullopt;
     }
 
-    for (const SidebarSlot& slot : sidebar_slots_) {
-        if (slot.config.type != SidebarPanelType::Variables) {
-            continue;
-        }
-        for (const ScopeVariableRowMeta& row : slot.cached_scope_row_meta) {
-            if (row.variable_name == name && row.container_reference > 0) {
-                return row.container_reference;
+    for (PanelDock dock : {PanelDock::Sidebar, PanelDock::Main, PanelDock::Bottom}) {
+        for (const SidebarSlot& slot : dock_slots(dock)) {
+            if (slot.config.type != SidebarPanelType::Variables) {
+                continue;
+            }
+            for (const ScopeVariableRowMeta& row : slot.cached_scope_row_meta) {
+                if (row.variable_name == name && row.container_reference > 0) {
+                    return row.container_reference;
+                }
             }
         }
     }
@@ -7458,9 +7632,14 @@ void DebugApp::resolve_watches_from_locals() {
     }
 
     bool has_watches = false;
-    for (const SidebarSlot& slot : sidebar_slots_) {
-        if (slot.config.type == SidebarPanelType::Watches && !slot.watches_data.empty()) {
-            has_watches = true;
+    for (PanelDock dock : {PanelDock::Sidebar, PanelDock::Main, PanelDock::Bottom}) {
+        for (const SidebarSlot& slot : dock_slots(dock)) {
+            if (slot.config.type == SidebarPanelType::Watches && !slot.watches_data.empty()) {
+                has_watches = true;
+                break;
+            }
+        }
+        if (has_watches) {
             break;
         }
     }
@@ -7469,12 +7648,13 @@ void DebugApp::resolve_watches_from_locals() {
     }
 
     bool changed = false;
-    for (SidebarSlot& slot : sidebar_slots_) {
-        if (slot.config.type != SidebarPanelType::Watches) {
-            continue;
-        }
+    for (PanelDock dock : {PanelDock::Sidebar, PanelDock::Main, PanelDock::Bottom}) {
+        for (SidebarSlot& slot : dock_slots(dock)) {
+            if (slot.config.type != SidebarPanelType::Watches) {
+                continue;
+            }
 
-        std::vector<std::string> scope_rows = slot.cached_scope_rows;
+            std::vector<std::string> scope_rows = slot.cached_scope_rows;
         if (scope_rows.empty()) {
             std::vector<ScopeVariableRowMeta> meta;
             scope_rows = build_scope_rows(model_, expanded_scope_paths_, pending_scope_paths_, meta,
@@ -7510,6 +7690,7 @@ void DebugApp::resolve_watches_from_locals() {
                 changed = true;
             }
         }
+        }
     }
 
     if (changed) {
@@ -7535,25 +7716,28 @@ void DebugApp::append_console_text(const std::string& text, const std::string& c
 
 void DebugApp::remove_dollar_exception_watches() {
     bool changed = false;
-    for (SidebarSlot& slot : sidebar_slots_) {
-        if (slot.config.type != SidebarPanelType::Watches) {
-            continue;
-        }
-        for (auto it = slot.watches_data.begin(); it != slot.watches_data.end();) {
-            if (normalize_watch_expression(it->expression) != "$exception") {
-                ++it;
+    for (PanelDock dock : {PanelDock::Sidebar, PanelDock::Main, PanelDock::Bottom}) {
+        for (SidebarSlot& slot : dock_slots(dock)) {
+            if (slot.config.type != SidebarPanelType::Watches) {
                 continue;
             }
+            for (auto it = slot.watches_data.begin(); it != slot.watches_data.end();) {
+                if (normalize_watch_expression(it->expression) != "$exception") {
+                    ++it;
+                    continue;
+                }
 
-            const int index = static_cast<int>(std::distance(slot.watches_data.begin(), it));
-            if (watches_panel_ != nullptr && active_sidebar_slot() == &slot && editing_watch_index_ == index) {
-                finish_watch_input();
-            } else if (watches_panel_ != nullptr && active_sidebar_slot() == &slot && editing_watch_index_ > index) {
-                --editing_watch_index_;
+                const int index = static_cast<int>(std::distance(slot.watches_data.begin(), it));
+                if (watches_panel_ != nullptr && active_slot_for_focus() == &slot && editing_watch_index_ == index) {
+                    finish_watch_input();
+                } else if (watches_panel_ != nullptr && active_slot_for_focus() == &slot &&
+                           editing_watch_index_ > index) {
+                    --editing_watch_index_;
+                }
+
+                it = slot.watches_data.erase(it);
+                changed = true;
             }
-
-            it = slot.watches_data.erase(it);
-            changed = true;
         }
     }
 

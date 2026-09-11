@@ -14,24 +14,12 @@ std::string panel_type_label(SidebarPanelType type) {
         return "Threads";
     case SidebarPanelType::Breakpoints:
         return "Breakpoints";
-    }
-    return "Panel";
-}
-
-std::string panel_type_label(BottomPanelType type) {
-    switch (type) {
-    case BottomPanelType::Repl:
-        return "REPL";
-    case BottomPanelType::Console:
-        return "Console";
-    }
-    return "Panel";
-}
-
-std::string panel_type_label(SourcePanelType type) {
-    switch (type) {
-    case SourcePanelType::Source:
+    case SidebarPanelType::Source:
         return "Source";
+    case SidebarPanelType::Repl:
+        return "REPL";
+    case SidebarPanelType::Console:
+        return "Console";
     }
     return "Panel";
 }
@@ -60,8 +48,9 @@ std::string thread_filter_label(ThreadPanelFilter filter) {
     return "Thread";
 }
 
-std::string make_panel_tab_label(const PanelSlotConfig& config, const std::vector<PanelSlotConfig>& existing) {
-    std::string base = panel_type_label(config.type);
+std::string make_panel_tab_label(const PanelSlotConfig& config, const std::vector<PanelSlotConfig>& existing,
+                                 const std::string& preferred_base) {
+    std::string base = preferred_base.empty() ? panel_type_label(config.type) : preferred_base;
     if (config.scope_filter.has_value() && !config.scope_filter->empty()) {
         base += " · " + *config.scope_filter;
     }

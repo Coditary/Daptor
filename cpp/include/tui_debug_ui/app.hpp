@@ -58,19 +58,7 @@ struct SidebarSlot {
     std::vector<std::string> cached_scope_rows;
     std::vector<ScopeVariableRowMeta> cached_scope_row_meta;
     std::vector<WatchEntry> watches_data;
-};
-
-struct BottomSlot {
-    BottomPanelType type = BottomPanelType::Repl;
-    std::string tab_label;
-    std::unique_ptr<SharedWidgetHost> shared_host;
-};
-
-struct SourceSlot {
-    SourcePanelType type = SourcePanelType::Source;
-    std::string tab_label;
     bool tab_label_customized = false;
-    std::unique_ptr<SharedWidgetHost> shared_host;
 };
 
 /// Tuinator application wrapper for the tui-debug shell.
@@ -261,10 +249,26 @@ class DebugApp {
     void init_default_sidebar_slots();
     void ensure_sidebar_slot_panels(SidebarSlot& slot, const tuinator::ScrollViewOptions& scroll_options);
     std::unique_ptr<tuinator::Widget> release_sidebar_slot_widget(SidebarSlot& slot);
-    void update_active_sidebar_panels();
+    void update_active_panel_pointers();
+    [[nodiscard]] std::vector<SidebarSlot>& dock_slots(PanelDock dock);
+    [[nodiscard]] const std::vector<SidebarSlot>& dock_slots(PanelDock dock) const;
+    [[nodiscard]] StackedPane* dock_stack(PanelDock dock);
+    [[nodiscard]] int& dock_stack_index(PanelDock dock);
+    [[nodiscard]] std::vector<PanelSlotConfig> dock_slot_configs(PanelDock dock) const;
+    [[nodiscard]] SidebarSlot* dock_slot_at(PanelDock dock, int index);
+    [[nodiscard]] SidebarSlot* active_dock_slot(PanelDock dock);
+    [[nodiscard]] SidebarSlot* slot_by_id(std::uint64_t slot_id);
     [[nodiscard]] SidebarSlot* sidebar_slot_at(int index);
     [[nodiscard]] SidebarSlot* active_sidebar_slot();
     [[nodiscard]] SidebarSlot* sidebar_slot_by_id(std::uint64_t slot_id);
+    [[nodiscard]] static bool focus_matches_panel_type(Focus focus, SidebarPanelType type);
+    [[nodiscard]] static Focus focus_for_panel_type(SidebarPanelType type);
+    [[nodiscard]] int dock_index_for_focus(PanelDock dock, Focus focus) const;
+    void sync_dock_stack_to_focus(PanelDock dock);
+    [[nodiscard]] SidebarSlot* active_slot_for_focus();
+    [[nodiscard]] std::optional<std::pair<PanelDock, int>> find_source_panel_slot() const;
+    [[nodiscard]] bool has_source_panel() const;
+    void move_source_panel_to_dock(PanelDock dock);
     void refresh_all_scope_slots();
     void sync_scope_slot(SidebarSlot& slot);
     void sync_breakpoint_slot(SidebarSlot& slot, const std::vector<BreakpointRow>& rows);
@@ -273,34 +277,24 @@ class DebugApp {
     [[nodiscard]] std::vector<BreakpointRow> build_breakpoint_rows() const;
     [[nodiscard]] std::vector<ThreadStackContent> build_thread_stack_contents() const;
     [[nodiscard]] std::vector<WatchEntry>& active_watch_list();
-    void show_add_sidebar_panel_menu(tuinator::Point anchor);
-    void show_add_sidebar_scope_menu(SidebarPanelType type, tuinator::Point anchor);
-    void show_add_sidebar_breakpoint_menu(tuinator::Point anchor);
-    void show_add_sidebar_thread_menu(tuinator::Point anchor);
-    void add_sidebar_panel(SidebarPanelType type, std::optional<std::string> scope_filter = std::nullopt,
+    void show_add_panel_menu(tuinator::Point anchor, PanelDock dock);
+    void show_add_scope_menu(PanelDock dock, SidebarPanelType type, tuinator::Point anchor);
+    void show_add_breakpoint_menu(PanelDock dock, tuinator::Point anchor);
+    void show_add_thread_menu(PanelDock dock, tuinator::Point anchor);
+    void add_panel_to_dock(PanelDock dock, SidebarPanelType type,
+                           std::optional<std::string> scope_filter = std::nullopt,
                            std::optional<BreakpointRowKind> breakpoint_filter = std::nullopt,
                            std::optional<ThreadPanelFilter> thread_filter = std::nullopt,
                            std::optional<std::int64_t> thread_id_filter = std::nullopt,
                            std::optional<std::string> thread_name_filter = std::nullopt);
-    void rename_sidebar_panel(int index, const std::string& label);
-    void rename_bottom_panel(int index, const std::string& label);
-    void rename_source_panel(int index, const std::string& label);
+    void rename_dock_panel(PanelDock dock, int index, const std::string& label);
     void init_default_bottom_slots();
     void init_default_source_slots();
-    void ensure_bottom_slot_widget(BottomSlot& slot);
-    void ensure_source_slot_widget(SourceSlot& slot);
-    std::unique_ptr<tuinator::Widget> release_bottom_slot_widget(BottomSlot& slot);
-    std::unique_ptr<tuinator::Widget> release_source_slot_widget(SourceSlot& slot);
-    void show_add_bottom_panel_menu(tuinator::Point anchor);
-    void show_add_source_panel_menu(tuinator::Point anchor);
-    void add_bottom_panel(BottomPanelType type);
-    void add_source_panel();
     void sync_source_stack_title();
     void wire_scopes_panel(ScopesPanel& panel, SidebarSlot& slot);
     void wire_watches_panel(WatchesPanel& panel, SidebarSlot& slot);
     void wire_breakpoints_panel(BreakpointsPanel& panel);
     void wire_stacks_panel(StacksPanel& panel);
-    [[nodiscard]] std::vector<PanelSlotConfig> sidebar_slot_configs() const;
     [[nodiscard]] static bool is_sidebar_focus(Focus focus);
     [[nodiscard]] Focus focus_for_sidebar_index(int index);
     [[nodiscard]] int sidebar_index_for_focus(Focus focus);
@@ -312,10 +306,12 @@ class DebugApp {
     void on_split_drag_ended();
     void request_full_screen_refresh();
     void request_repaint();
+    void mark_source_view_dirty();
+    void refresh_source_highlight_if_needed();
     void sync_controls_bar();
     bool is_session_stopped() const;
     void mark_all_panels_dirty();
-    void refresh_scroll_views();
+    void refresh_scroll_views(bool include_source = true);
     void add_watch(const std::string& expression);
     void submit_watch_expression(const std::string& expression);
     void begin_edit_watch_at(int index);
@@ -378,8 +374,8 @@ class DebugApp {
     BreakpointsPanel* breakpoints_panel_ = nullptr;
     WatchesPanel* watches_panel_ = nullptr;
     std::vector<SidebarSlot> sidebar_slots_;
-    std::vector<BottomSlot> bottom_slots_;
-    std::vector<SourceSlot> source_slots_;
+    std::vector<SidebarSlot> bottom_slots_;
+    std::vector<SidebarSlot> source_slots_;
     std::uint64_t next_slot_id_ = 1;
     std::unique_ptr<tuinator::Widget> repl_shell_;
     std::unique_ptr<tuinator::Widget> console_shell_;
@@ -445,6 +441,8 @@ class DebugApp {
     int highlight_request_line_count_ = -1;
     int cached_highlight_scroll_y_ = -1;
     int highlight_request_scroll_y_ = -1;
+    int cached_source_viewport_height_ = -1;
+    bool source_layout_settling_ = false;
     std::uint64_t snapshot_generation_ = 0;
     std::string last_logged_exception_key_;
     std::string scope_variables_signature_;

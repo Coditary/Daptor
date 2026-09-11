@@ -384,6 +384,35 @@ void StackedPane::append_entry(std::string label, std::unique_ptr<tuinator::Widg
     mark_dirty();
 }
 
+void StackedPane::remove_entry(int index) {
+    if (index < 0 || index >= count()) {
+        return;
+    }
+    if (count() == 1 && entries_[0].widget == nullptr) {
+        return;
+    }
+
+    const int previous_active = active_index_;
+    entries_.erase(entries_.begin() + index);
+    if (entries_.empty()) {
+        entries_.push_back(EntryData{"", nullptr});
+    }
+
+    if (active_index_ > index) {
+        active_index_--;
+    } else if (active_index_ == index) {
+        active_index_ = std::min(index, count() - 1);
+    }
+    active_index_ = std::clamp(active_index_, 0, count() - 1);
+
+    ensure_active_tab_visible();
+    layout(bounds_);
+    mark_dirty();
+    if (active_index_ != previous_active) {
+        notify_active_changed();
+    }
+}
+
 void StackedPane::set_entry_label(int index, std::string label) {
     if (index < 0 || index >= count()) {
         return;

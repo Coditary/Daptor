@@ -39,6 +39,7 @@ class StackedPane : public tuinator::Widget {
     void set_add_action(std::function<void()> callback);
     void set_rename_action(std::function<void(int index, const std::string& label)> callback);
     void append_entry(std::string label, std::unique_ptr<tuinator::Widget> widget);
+    void remove_entry(int index);
     void set_entry_label(int index, std::string label);
     void propagate_on_dirty(std::function<void(tuinator::Rect)> callback);
     [[nodiscard]] bool is_renaming() const { return rename_index_ >= 0; }
