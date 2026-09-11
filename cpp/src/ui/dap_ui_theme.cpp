@@ -19,6 +19,7 @@ DapUiTheme::DapUiTheme() {
     thread_stopped = bold(thread_stopped);
     breakpoint_marker = bold(breakpoint_marker);
     breakpoint_condition = bold(breakpoint_condition);
+    breakpoint_hit_condition = bold(breakpoint_hit_condition);
     breakpoint_file = bold(breakpoint_file);
     title_scopes = bold(title_scopes);
     title_stacks = bold(title_stacks);

@@ -161,13 +161,16 @@ class RustSessionBackend final : public SessionBackend {
     }
 
     bool set_breakpoints(const std::string& path, const std::string& lines_json,
-                         std::string& error_out) override {
+                         std::string& error_out, std::string& results_out) override {
         if (session_ == nullptr) {
             error_out = "no session";
             return false;
         }
 
-        if (tui_debug_set_breakpoints(session_, path.c_str(), lines_json.c_str()) == 0) {
+        char results_buffer[4096];
+        if (tui_debug_set_breakpoints(session_, path.c_str(), lines_json.c_str(), results_buffer,
+                                      sizeof(results_buffer)) == 0) {
+            results_out = results_buffer;
             return true;
         }
 

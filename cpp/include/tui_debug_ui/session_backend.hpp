@@ -44,7 +44,7 @@ class SessionBackend {
     virtual bool set_variable(std::int64_t variables_reference, const std::string& name, const std::string& value,
                               std::string& result_out, std::string& error_out) = 0;
     virtual bool set_breakpoints(const std::string& path, const std::string& lines_json,
-                                 std::string& error_out) = 0;
+                                 std::string& error_out, std::string& results_out) = 0;
     virtual std::optional<std::string> fetch_variables_json(std::int64_t variables_reference) = 0;
     virtual std::optional<std::string> fetch_source(std::int64_t source_reference) = 0;
     virtual std::optional<std::string> highlight_viewport(const std::string& language, const std::string& source,

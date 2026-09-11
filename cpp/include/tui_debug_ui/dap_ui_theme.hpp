@@ -32,6 +32,8 @@ struct DapUiTheme {
     tuinator::Style breakpoint_file{tuinator::style_fg_bg(tuinator::Rgb{0, 220, 220}, kBackground)};
     tuinator::Style breakpoint_line_number{tuinator::style_fg_bg(tuinator::Rgb{120, 200, 140}, kBackground)};
     tuinator::Style breakpoint_condition{tuinator::style_fg_bg(tuinator::Rgb{255, 200, 80}, kBackground)};
+    tuinator::Style breakpoint_hit_condition{tuinator::style_fg_bg(tuinator::Rgb{200, 160, 255}, kBackground)};
+    tuinator::Style breakpoint_hit_count{tuinator::style_fg_bg(tuinator::Rgb{140, 140, 155}, kBackground)};
     tuinator::Style console_stderr{tuinator::style_fg_bg(tuinator::Rgb{255, 120, 120}, kBackground)};
     tuinator::Style console_stdout{tuinator::style_fg_bg(tuinator::Rgb{180, 220, 180}, kBackground)};
     tuinator::Style console_event{tuinator::style_fg_bg(tuinator::Rgb{140, 180, 220}, kBackground)};

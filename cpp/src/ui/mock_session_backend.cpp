@@ -410,13 +410,14 @@ class MockSessionBackend final : public SessionBackend {
     }
 
     bool set_breakpoints(const std::string& path, const std::string& lines_json,
-                         std::string& error_out) override {
+                         std::string& error_out, std::string& results_out) override {
         (void)path;
         if (!launched_) {
             error_out = "mock session not launched";
             return false;
         }
 
+        results_out = "[]";
         breakpoints_.clear();
         std::size_t pos = 0;
         while (pos < lines_json.size()) {

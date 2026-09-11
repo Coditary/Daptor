@@ -44,7 +44,7 @@ BreakpointsPanel::BreakpointsPanel(const DapUiTheme& theme, tuinator::ScrollView
     list_->set_row_action_layout(ListRowActionLayout::BreakpointRow);
     list_->set_row_action_edit_state([this](int index) {
         const BreakpointRow* row = breakpoint_at_display_index(index);
-        return row != nullptr && !row->condition.empty();
+        return row != nullptr && (!row->condition.empty() || !row->hit_condition.empty());
     });
     list_->set_on_row_action([this](int index, RowActionType action) {
         const BreakpointRow* row = breakpoint_at_display_index(index);
@@ -115,6 +115,9 @@ void BreakpointsPanel::set_breakpoints(std::vector<BreakpointRow> rows) {
         if (!row.source_text.empty()) {
             entry += " " + row.source_text;
         }
+        if (row.hit_condition.empty() && row.hit_count > 0) {
+            entry += "  (" + std::to_string(row.hit_count) + "×)";
+        }
         items.push_back(std::move(entry));
         display_to_row.push_back(static_cast<int>(index));
 
@@ -122,12 +125,17 @@ void BreakpointsPanel::set_breakpoints(std::vector<BreakpointRow> rows) {
             items.push_back("    when " + row.condition);
             display_to_row.push_back(static_cast<int>(index));
         }
+
+        if (!row.hit_condition.empty()) {
+            std::string hit_line = "    hit " + row.hit_condition + " (" + std::to_string(row.hit_count) + ")";
+            items.push_back(std::move(hit_line));
+            display_to_row.push_back(static_cast<int>(index));
+        }
     }
 
     display_to_row_ = std::move(display_to_row);
-    if (list_->items() != items) {
-        list_->assign_items(std::move(items));
-    }
+    list_->assign_items(std::move(items));
+    list_->mark_dirty();
 }
 
 void BreakpointsPanel::set_on_activate(ActivateCallback callback) { on_activate_ = std::move(callback); }

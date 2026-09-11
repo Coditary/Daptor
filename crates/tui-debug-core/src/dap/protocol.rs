@@ -131,6 +131,8 @@ pub struct StoppedEventBody {
     pub thread_id: i64,
     pub reason: String,
     pub description: Option<String>,
+    #[serde(rename = "hitBreakpointIds", default)]
+    pub hit_breakpoint_ids: Vec<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

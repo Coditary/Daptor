@@ -2,9 +2,17 @@
 
 #include "tui_debug_ui/debug_ui_model.hpp"
 
+#include <cstdint>
 #include <string>
+#include <vector>
 
 namespace tui_debug_ui {
+
+struct BreakpointHitUpdate {
+    std::string path;
+    int line = 0;
+    std::uint64_t hit_count = 0;
+};
 
 /// Parse poll/sync JSON envelopes into `model`.
 ///
@@ -22,5 +30,8 @@ std::vector<VariableInfo> parse_variables_json(const std::string& json);
 /// Apply scope-variable batch JSON from the session worker:
 /// `{"signature":"...","variables":{"3":[...],"4":[...]}}`.
 bool apply_scope_variables_batch(DebugUiModel& model, const std::string& signature, const std::string& json);
+
+/// Parse `breakpoint_hits` from a poll/sync JSON envelope.
+std::vector<BreakpointHitUpdate> parse_breakpoint_hits_from_poll_json(const std::string& json);
 
 }  // namespace tui_debug_ui

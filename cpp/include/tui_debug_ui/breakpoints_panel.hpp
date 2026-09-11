@@ -27,6 +27,8 @@ struct BreakpointRow {
     int line = 0;
     std::string source_text;
     std::string condition;
+    std::string hit_condition;
+    std::uint64_t hit_count = 0;
 };
 
 struct DapUiTheme;

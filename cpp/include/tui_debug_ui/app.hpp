@@ -64,13 +64,17 @@ class DebugApp {
     void poll_session();
     void maybe_refresh_source_highlight_for_scroll();
     [[nodiscard]] bool context_menu_open() const;
+    [[nodiscard]] bool breakpoint_prompt_active() const;
+    [[nodiscard]] bool overlay_intercepts_events() const;
     bool handle_overlay_event(const tuinator::Event& event);
     void paint_overlay(tuinator::PaintContext& ctx) const;
 
     [[nodiscard]] bool is_watch_input_focused() const;
+    [[nodiscard]] bool is_breakpoint_input_focused() const;
     [[nodiscard]] bool is_scope_input_focused() const;
     [[nodiscard]] bool should_block_app_quit_key(const tuinator::KeyPress& key) const;
     void blur_watch_input();
+    void blur_breakpoint_input(bool cancelled = true);
     void blur_scope_input();
 
   private:
@@ -108,11 +112,15 @@ class DebugApp {
     void toggle_breakpoint_at(const std::string& path, int line);
     void remove_breakpoint_at(const std::string& path, int line);
     void set_breakpoint_condition(const std::string& path, int line, const std::string& condition);
+    void set_breakpoint_hit_condition(const std::string& path, int line, const std::string& hit_condition);
     void begin_edit_breakpoint_condition(const std::string& path, int line);
+    void begin_edit_breakpoint_hit_condition(const std::string& path, int line);
     void submit_breakpoint_condition(const std::string& condition);
     void capture_breakpoint_input_state();
     void restore_breakpoint_input_state();
-    [[nodiscard]] bool is_breakpoint_input_focused() const;
+    void sync_breakpoint_prompt();
+    void layout_breakpoint_prompt();
+    [[nodiscard]] tuinator::Rect breakpoint_prompt_bounds() const;
     void begin_edit_variable(const std::string& variable_name);
     void submit_variable_value(const std::string& value);
     void capture_scope_input_state();
@@ -143,6 +151,13 @@ class DebugApp {
     void open_source_file(const std::string& path, int line, bool pin, std::int64_t source_reference = 0);
     void maybe_follow_execution();
     void sync_breakpoints_list_panel();
+    void apply_breakpoint_hit_counts(const std::string& path, const std::string& results_json);
+    void apply_breakpoint_hits_from_snapshot_json(const std::string& json);
+    void apply_breakpoint_hit_entry(const std::string& path, int line, std::uint64_t hit_count);
+    int find_breakpoint_line_at_stop(const BreakpointsByPath::mapped_type& breakpoints, int execution_line) const;
+    void record_breakpoint_hit();
+    void refresh_breakpoint_hit_counts_from_session();
+    BreakpointsByPath::iterator find_breakpoints_path(const std::string& path);
     void apply_execution_command_started(const char* op);
     bool has_active_session() const;
     bool handle_layout_resize_key(const tuinator::KeyPress& key);
@@ -205,6 +220,7 @@ class DebugApp {
     std::unique_ptr<BreakpointsPanel> breakpoints_panel_;
     std::unique_ptr<WatchesPanel> watches_panel_;
     std::unique_ptr<ContextMenu> context_menu_;
+    std::unique_ptr<tuinator::TextInput> breakpoint_prompt_input_;
     std::unique_ptr<TitledScrollPane> source_section_;
     SourcePanel* source_panel_ = nullptr;
     tuinator::ScrollView* source_scroll_view_ = nullptr;
@@ -221,6 +237,7 @@ class DebugApp {
     bool breakpoint_input_focused_ = false;
     std::string editing_breakpoint_path_;
     int editing_breakpoint_line_ = 0;
+    bool editing_breakpoint_hit_ = false;
     std::string scope_input_draft_;
     bool scope_input_focused_ = false;
     std::string editing_variable_name_;
@@ -259,6 +276,16 @@ class DebugApp {
     };
     std::optional<PendingSourceContextMenu> pending_source_context_menu_;
     bool goto_targets_pending_ = false;
+    struct BreakpointStopRecord {
+        std::string path;
+        std::uint32_t line = 0;
+        std::int64_t thread_id = 0;
+
+        bool operator==(const BreakpointStopRecord& other) const {
+            return path == other.path && line == other.line && thread_id == other.thread_id;
+        }
+    };
+    std::optional<BreakpointStopRecord> last_counted_breakpoint_stop_;
     std::unordered_map<std::string, std::vector<HighlightedLine>> source_plain_lines_cache_;
     BreakpointsByPath breakpoints_by_path_;
     std::chrono::steady_clock::time_point last_spinner_update_{};

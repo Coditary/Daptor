@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -59,6 +60,52 @@ fn sibling_source_path(program: &Path) -> Option<PathBuf> {
     None
 }
 
+fn parse_lldb_breakpoint_list(output: &str) -> Vec<(String, u32, u32)> {
+    let mut results = Vec::new();
+    for line in output.lines() {
+        if !line.contains("hit count =") {
+            continue;
+        }
+        let Some(file_start) = line.find("file = '") else {
+            continue;
+        };
+        let file_body = &line[file_start + 8..];
+        let Some(file_end) = file_body.find('\'') else {
+            continue;
+        };
+        let path = file_body[..file_end].to_string();
+
+        let Some(line_start) = line.find("line = ") else {
+            continue;
+        };
+        let line_body = line[line_start + 7..].trim_start();
+        let line_digits = line_body
+            .chars()
+            .take_while(|ch| ch.is_ascii_digit())
+            .collect::<String>();
+        let Ok(bp_line) = line_digits.parse::<u32>() else {
+            continue;
+        };
+
+        let Some(hit_start) = line.find("hit count = ") else {
+            continue;
+        };
+        let hit_body = line[hit_start + 12..].trim_start();
+        let hit_digits = hit_body
+            .chars()
+            .take_while(|ch| ch.is_ascii_digit())
+            .collect::<String>();
+        let Ok(hit_count) = hit_digits.parse::<u32>() else {
+            continue;
+        };
+
+        if bp_line > 0 {
+            results.push((path, bp_line, hit_count));
+        }
+    }
+    results
+}
+
 fn lldb_init_breakpoint_commands(program: &Path) -> Vec<String> {
     if let Some(source) = sibling_source_path(program) {
         return vec![format!(
@@ -91,6 +138,24 @@ pub struct ThreadStackTrace {
 pub struct SourceBreakpoint {
     pub line: u32,
     pub condition: Option<String>,
+    pub hit_condition: Option<String>,
+}
+
+/// Adapter response for one source breakpoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceBreakpointResult {
+    pub id: Option<i64>,
+    pub line: u32,
+    pub verified: bool,
+    pub hit_count: Option<u32>,
+}
+
+/// Cached hit count for a source breakpoint (from DAP `hitCount` / `breakpoint` events).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BreakpointHitInfo {
+    pub path: String,
+    pub line: u32,
+    pub hit_count: u32,
 }
 
 /// Snapshot of debugger state at a stop point.
@@ -105,6 +170,8 @@ pub struct SessionSnapshot {
     pub variables: Vec<Variable>,
     #[serde(default)]
     pub capabilities: AdapterCapabilities,
+    #[serde(default)]
+    pub breakpoint_hits: Vec<BreakpointHitInfo>,
 }
 
 /// Owns the Dap transport and implements the debug session lifecycle.
@@ -120,6 +187,9 @@ pub struct DebugSession {
     supports_step_back: bool,
     supports_goto_targets: bool,
     adapter: DebugAdapterKind,
+    breakpoint_hit_counts: HashMap<(String, u32), u32>,
+    breakpoint_ids: HashMap<i64, (String, u32)>,
+    last_breakpoint_requests: HashMap<String, Vec<SourceBreakpoint>>,
 }
 
 impl DebugSession {
@@ -145,6 +215,9 @@ impl DebugSession {
             supports_step_back: false,
             supports_goto_targets: false,
             adapter: DebugAdapterKind::Debugpy,
+            breakpoint_hit_counts: HashMap::new(),
+            breakpoint_ids: HashMap::new(),
+            last_breakpoint_requests: HashMap::new(),
         };
 
         session.initialize_and_launch()?;
@@ -173,6 +246,9 @@ impl DebugSession {
             supports_step_back: false,
             supports_goto_targets: false,
             adapter: DebugAdapterKind::Lldb,
+            breakpoint_hit_counts: HashMap::new(),
+            breakpoint_ids: HashMap::new(),
+            last_breakpoint_requests: HashMap::new(),
         };
 
         session.initialize_and_launch()?;
@@ -278,6 +354,7 @@ impl DebugSession {
             SessionState::Exited | SessionState::Disconnected => {
                 Ok(self.empty_state_snapshot(self.state.clone()))
             }
+            SessionState::Stopped { .. } => self.enrich_stopped_snapshot(),
             _ => self.refresh_snapshot(),
         }
     }
@@ -312,7 +389,142 @@ impl DebugSession {
             supports_step_in_targets: self.supports_step_in_targets,
             supports_goto_targets: self.supports_goto_targets,
         };
+        snapshot.breakpoint_hits = self.collect_breakpoint_hits();
         snapshot
+    }
+
+    fn record_breakpoint_hit_count(&mut self, path: &str, line: u32, hit_count: u32) {
+        if line == 0 {
+            return;
+        }
+        let key = (path.to_string(), line);
+        self.breakpoint_hit_counts
+            .entry(key)
+            .and_modify(|count| *count = (*count).max(hit_count))
+            .or_insert(hit_count);
+    }
+
+    fn collect_breakpoint_hits(&self) -> Vec<BreakpointHitInfo> {
+        self.breakpoint_hit_counts
+            .iter()
+            .map(|((path, line), hit_count)| BreakpointHitInfo {
+                path: path.clone(),
+                line: *line,
+                hit_count: *hit_count,
+            })
+            .collect()
+    }
+
+    fn apply_source_breakpoint_results(
+        &mut self,
+        path: &str,
+        request_lines: &[u32],
+        results: &[SourceBreakpointResult],
+    ) {
+        for (index, breakpoint) in results.iter().enumerate() {
+            let line = if breakpoint.line > 0 {
+                breakpoint.line
+            } else {
+                request_lines.get(index).copied().unwrap_or(0)
+            };
+            if line == 0 {
+                continue;
+            }
+            if let Some(id) = breakpoint.id {
+                self.breakpoint_ids.insert(id, (path.to_string(), line));
+            }
+            if let Some(hit_count) = breakpoint.hit_count {
+                self.record_breakpoint_hit_count(path, line, hit_count);
+            }
+        }
+    }
+
+    fn handle_breakpoint_event(&mut self, body: &serde_json::Value) {
+        let breakpoint = body.get("breakpoint");
+        let line = breakpoint
+            .and_then(|value| value.get("line"))
+            .and_then(|value| value.as_u64())
+            .map(|value| value as u32);
+        let hit_count = breakpoint
+            .and_then(|value| value.get("hitCount"))
+            .and_then(|value| value.as_u64())
+            .map(|value| value as u32);
+        let path = breakpoint
+            .and_then(|value| value.get("source"))
+            .and_then(|value| value.get("path"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        let id = breakpoint
+            .and_then(|value| value.get("id"))
+            .and_then(|value| value.as_i64());
+
+        let resolved = match (path, line) {
+            (Some(path), Some(line)) if line > 0 => Some((path, line)),
+            _ => id.and_then(|breakpoint_id| self.breakpoint_ids.get(&breakpoint_id).cloned()),
+        };
+
+        if let (Some((path, line)), Some(hit_count)) = (resolved, hit_count) {
+            if line > 0 {
+                self.breakpoint_hit_counts.insert((path, line), hit_count);
+            }
+        }
+    }
+
+    fn refresh_breakpoint_hit_counts(&mut self) {
+        let requests = self
+            .last_breakpoint_requests
+            .iter()
+            .map(|(path, breakpoints)| (path.clone(), breakpoints.clone()))
+            .collect::<Vec<_>>();
+
+        for (path, breakpoints) in requests {
+            if breakpoints.is_empty() {
+                continue;
+            }
+            let _ = self.set_source_breakpoints(Path::new(&path), &breakpoints);
+        }
+    }
+
+    fn update_lldb_hit_counts_from_break_list(&mut self, frame_id: i64) {
+        for command in ["!breakpoint list", "`breakpoint list`", "!break list", "breakpoint list"] {
+            let output = match self.evaluate(command, frame_id, "repl") {
+                Ok(output) => output,
+                Err(_) => continue,
+            };
+            let parsed = parse_lldb_breakpoint_list(&output);
+            if parsed.is_empty() {
+                continue;
+            }
+            for (path, line, hit_count) in parsed {
+                if line > 0 {
+                    self.breakpoint_hit_counts.insert((path, line), hit_count);
+                }
+            }
+            return;
+        }
+        warn!("failed to query lldb breakpoint hit counts");
+    }
+
+    fn enrich_stopped_snapshot(&mut self) -> Result<SessionSnapshot> {
+        self.refresh_breakpoint_hit_counts();
+
+        let mut snapshot = self.refresh_snapshot()?;
+        if self.adapter == DebugAdapterKind::Lldb {
+            if let Some(frame_id) = snapshot.stack_frames.first().map(|frame| frame.id) {
+                self.update_lldb_hit_counts_from_break_list(frame_id);
+                snapshot.breakpoint_hits = self.collect_breakpoint_hits();
+            }
+        }
+        Ok(snapshot)
+    }
+
+    fn snapshot_after_stop(&mut self, stopped: StoppedEventBody) -> Result<SessionSnapshot> {
+        self.state = SessionState::Stopped {
+            thread_id: stopped.thread_id,
+            reason: stopped.reason.clone(),
+        };
+        self.active_thread = Some(stopped.thread_id);
+        self.enrich_stopped_snapshot()
     }
 
     fn empty_state_snapshot(&self, state: SessionState) -> SessionSnapshot {
@@ -324,6 +536,7 @@ impl DebugSession {
             scopes: vec![],
             variables: vec![],
             capabilities: AdapterCapabilities::default(),
+            breakpoint_hits: vec![],
         })
     }
 
@@ -362,12 +575,7 @@ impl DebugSession {
                             "stopped" => {
                                 let stopped = serde_json::from_value::<StoppedEventBody>(body)
                                     .context("invalid stopped event body")?;
-                                self.state = SessionState::Stopped {
-                                    thread_id: stopped.thread_id,
-                                    reason: stopped.reason,
-                                };
-                                self.active_thread = Some(stopped.thread_id);
-                                return Ok(Some(self.refresh_snapshot()?));
+                                return Ok(Some(self.snapshot_after_stop(stopped)?));
                             }
                             "terminated" | "exited" => {
                                 if Self::is_restart_event(&body) {
@@ -390,6 +598,9 @@ impl DebugSession {
                                 if self.handle_thread_event(&body)? {
                                     return Ok(None);
                                 }
+                            }
+                            "breakpoint" => {
+                                self.handle_breakpoint_event(&body);
                             }
                             other => {
                                 info!("event: {other}");
@@ -424,12 +635,7 @@ impl DebugSession {
                     "stopped" => {
                         let stopped = serde_json::from_value::<StoppedEventBody>(body)
                             .context("invalid stopped event body")?;
-                        self.state = SessionState::Stopped {
-                            thread_id: stopped.thread_id,
-                            reason: stopped.reason,
-                        };
-                        self.active_thread = Some(stopped.thread_id);
-                        return Ok(Some(self.refresh_snapshot()?));
+                        return Ok(Some(self.snapshot_after_stop(stopped)?));
                     }
                     "terminated" | "exited" => {
                         if Self::is_restart_event(&body) {
@@ -451,6 +657,9 @@ impl DebugSession {
                         if self.handle_thread_event(&body)? {
                             return Ok(Some(self.empty_state_snapshot(SessionState::Exited)));
                         }
+                    }
+                    "breakpoint" => {
+                        self.handle_breakpoint_event(&body);
                     }
                     other => {
                         info!("event: {other}");
@@ -533,6 +742,7 @@ impl DebugSession {
             scopes,
             variables,
             capabilities: AdapterCapabilities::default(),
+            breakpoint_hits: vec![],
         }))
     }
 
@@ -836,10 +1046,15 @@ impl DebugSession {
 
     /// Push UI breakpoints for one source file to the debug adapter.
     pub fn set_source_breakpoints(
-        &self,
+        &mut self,
         path: &std::path::Path,
         breakpoints: &[SourceBreakpoint],
-    ) -> Result<Vec<(u32, bool)>> {
+    ) -> Result<Vec<SourceBreakpointResult>> {
+        let path_key = path.to_string_lossy().to_string();
+        let request_lines: Vec<u32> = breakpoints.iter().map(|breakpoint| breakpoint.line).collect();
+        self.last_breakpoint_requests
+            .insert(path_key.clone(), breakpoints.to_vec());
+
         let breakpoints: Vec<serde_json::Value> = breakpoints
             .iter()
             .map(|breakpoint| {
@@ -847,6 +1062,11 @@ impl DebugSession {
                 if let Some(condition) = &breakpoint.condition {
                     if !condition.is_empty() {
                         payload["condition"] = json!(condition);
+                    }
+                }
+                if let Some(hit_condition) = &breakpoint.hit_condition {
+                    if !hit_condition.is_empty() {
+                        payload["hitCondition"] = json!(hit_condition);
                     }
                 }
                 payload
@@ -868,16 +1088,26 @@ impl DebugSession {
         }
         #[derive(Deserialize)]
         struct BpInfo {
+            id: Option<i64>,
             line: u32,
             verified: bool,
+            #[serde(rename = "hitCount")]
+            hit_count: Option<u32>,
         }
 
         let parsed = serde_json::from_value::<BpResponse>(body)?;
-        Ok(parsed
+        let results = parsed
             .breakpoints
             .into_iter()
-            .map(|bp| (bp.line, bp.verified))
-            .collect())
+            .map(|bp| SourceBreakpointResult {
+                id: bp.id,
+                line: bp.line,
+                verified: bp.verified,
+                hit_count: bp.hit_count,
+            })
+            .collect::<Vec<_>>();
+        self.apply_source_breakpoint_results(&path_key, &request_lines, &results);
+        Ok(results)
     }
 
     pub fn shutdown(&mut self) -> Result<()> {
@@ -1127,6 +1357,7 @@ mod lifecycle_tests {
                 &[SourceBreakpoint {
                     line: 20,
                     condition: None,
+                    hit_condition: None,
                 }],
             )
             .expect("set breakpoint on json.dumps line");
@@ -1226,6 +1457,7 @@ mod lifecycle_tests {
                 &[SourceBreakpoint {
                     line: 10,
                     condition: None,
+                    hit_condition: None,
                 }],
             )
             .expect("set breakpoint");
@@ -1288,6 +1520,27 @@ mod lifecycle_tests {
         ));
 
         session.disconnect().expect("final disconnect");
+    }
+}
+
+#[cfg(test)]
+mod breakpoint_hit_count_tests {
+    use super::*;
+
+    #[test]
+    fn parse_lldb_breakpoint_list_extracts_hit_counts() {
+        let output = r#"Current breakpoints:
+1: file = '/tmp/reverse_demo.c', line = 15, exact_match = 0, locations = 1, resolved = 1, hit count = 3
+2: file = '/tmp/reverse_demo.c', line = 22, exact_match = 0, locations = 1, resolved = 1, hit count = 1
+"#;
+        let parsed = parse_lldb_breakpoint_list(output);
+        assert_eq!(
+            parsed,
+            vec![
+                ("/tmp/reverse_demo.c".into(), 15, 3),
+                ("/tmp/reverse_demo.c".into(), 22, 1),
+            ]
+        );
     }
 }
 

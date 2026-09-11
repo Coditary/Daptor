@@ -468,8 +468,11 @@ void SessionIoThread::process_pending_breakpoints() {
     }
 
     std::string error;
-    const bool ok = backend_->set_breakpoints(*path, *json, error);
-    push_event(SessionIoEvent{SessionIoEventKind::BreakpointsFinished, ok, std::move(*path), error});
+    std::string results;
+    const bool ok = backend_->set_breakpoints(*path, *json, error, results);
+    push_event(SessionIoEvent{SessionIoEventKind::BreakpointsFinished, ok,
+                              ok ? std::move(results) : std::string{},
+                              ok ? std::move(*path) : std::move(error)});
 }
 
 void SessionIoThread::dispatch_command(const std::string& op) {

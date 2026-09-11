@@ -384,12 +384,16 @@ pub extern "C" fn tui_debug_evaluate(
 }
 
 /// Set breakpoints for `path`. `lines_json` is a JSON array of line numbers (`[1,5]`) or
-/// breakpoint objects (`[{"line":24,"condition":"x > 1"}]`).
+/// breakpoint objects (`[{"line":24,"condition":"x > 1","hitCondition":">= 5"}]`).
+/// On success, writes adapter results to `results_out` as
+/// `[{"line":24,"verified":true,"hitCount":3}]` when `results_out` is non-null.
 #[no_mangle]
 pub extern "C" fn tui_debug_set_breakpoints(
     session: *mut c_void,
     path: *const c_char,
     lines_json: *const c_char,
+    results_out: *mut c_char,
+    results_cap: usize,
 ) -> c_int {
     clear_last_error();
 
@@ -429,6 +433,7 @@ pub extern "C" fn tui_debug_set_breakpoints(
                     return Some(SourceBreakpoint {
                         line: line as u32,
                         condition: None,
+                        hit_condition: None,
                     });
                 }
                 if !item.is_object() {
@@ -440,7 +445,17 @@ pub extern "C" fn tui_debug_set_breakpoints(
                     .and_then(|value| value.as_str())
                     .map(str::to_string)
                     .filter(|value| !value.is_empty());
-                Some(SourceBreakpoint { line, condition })
+                let hit_condition = item
+                    .get("hitCondition")
+                    .or_else(|| item.get("hit_condition"))
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+                    .filter(|value| !value.is_empty());
+                Some(SourceBreakpoint {
+                    line,
+                    condition,
+                    hit_condition,
+                })
             })
             .collect(),
         _ => {
@@ -450,7 +465,15 @@ pub extern "C" fn tui_debug_set_breakpoints(
     };
 
     match session.set_breakpoints(path, &breakpoints) {
-        Ok(()) => 0,
+        Ok(results_json) => {
+            if !results_out.is_null() && results_cap > 0 {
+                if let Err(err) = write_json_to_buffer(&results_json, results_out, results_cap) {
+                    set_last_error(err);
+                    return -1;
+                }
+            }
+            0
+        }
         Err(err) => {
             set_last_error(err.to_string());
             -1

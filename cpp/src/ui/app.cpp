@@ -23,6 +23,7 @@
 #include <tuinator/render/text.hpp>
 #include <tuinator/tuinator.hpp>
 #include <tuinator/widgets/containers/scroll_view.hpp>
+#include <tuinator/widgets/controls/text_input.hpp>
 
 #include <algorithm>
 #include <cctype>
@@ -367,7 +368,8 @@ class DebugChromeRoot : public tuinator::Widget {
     }
 
     bool handle_event(const tuinator::Event& event) override {
-        if (debug_app_ != nullptr && debug_app_->context_menu_open() && debug_app_->handle_overlay_event(event)) {
+        if (debug_app_ != nullptr && debug_app_->overlay_intercepts_events() &&
+            debug_app_->handle_overlay_event(event)) {
             return true;
         }
 
@@ -401,6 +403,10 @@ class DebugChromeRoot : public tuinator::Widget {
                 }
                 if (debug_app_->is_scope_input_focused()) {
                     debug_app_->blur_scope_input();
+                    return true;
+                }
+                if (debug_app_->is_breakpoint_input_focused()) {
+                    debug_app_->blur_breakpoint_input();
                     return true;
                 }
             }
@@ -980,6 +986,16 @@ void DebugApp::build_ui() {
     source_panel_ = source_panel.get();
     context_menu_ = std::make_unique<ContextMenu>(dap_theme_.panel_background, dap_theme_.label, dap_theme_.selection,
                                                   dap_theme_.border_focused);
+    breakpoint_prompt_input_ = std::make_unique<tuinator::TextInput>(
+        tuinator::TextInputOptions{.placeholder = "> condition (when)"}, dap_theme_.label, dap_theme_.selection);
+    breakpoint_prompt_input_->set_on_submit([this](const std::string& value) { submit_breakpoint_condition(value); });
+    breakpoint_prompt_input_->set_on_change([this](const std::string& value) {
+        breakpoint_input_draft_ = value;
+        breakpoint_input_focused_ = true;
+        if (breakpoints_panel_ != nullptr) {
+            breakpoints_panel_->set_input_value(value);
+        }
+    });
 
     source_panel_->set_on_toggle_breakpoint([this](int line) { toggle_breakpoint_at_line(line); });
     source_panel_->set_on_breakpoint_context([this](int line, int code_column, tuinator::Point anchor) {
@@ -1284,10 +1300,15 @@ void DebugApp::apply_snapshot_json_payload(const std::string& json) {
         model_.source_path.empty() && !preview_path.empty() && model_.execution_path.empty()) {
         open_source_file(preview_path, 1, false);
     }
+    apply_breakpoint_hits_from_snapshot_json(json);
     if (is_session_stopped()) {
         maybe_follow_execution();
+        record_breakpoint_hit();
+        refresh_breakpoint_hit_counts_from_session();
     }
     sync_breakpoints_list_panel();
+    mark_all_panels_dirty();
+    request_full_screen_refresh();
     if (previous_state == "disconnected" && is_session_stopped()) {
         reclaim_terminal_for_ui();
     }
@@ -1469,6 +1490,11 @@ void DebugApp::handle_session_event(const SessionIoEvent& event) {
     case SessionIoEventKind::BreakpointsFinished:
         model_.status_message =
             event.success ? "Breakpoints updated" : (event.detail.empty() ? "Breakpoint update failed" : event.detail);
+        if (event.success && !event.payload.empty() && !event.detail.empty()) {
+            apply_breakpoint_hit_counts(event.detail, event.payload);
+            sync_breakpoints_list_panel();
+            mark_all_panels_dirty();
+        }
         if (source_panel_ != nullptr) {
             source_panel_->mark_dirty();
         }
@@ -2176,6 +2202,10 @@ bool DebugApp::is_watch_input_focused() const {
 }
 
 bool DebugApp::is_breakpoint_input_focused() const {
+    if (breakpoint_prompt_active() && breakpoint_prompt_input_ != nullptr &&
+        breakpoint_prompt_input_->is_focused()) {
+        return true;
+    }
     return breakpoints_panel_ != nullptr && breakpoints_panel_->input_widget() != nullptr &&
            breakpoints_panel_->input_widget()->is_focused();
 }
@@ -2427,10 +2457,16 @@ void DebugApp::apply_execution_command_started(const char* op) {
         if (is_session_stopped()) {
             model_.session_state = "running";
             model_.stop_reason.clear();
+            last_counted_breakpoint_stop_.reset();
         } else if (std::strcmp(op, "play_pause") == 0) {
             model_.status_message = "Pausing…";
         }
         return;
+    }
+
+    if (std::strcmp(op, "step_over") == 0 || std::strcmp(op, "step_into") == 0 || std::strcmp(op, "step_out") == 0 ||
+        std::strcmp(op, "step_back") == 0 || std::strcmp(op, "reverse_continue") == 0) {
+        last_counted_breakpoint_stop_.reset();
     }
 
     if (std::strcmp(op, "pause") == 0) {
@@ -2791,7 +2827,7 @@ void DebugApp::apply_focus() {
     if (model_.focus != Focus::Watches) {
         watch_input_focused_ = false;
     }
-    if (model_.focus != Focus::Breakpoints) {
+    if (model_.focus != Focus::Breakpoints && !breakpoint_prompt_active()) {
         breakpoint_input_focused_ = false;
     }
     if (model_.focus != Focus::Scopes) {
@@ -2876,6 +2912,10 @@ void DebugApp::apply_focus() {
     default:
         target = source_panel_;
         break;
+    }
+
+    if (breakpoint_prompt_active() && breakpoint_prompt_input_ != nullptr) {
+        target = breakpoint_prompt_input_.get();
     }
 
     if (target != nullptr) {
@@ -3106,7 +3146,7 @@ void DebugApp::sync_breakpoints_list_panel() {
         const std::string file_text = read_file_or_empty(normalized);
         for (const auto& [bp_line, info] : breakpoints) {
             rows.push_back(BreakpointRow{normalized, bp_line, trimmed_line_text_at(file_text, bp_line),
-                                         info.condition});
+                                         info.condition, info.hit_condition, info.hit_count});
         }
     }
 
@@ -3200,7 +3240,7 @@ void DebugApp::push_breakpoints_to_session(const std::string& path) {
         return;
     }
 
-    const auto it = breakpoints_by_path_.find(normalized);
+    const auto it = find_breakpoints_path(normalized);
     std::string json = "[";
     bool first = true;
     if (it != breakpoints_by_path_.end()) {
@@ -3219,12 +3259,15 @@ void DebugApp::push_breakpoints_to_session(const std::string& path) {
             if (!info.condition.empty()) {
                 json += ",\"condition\":\"" + escape_json_string(info.condition) + "\"";
             }
+            if (!info.hit_condition.empty()) {
+                json += ",\"hitCondition\":\"" + escape_json_string(info.hit_condition) + "\"";
+            }
             json += '}';
             first = false;
         }
     }
     json += ']';
-    session_io_->post_set_breakpoints(normalized, json);
+    session_io_->post_set_breakpoints(it != breakpoints_by_path_.end() ? it->first : normalized, json);
 }
 
 void DebugApp::remove_breakpoint_at(const std::string& path, int line) {
@@ -3282,7 +3325,7 @@ void DebugApp::toggle_breakpoint_at(const std::string& path, int line) {
         return;
     }
 
-    breakpoints_by_path_[normalized][line] = BreakpointInfo{line, ""};
+    breakpoints_by_path_[normalized][line] = BreakpointInfo{.line = line};
     model_.status_message =
         "Set breakpoint at " + panel_title_from_path(normalized) + ":" + std::to_string(line);
     if (session_io_ != nullptr && session_io_->is_active()) {
@@ -3319,7 +3362,7 @@ void DebugApp::toggle_breakpoint_at_line(int line) {
         return;
     }
 
-    breakpoints[line] = BreakpointInfo{line, ""};
+    breakpoints[line] = BreakpointInfo{.line = line};
     model_.status_message = "Set breakpoint at line " + std::to_string(line);
     std::unordered_map<int, std::string> source_breakpoints;
     for (const auto& [bp_line, info] : breakpoints) {
@@ -3372,6 +3415,319 @@ void DebugApp::set_breakpoint_condition(const std::string& path, int line, const
     mark_all_panels_dirty();
 }
 
+void DebugApp::set_breakpoint_hit_condition(const std::string& path, int line,
+                                            const std::string& hit_condition) {
+    const std::string normalized = normalize_source_path(path);
+    if (normalized.empty() || line <= 0) {
+        return;
+    }
+
+    auto it = breakpoints_by_path_.find(normalized);
+    if (it == breakpoints_by_path_.end() || !it->second.contains(line)) {
+        return;
+    }
+
+    const std::string trimmed = trim_breakpoint_condition(hit_condition);
+    it->second[line].hit_condition = trimmed;
+    if (trimmed.empty()) {
+        it->second[line].hit_count = 0;
+        model_.status_message =
+            "Cleared hit condition at " + panel_title_from_path(normalized) + ":" + std::to_string(line);
+    } else {
+        model_.status_message = "Hit condition at " + panel_title_from_path(normalized) + ":" +
+                                std::to_string(line) + " = " + trimmed;
+    }
+
+    sync_breakpoints_list_panel();
+    if (session_io_ != nullptr && session_io_->is_active()) {
+        push_breakpoints_to_session(normalized);
+    }
+    sync_status_bar();
+    mark_all_panels_dirty();
+}
+
+BreakpointsByPath::iterator DebugApp::find_breakpoints_path(const std::string& path) {
+    const std::string normalized = normalize_source_path(path);
+    if (normalized.empty()) {
+        return breakpoints_by_path_.end();
+    }
+
+    auto exact = breakpoints_by_path_.find(normalized);
+    if (exact != breakpoints_by_path_.end()) {
+        return exact;
+    }
+
+    const std::string target_name = panel_title_from_path(normalized);
+    for (auto it = breakpoints_by_path_.begin(); it != breakpoints_by_path_.end(); ++it) {
+        if (normalize_source_path(it->first) == normalized || panel_title_from_path(it->first) == target_name) {
+            return it;
+        }
+    }
+    return breakpoints_by_path_.end();
+}
+
+int DebugApp::find_breakpoint_line_at_stop(const BreakpointsByPath::mapped_type& breakpoints,
+                                           int execution_line) const {
+    if (execution_line <= 0) {
+        return -1;
+    }
+    if (breakpoints.contains(execution_line)) {
+        return execution_line;
+    }
+
+    int best_line = -1;
+    int best_distance = 4;
+    for (const auto& [bp_line, info] : breakpoints) {
+        if (!info.hit_condition.empty()) {
+            const int distance = std::abs(bp_line - execution_line);
+            if (distance < best_distance) {
+                best_distance = distance;
+                best_line = bp_line;
+            }
+        }
+    }
+    if (best_line > 0) {
+        return best_line;
+    }
+
+    for (const auto& [bp_line, _] : breakpoints) {
+        const int distance = std::abs(bp_line - execution_line);
+        if (distance < best_distance) {
+            best_distance = distance;
+            best_line = bp_line;
+        }
+    }
+    return best_line;
+}
+
+void DebugApp::apply_breakpoint_hit_entry(const std::string& path, int line, std::uint64_t hit_count) {
+    if (path.empty() || line <= 0) {
+        return;
+    }
+
+    auto path_it = find_breakpoints_path(path);
+    if (path_it == breakpoints_by_path_.end()) {
+        const std::string resolved = resolve_debugger_source_path(path, program_path_);
+        if (!resolved.empty()) {
+            path_it = find_breakpoints_path(resolved);
+        }
+    }
+    if (path_it == breakpoints_by_path_.end()) {
+        return;
+    }
+
+    auto bp_it = path_it->second.find(line);
+    if (bp_it == path_it->second.end()) {
+        const int matched_line = find_breakpoint_line_at_stop(path_it->second, line);
+        if (matched_line <= 0) {
+            return;
+        }
+        bp_it = path_it->second.find(matched_line);
+        if (bp_it == path_it->second.end()) {
+            return;
+        }
+    }
+
+    if (!bp_it->second.hit_condition.empty()) {
+        bp_it->second.hit_count = hit_count;
+    } else {
+        bp_it->second.hit_count = std::max(bp_it->second.hit_count, hit_count);
+    }
+}
+
+void DebugApp::record_breakpoint_hit() {
+    if (!is_session_stopped() || model_.execution_line <= 0) {
+        return;
+    }
+
+    std::string reason = model_.stop_reason;
+    std::transform(reason.begin(), reason.end(), reason.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    const bool breakpoint_stop = reason.find("breakpoint") != std::string::npos || reason.find("bkpt") != std::string::npos;
+
+    std::string path = model_.execution_path;
+    if (path.rfind("dap:source:", 0) == 0) {
+        path = effective_source_path();
+    }
+    if (path.empty()) {
+        return;
+    }
+
+    auto path_it = find_breakpoints_path(path);
+    if (path_it == breakpoints_by_path_.end()) {
+        const std::string resolved = resolve_debugger_source_path(path, program_path_);
+        if (resolved.empty()) {
+            return;
+        }
+        path_it = find_breakpoints_path(resolved);
+        if (path_it == breakpoints_by_path_.end()) {
+            return;
+        }
+    }
+
+    const int execution_line = static_cast<int>(model_.execution_line);
+    const int bp_line = find_breakpoint_line_at_stop(path_it->second, execution_line);
+    if (bp_line <= 0) {
+        return;
+    }
+
+    auto bp_it = path_it->second.find(bp_line);
+    if (bp_it == path_it->second.end()) {
+        return;
+    }
+    if (!bp_it->second.hit_condition.empty()) {
+        return;
+    }
+    if (!breakpoint_stop) {
+        return;
+    }
+
+    const BreakpointStopRecord stop{normalize_source_path(path_it->first), static_cast<std::uint32_t>(bp_line),
+                                    model_.stopped_thread_id};
+    if (last_counted_breakpoint_stop_ == stop) {
+        return;
+    }
+    last_counted_breakpoint_stop_ = stop;
+    bp_it->second.hit_count += 1;
+}
+
+void DebugApp::refresh_breakpoint_hit_counts_from_session() {
+    if (session_io_ == nullptr || !session_io_->is_active() || breakpoints_by_path_.empty()) {
+        return;
+    }
+
+    flush_breakpoints_to_session();
+}
+
+void DebugApp::apply_breakpoint_hit_counts(const std::string& path, const std::string& results_json) {
+    if (results_json.empty()) {
+        return;
+    }
+
+    auto path_it = find_breakpoints_path(path);
+    if (path_it == breakpoints_by_path_.end()) {
+        return;
+    }
+
+    std::vector<int> request_lines;
+    request_lines.reserve(path_it->second.size());
+    for (const auto& [line, _] : path_it->second) {
+        request_lines.push_back(line);
+    }
+    std::sort(request_lines.begin(), request_lines.end());
+
+    std::vector<std::uint64_t> adapter_hits;
+    std::size_t pos = 0;
+    while ((pos = results_json.find("\"hitCount\"", pos)) != std::string::npos) {
+        const std::size_t hit_colon = results_json.find(':', pos);
+        if (hit_colon == std::string::npos) {
+            break;
+        }
+        std::size_t hit_start = hit_colon + 1;
+        while (hit_start < results_json.size() &&
+               std::isspace(static_cast<unsigned char>(results_json[hit_start])) != 0) {
+            ++hit_start;
+        }
+        std::size_t hit_end = hit_start;
+        while (hit_end < results_json.size() &&
+               std::isdigit(static_cast<unsigned char>(results_json[hit_end])) != 0) {
+            ++hit_end;
+        }
+        if (hit_end > hit_start) {
+            try {
+                adapter_hits.push_back(
+                    static_cast<std::uint64_t>(std::stoull(results_json.substr(hit_start, hit_end - hit_start))));
+            } catch (...) {
+            }
+        }
+        pos = hit_end;
+    }
+
+    for (std::size_t index = 0; index < request_lines.size() && index < adapter_hits.size(); ++index) {
+        if (adapter_hits[index] == 0) {
+            continue;
+        }
+        apply_breakpoint_hit_entry(path_it->first, request_lines[index], adapter_hits[index]);
+    }
+
+    pos = 0;
+    while ((pos = results_json.find("\"line\"", pos)) != std::string::npos) {
+        const std::size_t line_colon = results_json.find(':', pos);
+        if (line_colon == std::string::npos) {
+            break;
+        }
+        std::size_t line_start = line_colon + 1;
+        while (line_start < results_json.size() &&
+               std::isspace(static_cast<unsigned char>(results_json[line_start])) != 0) {
+            ++line_start;
+        }
+        std::size_t line_end = line_start;
+        while (line_end < results_json.size() &&
+               std::isdigit(static_cast<unsigned char>(results_json[line_end])) != 0) {
+            ++line_end;
+        }
+        if (line_end <= line_start) {
+            pos += 6;
+            continue;
+        }
+
+        int bp_line = 0;
+        try {
+            bp_line = std::stoi(results_json.substr(line_start, line_end - line_start));
+        } catch (...) {
+            pos = line_end;
+            continue;
+        }
+        if (bp_line <= 0) {
+            pos = line_end;
+            continue;
+        }
+
+        const std::size_t hit_key = results_json.find("\"hitCount\"", line_end);
+        const std::size_t next_object = results_json.find('{', line_end);
+        if (hit_key == std::string::npos || (next_object != std::string::npos && hit_key > next_object)) {
+            pos = line_end;
+            continue;
+        }
+        const std::size_t hit_colon = results_json.find(':', hit_key);
+        if (hit_colon == std::string::npos) {
+            pos = line_end;
+            continue;
+        }
+        std::size_t hit_start = hit_colon + 1;
+        while (hit_start < results_json.size() &&
+               std::isspace(static_cast<unsigned char>(results_json[hit_start])) != 0) {
+            ++hit_start;
+        }
+        std::size_t hit_end = hit_start;
+        while (hit_end < results_json.size() &&
+               std::isdigit(static_cast<unsigned char>(results_json[hit_end])) != 0) {
+            ++hit_end;
+        }
+        if (hit_end <= hit_start) {
+            pos = line_end;
+            continue;
+        }
+
+        try {
+            const std::uint64_t hit_count =
+                static_cast<std::uint64_t>(std::stoull(results_json.substr(hit_start, hit_end - hit_start)));
+            if (hit_count > 0) {
+                apply_breakpoint_hit_entry(path_it->first, bp_line, hit_count);
+            }
+        } catch (...) {
+        }
+
+        pos = line_end;
+    }
+}
+
+void DebugApp::apply_breakpoint_hits_from_snapshot_json(const std::string& json) {
+    for (const BreakpointHitUpdate& update : parse_breakpoint_hits_from_poll_json(json)) {
+        apply_breakpoint_hit_entry(update.path, update.line, update.hit_count);
+    }
+}
+
 void DebugApp::begin_edit_breakpoint_condition(const std::string& path, int line) {
     const std::string normalized = normalize_source_path(path);
     if (normalized.empty() || line <= 0) {
@@ -3387,19 +3743,47 @@ void DebugApp::begin_edit_breakpoint_condition(const std::string& path, int line
 
     editing_breakpoint_path_ = normalized;
     editing_breakpoint_line_ = line;
+    editing_breakpoint_hit_ = false;
     breakpoint_input_draft_ = it->second.at(line).condition;
     breakpoint_input_focused_ = true;
     model_.focus = Focus::Breakpoints;
 
-    if (breakpoints_panel_ != nullptr) {
-        breakpoints_panel_->set_input_value(breakpoint_input_draft_);
-        breakpoints_panel_->focus_input();
-    }
+    sync_breakpoint_prompt();
 
     model_.status_message =
-        "Condition for " + panel_title_from_path(normalized) + ":" + std::to_string(line);
+        "Condition for " + panel_title_from_path(normalized) + ":" + std::to_string(line) + " — type below, Enter to save";
     apply_focus();
     sync_status_bar();
+    request_full_screen_refresh();
+}
+
+void DebugApp::begin_edit_breakpoint_hit_condition(const std::string& path, int line) {
+    const std::string normalized = normalize_source_path(path);
+    if (normalized.empty() || line <= 0) {
+        return;
+    }
+
+    const auto it = breakpoints_by_path_.find(normalized);
+    if (it == breakpoints_by_path_.end() || !it->second.contains(line)) {
+        model_.status_message = "No breakpoint on this line";
+        sync_status_bar();
+        return;
+    }
+
+    editing_breakpoint_path_ = normalized;
+    editing_breakpoint_line_ = line;
+    editing_breakpoint_hit_ = true;
+    breakpoint_input_draft_ = it->second.at(line).hit_condition;
+    breakpoint_input_focused_ = true;
+    model_.focus = Focus::Breakpoints;
+
+    sync_breakpoint_prompt();
+
+    model_.status_message = "Hit condition for " + panel_title_from_path(normalized) + ":" +
+                            std::to_string(line) + " — type below, Enter to save";
+    apply_focus();
+    sync_status_bar();
+    request_full_screen_refresh();
 }
 
 void DebugApp::submit_breakpoint_condition(const std::string& condition) {
@@ -3407,21 +3791,12 @@ void DebugApp::submit_breakpoint_condition(const std::string& condition) {
         return;
     }
 
-    set_breakpoint_condition(editing_breakpoint_path_, editing_breakpoint_line_, condition);
-    breakpoint_input_draft_.clear();
-    breakpoint_input_focused_ = false;
-    editing_breakpoint_path_.clear();
-    editing_breakpoint_line_ = 0;
-
-    if (breakpoints_panel_ != nullptr) {
-        breakpoints_panel_->set_input_value("");
-        if (breakpoints_panel_->list_widget() != nullptr) {
-            breakpoints_panel_->list_widget()->set_focused(true);
-        }
-        if (breakpoints_panel_->input_widget() != nullptr) {
-            breakpoints_panel_->input_widget()->set_focused(false);
-        }
+    if (editing_breakpoint_hit_) {
+        set_breakpoint_hit_condition(editing_breakpoint_path_, editing_breakpoint_line_, condition);
+    } else {
+        set_breakpoint_condition(editing_breakpoint_path_, editing_breakpoint_line_, condition);
     }
+    blur_breakpoint_input(false);
 }
 
 void DebugApp::capture_breakpoint_input_state() {
@@ -3530,33 +3905,122 @@ bool DebugApp::context_menu_open() const {
     return context_menu_ != nullptr && context_menu_->is_open();
 }
 
+bool DebugApp::breakpoint_prompt_active() const {
+    return breakpoint_input_focused_ && !editing_breakpoint_path_.empty() && editing_breakpoint_line_ > 0;
+}
+
+bool DebugApp::overlay_intercepts_events() const {
+    return context_menu_open() || breakpoint_prompt_active();
+}
+
+tuinator::Rect DebugApp::breakpoint_prompt_bounds() const {
+    constexpr int kStatusBarRows = 1;
+    constexpr int kPromptRows = 1;
+    const tuinator::Size term = app_ != nullptr ? app_->terminal_size() : tuinator::Size{80, 24};
+    const int y = std::max(0, term.height - kStatusBarRows - kPromptRows);
+    return {0, y, term.width, kPromptRows};
+}
+
+void DebugApp::layout_breakpoint_prompt() {
+    if (breakpoint_prompt_input_ == nullptr) {
+        return;
+    }
+    breakpoint_prompt_input_->layout(breakpoint_prompt_bounds());
+}
+
+void DebugApp::sync_breakpoint_prompt() {
+    if (breakpoint_prompt_input_ == nullptr) {
+        return;
+    }
+    breakpoint_prompt_input_->set_value(breakpoint_input_draft_);
+    layout_breakpoint_prompt();
+    breakpoint_prompt_input_->set_focused(true);
+    if (breakpoints_panel_ != nullptr) {
+        breakpoints_panel_->set_input_value(breakpoint_input_draft_);
+    }
+}
+
+void DebugApp::blur_breakpoint_input(bool cancelled) {
+    editing_breakpoint_path_.clear();
+    editing_breakpoint_line_ = 0;
+    editing_breakpoint_hit_ = false;
+    breakpoint_input_draft_.clear();
+    breakpoint_input_focused_ = false;
+    if (breakpoint_prompt_input_ != nullptr) {
+        breakpoint_prompt_input_->set_value("");
+        breakpoint_prompt_input_->set_focused(false);
+    }
+    if (breakpoints_panel_ != nullptr) {
+        breakpoints_panel_->set_input_value("");
+        if (breakpoints_panel_->input_widget() != nullptr) {
+            breakpoints_panel_->input_widget()->set_focused(false);
+        }
+        if (breakpoints_panel_->list_widget() != nullptr) {
+            breakpoints_panel_->list_widget()->set_focused(true);
+        }
+    }
+    apply_focus();
+    if (cancelled) {
+        model_.status_message = "Breakpoint edit cancelled";
+    }
+    sync_status_bar();
+    request_full_screen_refresh();
+}
+
 bool DebugApp::handle_overlay_event(const tuinator::Event& event) {
-    if (context_menu_ == nullptr || !context_menu_->is_open()) {
+    if (context_menu_ != nullptr && context_menu_->is_open()) {
+        context_menu_->layout(overlay_clip_bounds());
+        const bool handled = context_menu_->handle_event(event);
+        std::function<void()> pending_action = context_menu_->take_pending_action();
+        if (pending_action) {
+            pending_action();
+        }
+        if (handled || pending_action) {
+            request_full_screen_refresh();
+        }
+        return handled || static_cast<bool>(pending_action);
+    }
+
+    if (!breakpoint_prompt_active() || breakpoint_prompt_input_ == nullptr) {
         return false;
     }
 
-    context_menu_->layout(overlay_clip_bounds());
-    const bool handled = context_menu_->handle_event(event);
-    std::function<void()> pending_action;
-    if (context_menu_ != nullptr) {
-        pending_action = context_menu_->take_pending_action();
+    layout_breakpoint_prompt();
+    if (const auto* key = std::get_if<tuinator::KeyPress>(&event)) {
+        if (key->key == tuinator::Key::Escape) {
+            blur_breakpoint_input();
+            return true;
+        }
     }
-    if (pending_action) {
-        pending_action();
-    }
-    if (handled || pending_action) {
+
+    const bool handled = breakpoint_prompt_input_->handle_event(event);
+    if (handled) {
         request_full_screen_refresh();
     }
-    return handled || static_cast<bool>(pending_action);
+    return handled || breakpoint_prompt_active();
 }
 
 void DebugApp::paint_overlay(tuinator::PaintContext& ctx) const {
-    if (context_menu_ == nullptr || !context_menu_->is_open()) {
+    if (context_menu_ != nullptr && context_menu_->is_open()) {
+        context_menu_->layout(overlay_clip_bounds());
+        context_menu_->paint(ctx);
+    }
+
+    if (!breakpoint_prompt_active() || breakpoint_prompt_input_ == nullptr) {
         return;
     }
 
-    context_menu_->layout(overlay_clip_bounds());
-    context_menu_->paint(ctx);
+    const tuinator::Rect bounds = breakpoint_prompt_bounds();
+    if (bounds.width <= 0 || bounds.height <= 0) {
+        return;
+    }
+
+    ctx.canvas.fill_rect(bounds, ' ', dap_theme_.panel_background);
+    const tuinator::Rect local{0, 0, bounds.width, bounds.height};
+    ctx.with_clip(local, [&](tuinator::PaintContext& child_ctx) {
+        breakpoint_prompt_input_->layout(local);
+        breakpoint_prompt_input_->paint(child_ctx);
+    });
 }
 
 tuinator::Rect DebugApp::overlay_clip_bounds() const {
@@ -3796,13 +4260,15 @@ void DebugApp::open_source_context_menu(
         path_it != breakpoints_by_path_.end() && path_it->second.contains(line);
     const bool has_condition =
         has_breakpoint && !path_it->second.at(line).condition.empty();
+    const bool has_hit_condition =
+        has_breakpoint && !path_it->second.at(line).hit_condition.empty();
 
     auto ensure_breakpoint = [this, normalized, line]() {
         auto& breakpoints = breakpoints_by_path_[normalized];
         if (breakpoints.contains(line)) {
             return;
         }
-        breakpoints[line] = BreakpointInfo{line, ""};
+        breakpoints[line] = BreakpointInfo{.line = line};
         if (normalized == effective_source_path()) {
             sync_breakpoints_to_panel();
         }
@@ -3838,6 +4304,16 @@ void DebugApp::open_source_context_menu(
             items.push_back(ContextMenu::Item{
                 "Clear condition",
                 [this, normalized, line]() { set_breakpoint_condition(normalized, line, ""); },
+            });
+        }
+        items.push_back(ContextMenu::Item{
+            "Edit hit condition",
+            [this, normalized, line]() { begin_edit_breakpoint_hit_condition(normalized, line); },
+        });
+        if (has_hit_condition) {
+            items.push_back(ContextMenu::Item{
+                "Clear hit condition",
+                [this, normalized, line]() { set_breakpoint_hit_condition(normalized, line, ""); },
             });
         }
         items.push_back(ContextMenu::Item{

@@ -411,6 +411,41 @@ bool manual_apply_poll_json(DebugUiModel& model, const std::string& json) {
 
 }  // namespace
 
+std::vector<BreakpointHitUpdate> parse_breakpoint_hits_from_poll_json(const std::string& json) {
+#ifdef TUI_DEBUG_UI_HAS_NLOHMANN_JSON
+    try {
+        const Json root = Json::parse(json);
+        if (!root.is_object() || !root.contains("snapshot") || !root.at("snapshot").is_object()) {
+            return {};
+        }
+        const Json& snapshot = root.at("snapshot");
+        if (!snapshot.contains("breakpoint_hits") || !snapshot.at("breakpoint_hits").is_array()) {
+            return {};
+        }
+
+        std::vector<BreakpointHitUpdate> updates;
+        for (const Json& hit : snapshot.at("breakpoint_hits")) {
+            if (!hit.is_object()) {
+                continue;
+            }
+            BreakpointHitUpdate update{};
+            update.path = hit.value("path", std::string{});
+            update.line = static_cast<int>(hit.value("line", static_cast<std::int64_t>(0)));
+            update.hit_count = static_cast<std::uint64_t>(hit.value("hit_count", static_cast<std::uint64_t>(0)));
+            if (!update.path.empty() && update.line > 0) {
+                updates.push_back(std::move(update));
+            }
+        }
+        return updates;
+    } catch (const Json::exception&) {
+        return {};
+    }
+#else
+    (void)json;
+    return {};
+#endif
+}
+
 bool apply_poll_json(DebugUiModel& model, const std::string& json) {
 #ifdef TUI_DEBUG_UI_HAS_NLOHMANN_JSON
     try {

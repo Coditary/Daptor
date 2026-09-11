@@ -299,7 +299,8 @@ bool NavigableListView::row_shows_actions(int index, const std::string& item) co
 
     switch (row_action_layout_) {
     case ListRowActionLayout::BreakpointRow:
-        return item.rfind("  ", 0) == 0 && item.rfind("    when ", 0) != 0 && !is_scope_header_row(item);
+        return item.rfind("  ", 0) == 0 && item.rfind("    when ", 0) != 0 && item.rfind("    hit ", 0) != 0 &&
+               !is_scope_header_row(item);
     case ListRowActionLayout::WatchRow:
         return parse_watch_row(item).has_value();
     case ListRowActionLayout::VariableRow:
@@ -533,6 +534,13 @@ void NavigableListView::paint_themed_row(tuinator::Canvas& canvas, int row, int 
             if (item.rfind("    when ", 0) == 0) {
                 draw_segment(canvas, column, row, "    when ", item_style_, content_max_width);
                 draw_segment(canvas, column, row, item.substr(9), theme_->breakpoint_condition, content_max_width);
+                return;
+            }
+
+            if (item.rfind("    hit ", 0) == 0) {
+                draw_segment(canvas, column, row, "    hit ", item_style_, content_max_width);
+                draw_segment(canvas, column, row, item.substr(8), theme_->breakpoint_hit_condition,
+                               content_max_width);
                 return;
             }
 

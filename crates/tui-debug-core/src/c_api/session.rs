@@ -149,12 +149,27 @@ impl CSession {
         }
     }
 
-    pub fn set_breakpoints(&mut self, path: &str, breakpoints: &[SourceBreakpoint]) -> Result<()> {
+    pub fn set_breakpoints(&mut self, path: &str, breakpoints: &[SourceBreakpoint]) -> Result<String> {
         match &mut self.inner {
-            SessionEngine::Dap(session) => session
-                .set_source_breakpoints(Path::new(path), breakpoints)
-                .map(|_| ()),
-            SessionEngine::Rr(session) => session.set_source_breakpoints(Path::new(path), breakpoints),
+            SessionEngine::Dap(session) => {
+                let results = session.set_source_breakpoints(Path::new(path), breakpoints)?;
+                let json = results
+                    .iter()
+                    .map(|breakpoint| {
+                        let mut entry = json!({
+                            "line": breakpoint.line,
+                            "verified": breakpoint.verified,
+                        });
+                        entry["hitCount"] = json!(breakpoint.hit_count.unwrap_or(0));
+                        entry
+                    })
+                    .collect::<Vec<_>>();
+                serde_json::to_string(&json).context("failed to serialize breakpoint results")
+            }
+            SessionEngine::Rr(session) => {
+                session.set_source_breakpoints(Path::new(path), breakpoints)?;
+                Ok("[]".to_string())
+            }
         }
     }
 
@@ -259,6 +274,7 @@ mod tests {
             scopes: vec![],
             variables: vec![],
             capabilities: Default::default(),
+            breakpoint_hits: vec![],
         };
 
         let json = snapshot_to_json(&snapshot).unwrap();

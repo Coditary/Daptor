@@ -317,6 +317,7 @@ impl RrDebugSession {
                 supports_step_in_targets: false,
                 supports_goto_targets: false,
             },
+            breakpoint_hits: vec![],
         })
     }
 
@@ -328,6 +329,7 @@ impl RrDebugSession {
             thread_stacks: vec![],
             scopes: vec![],
             variables: vec![],
+            breakpoint_hits: vec![],
             capabilities: AdapterCapabilities {
                 supports_step_back: true,
                 supports_step_in_targets: false,
