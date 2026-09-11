@@ -1,5 +1,6 @@
 #pragma once
 
+#include <tuinator/core/event.hpp>
 #include <tuinator/render/style.hpp>
 #include <tuinator/widgets/widget.hpp>
 
@@ -7,6 +8,10 @@
 #include <memory>
 #include <string>
 #include <vector>
+
+namespace tuinator {
+class TextInput;
+}
 
 namespace tui_debug_ui {
 
@@ -21,7 +26,8 @@ class StackedPane : public tuinator::Widget {
     using ActiveChangedCallback = std::function<void(int index)>;
 
     StackedPane(std::vector<Entry> entries, tuinator::Style background, tuinator::Style chrome_label,
-                tuinator::Style chrome_hint, tuinator::Style chrome_divider, tuinator::Style chrome_add);
+                tuinator::Style chrome_hint, tuinator::Style chrome_divider, tuinator::Style chrome_add,
+                tuinator::Style chrome_edit);
 
     [[nodiscard]] int active_index() const { return active_index_; }
     [[nodiscard]] int count() const { return static_cast<int>(entries_.size()); }
@@ -31,9 +37,12 @@ class StackedPane : public tuinator::Widget {
 
     void set_on_active_changed(ActiveChangedCallback callback);
     void set_add_action(std::function<void()> callback);
+    void set_rename_action(std::function<void(int index, const std::string& label)> callback);
     void append_entry(std::string label, std::unique_ptr<tuinator::Widget> widget);
     void set_entry_label(int index, std::string label);
     void propagate_on_dirty(std::function<void(tuinator::Rect)> callback);
+    [[nodiscard]] bool is_renaming() const { return rename_index_ >= 0; }
+    void finish_rename_on_click_outside(tuinator::Point global_point);
 
     tuinator::Size preferred_size() const override;
     void layout(tuinator::Rect bounds) override;
@@ -74,6 +83,7 @@ class StackedPane : public tuinator::Widget {
         ArrowSegment prev_arrow;
         ArrowSegment next_arrow;
         int counter_x = -1;
+        int edit_x = -1;
         int add_x = -1;
         std::string counter;
     };
@@ -95,9 +105,18 @@ class StackedPane : public tuinator::Widget {
     [[nodiscard]] std::string counter_text() const;
     [[nodiscard]] int counter_width() const;
     [[nodiscard]] int add_glyph_width() const;
+    [[nodiscard]] int edit_glyph_width() const;
     [[nodiscard]] int add_action_width() const;
+    [[nodiscard]] int rename_action_width() const;
     [[nodiscard]] int far_right_add_x() const;
+    [[nodiscard]] int far_right_edit_x() const;
     [[nodiscard]] int far_right_counter_x(bool show_counter) const;
+    void apply_right_cluster(ChromeLayout& layout, bool show_counter) const;
+    void ensure_rename_input();
+    [[nodiscard]] bool rename_field_contains(tuinator::Point global_point) const;
+    void begin_rename(int index);
+    void cancel_rename();
+    void commit_rename(const std::string& value);
     [[nodiscard]] bool scroll_needs_counter(int first_visible_index, int visible_count) const;
     [[nodiscard]] int scroll_trailing_chain_width() const;
     [[nodiscard]] int right_cluster_width(bool include_counter) const;
@@ -117,10 +136,14 @@ class StackedPane : public tuinator::Widget {
     tuinator::Style chrome_hint_;
     tuinator::Style chrome_divider_;
     tuinator::Style chrome_add_;
+    tuinator::Style chrome_edit_;
     int active_index_ = 0;
     int tab_scroll_offset_ = 0;
+    int rename_index_ = -1;
+    std::unique_ptr<tuinator::TextInput> rename_input_;
     ActiveChangedCallback on_active_changed_;
     std::function<void()> add_action_;
+    std::function<void(int index, const std::string& label)> rename_action_;
 };
 
 }  // namespace tui_debug_ui

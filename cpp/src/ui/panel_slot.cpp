@@ -36,16 +36,53 @@ std::string panel_type_label(SourcePanelType type) {
     return "Panel";
 }
 
-std::string make_panel_tab_label(SidebarPanelType type, const std::optional<std::string>& scope_filter,
-                                 const std::vector<PanelSlotConfig>& existing) {
-    std::string base = panel_type_label(type);
-    if (scope_filter.has_value() && !scope_filter->empty()) {
-        base += " · " + *scope_filter;
+std::string breakpoint_kind_label(BreakpointRowKind kind) {
+    switch (kind) {
+    case BreakpointRowKind::Source:
+        return "Source";
+    case BreakpointRowKind::Data:
+        return "Data";
+    case BreakpointRowKind::Function:
+        return "Function";
+    case BreakpointRowKind::Exception:
+        return "Exception";
+    }
+    return "Breakpoint";
+}
+
+std::string thread_filter_label(ThreadPanelFilter filter) {
+    switch (filter) {
+    case ThreadPanelFilter::Stopped:
+        return "Stopped";
+    case ThreadPanelFilter::Running:
+        return "Running";
+    }
+    return "Thread";
+}
+
+std::string make_panel_tab_label(const PanelSlotConfig& config, const std::vector<PanelSlotConfig>& existing) {
+    std::string base = panel_type_label(config.type);
+    if (config.scope_filter.has_value() && !config.scope_filter->empty()) {
+        base += " · " + *config.scope_filter;
+    }
+    if (config.breakpoint_filter.has_value()) {
+        base += " · " + breakpoint_kind_label(*config.breakpoint_filter);
+    }
+    if (config.thread_id_filter.has_value()) {
+        if (config.thread_name_filter.has_value() && !config.thread_name_filter->empty()) {
+            base += " · " + *config.thread_name_filter;
+        } else {
+            base += " · Thread " + std::to_string(*config.thread_id_filter);
+        }
+    } else if (config.thread_filter.has_value()) {
+        base += " · " + thread_filter_label(*config.thread_filter);
     }
 
     int same = 0;
     for (const PanelSlotConfig& slot : existing) {
-        if (slot.type == type && slot.scope_filter == scope_filter) {
+        if (slot.type == config.type && slot.scope_filter == config.scope_filter &&
+            slot.breakpoint_filter == config.breakpoint_filter && slot.thread_filter == config.thread_filter &&
+            slot.thread_id_filter == config.thread_id_filter) {
             ++same;
         }
     }

@@ -625,6 +625,9 @@ class DebugChromeRoot : public tuinator::Widget {
         }
 
         if (const auto* key = std::get_if<tuinator::KeyPress>(&event)) {
+            if (debug_app_ != nullptr && debug_app_->handle_stacked_pane_rename_key(event)) {
+                return true;
+            }
             if (key->ctrl && key->character == 'c') {
                 if (app_ != nullptr) {
                     app_->quit();
@@ -1149,129 +1152,18 @@ void DebugApp::build_ui() {
     const auto scroll_options = dap_theme_.scroll_view_options();
     scopes_panel_ = nullptr;
     watches_panel_ = nullptr;
+    stacks_panel_ = nullptr;
+    breakpoints_panel_ = nullptr;
     for (SidebarSlot& slot : sidebar_slots_) {
         slot.scopes.reset();
         slot.watches.reset();
+        slot.stacks.reset();
+        slot.breakpoints.reset();
         slot.shared_host.reset();
     }
     if (sidebar_slots_.empty()) {
         init_default_sidebar_slots();
     }
-
-    stacks_panel_ = std::make_unique<StacksPanel>(dap_theme_, scroll_options);
-    breakpoints_panel_ = std::make_unique<BreakpointsPanel>(dap_theme_, scroll_options);
-    const auto jump_to_stack_frame = [this](const StackFrameRow& frame) {
-        std::string path = frame.path;
-        std::int64_t source_reference = frame.source_reference;
-        if (path.rfind("dap:source:", 0) == 0) {
-            path.clear();
-        }
-        if (path.empty() && source_reference <= 0) {
-            return;
-        }
-        open_source_file(path, std::max(1, static_cast<int>(frame.line)), true, source_reference);
-        model_.status_message = "Jumped to " + frame.name;
-        sync_status_bar();
-    };
-    stacks_panel_->set_on_continue([this]() { send_command("continue"); });
-    stacks_panel_->set_on_activate(jump_to_stack_frame);
-    stacks_panel_->set_on_context([this](const StackFrameRow& frame, tuinator::Point anchor) {
-        show_stack_frame_context_menu(frame, anchor);
-    });
-    breakpoints_panel_->set_on_activate([this](const BreakpointRow& row) {
-        if (row.kind == BreakpointRowKind::Data) {
-            model_.status_message = "Data breakpoint: " + row.source_text;
-            sync_status_bar();
-            return;
-        }
-        if (row.kind == BreakpointRowKind::Function) {
-            model_.status_message = "Function breakpoint: " + row.source_text;
-            sync_status_bar();
-            return;
-        }
-        if (row.kind == BreakpointRowKind::Exception) {
-            toggle_exception_breakpoint(row.data_id);
-            return;
-        }
-        open_source_file(row.path, row.line, true);
-        model_.status_message =
-            "Opened " + panel_title_from_path(row.path) + ":" + std::to_string(row.line);
-        sync_status_bar();
-    });
-    breakpoints_panel_->set_on_remove([this](const BreakpointRow& row) {
-        if (row.kind == BreakpointRowKind::Data) {
-            remove_data_breakpoint(row.data_id);
-        } else if (row.kind == BreakpointRowKind::Function) {
-            remove_function_breakpoint(row.source_text);
-        } else if (row.kind == BreakpointRowKind::Exception) {
-            if (exception_breakpoints_[row.data_id].enabled) {
-                exception_breakpoints_[row.data_id].enabled = false;
-                push_exception_breakpoints_to_session();
-                sync_breakpoints_list_panel();
-                model_.status_message = "Disabled exception breakpoint: " + row.source_text;
-                sync_status_bar();
-            }
-        } else {
-            remove_breakpoint_at(row.path, row.line);
-        }
-    });
-    breakpoints_panel_->set_on_add_condition([this](const BreakpointRow& row, int display_index,
-                                                    tuinator::Point action_anchor) {
-        if (row.kind == BreakpointRowKind::Exception) {
-            if (!row.exception_supports_condition) {
-                model_.status_message = "This exception filter does not support conditions";
-                sync_status_bar();
-                return;
-            }
-            begin_edit_exception_condition(row.data_id);
-            return;
-        }
-        open_breakpoint_condition_editor(row.path, row.line, action_anchor, display_index);
-    });
-    breakpoints_panel_->set_on_edit_when_condition([this](const BreakpointRow& row, tuinator::Point /*action_anchor*/) {
-        if (row.kind == BreakpointRowKind::Exception) {
-            begin_edit_exception_condition(row.data_id);
-            return;
-        }
-        begin_edit_breakpoint_condition(row.path, row.line);
-    });
-    breakpoints_panel_->set_on_edit_hit_condition([this](const BreakpointRow& row, tuinator::Point /*action_anchor*/) {
-        begin_edit_breakpoint_hit_condition(row.path, row.line);
-    });
-    breakpoints_panel_->set_on_clear_when_condition([this](const BreakpointRow& row) {
-        if (row.kind == BreakpointRowKind::Exception) {
-            set_exception_breakpoint_condition(row.data_id, "");
-            return;
-        }
-        set_breakpoint_condition(row.path, row.line, "");
-    });
-    breakpoints_panel_->set_on_clear_hit_condition([this](const BreakpointRow& row) {
-        set_breakpoint_hit_condition(row.path, row.line, "");
-    });
-    breakpoints_panel_->set_on_submit([this](const std::string& condition) {
-        if (!editing_exception_filter_.empty()) {
-            set_exception_breakpoint_condition(editing_exception_filter_, condition);
-            blur_breakpoint_input(false);
-            return;
-        }
-        if (!editing_breakpoint_path_.empty() && editing_breakpoint_line_ > 0) {
-            submit_breakpoint_condition(condition);
-        }
-    });
-    breakpoints_panel_->set_on_change([this](const std::string& condition) {
-        if (!editing_exception_filter_.empty() ||
-            (!editing_breakpoint_path_.empty() && editing_breakpoint_line_ > 0)) {
-            breakpoint_input_draft_ = condition;
-            breakpoint_input_focused_ = true;
-            model_.focus = Focus::Breakpoints;
-        }
-    });
-    breakpoints_panel_->set_on_inline_edit_cancel([this]() { blur_breakpoint_input(true); });
-
-    stacks_shell_ = stacks_panel_->release_widget();
-    breakpoints_shell_ = breakpoints_panel_->release_widget();
-    stacks_shell_->set_flex(1);
-    breakpoints_shell_->set_flex(1);
 
     std::vector<StackedPane::Entry> sidebar_entries;
     sidebar_entries.reserve(sidebar_slots_.size());
@@ -1283,7 +1175,7 @@ void DebugApp::build_ui() {
     }
     auto sidebar = std::make_unique<StackedPane>(std::move(sidebar_entries), dap_theme_.panel_background,
                                                  dap_theme_.label, dap_theme_.title_focused, dap_theme_.divider,
-                                                 dap_theme_.breakpoint_line_number);
+                                                 dap_theme_.breakpoint_line_number, dap_theme_.variable_name);
     sidebar_stack_ = sidebar.get();
     sidebar_stack_index_ = std::clamp(sidebar_stack_index_, 0, std::max(0, sidebar_stack_->count() - 1));
     sidebar_stack_->set_active_index(sidebar_stack_index_);
@@ -1293,6 +1185,9 @@ void DebugApp::build_ui() {
         }
         const tuinator::Rect bounds = sidebar_stack_->bounds();
         show_add_sidebar_panel_menu({bounds.x + std::max(0, bounds.width - 2), bounds.y + 1});
+    });
+    sidebar_stack_->set_rename_action([this](int index, const std::string& label) {
+        rename_sidebar_panel(index, label);
     });
     sidebar_stack_->set_on_active_changed([this](int index) {
         sidebar_stack_index_ = index;
@@ -1378,7 +1273,7 @@ void DebugApp::build_ui() {
     }
     auto source_stack = std::make_unique<StackedPane>(std::move(source_entries), dap_theme_.panel_background,
                                                       dap_theme_.label, dap_theme_.title_focused, dap_theme_.divider,
-                                                      dap_theme_.breakpoint_line_number);
+                                                      dap_theme_.breakpoint_line_number, dap_theme_.variable_name);
     source_stack_ = source_stack.get();
     source_stack_index_ = std::clamp(source_stack_index_, 0, std::max(0, source_stack_->count() - 1));
     source_stack_->set_active_index(source_stack_index_);
@@ -1388,6 +1283,9 @@ void DebugApp::build_ui() {
         }
         const tuinator::Rect bounds = source_stack_->bounds();
         show_add_source_panel_menu({bounds.x + std::max(0, bounds.width - 2), bounds.y + 1});
+    });
+    source_stack_->set_rename_action([this](int index, const std::string& label) {
+        rename_source_panel(index, label);
     });
     source_stack_->set_on_active_changed([this](int index) {
         source_stack_index_ = index;
@@ -1496,7 +1394,7 @@ void DebugApp::build_ui() {
     }
     auto bottom_tray = std::make_unique<StackedPane>(std::move(bottom_entries), dap_theme_.panel_background,
                                                      dap_theme_.label, dap_theme_.title_focused, dap_theme_.divider,
-                                                     dap_theme_.breakpoint_line_number);
+                                                     dap_theme_.breakpoint_line_number, dap_theme_.variable_name);
     bottom_stack_ = bottom_tray.get();
     bottom_stack_index_ = std::clamp(bottom_stack_index_, 0, std::max(0, bottom_stack_->count() - 1));
     bottom_stack_->set_active_index(bottom_stack_index_);
@@ -1506,6 +1404,9 @@ void DebugApp::build_ui() {
         }
         const tuinator::Rect bounds = bottom_stack_->bounds();
         show_add_bottom_panel_menu({bounds.x + std::max(0, bounds.width - 2), bounds.y + 1});
+    });
+    bottom_stack_->set_rename_action([this](int index, const std::string& label) {
+        rename_bottom_panel(index, label);
     });
     bottom_stack_->set_on_active_changed([this](int index) {
         bottom_stack_index_ = index;
@@ -2168,71 +2069,7 @@ void DebugApp::sync_ui_from_model() {
         }
         apply_scope_value_overrides();
     }
-    if (stacks_panel_ != nullptr) {
-        auto to_stack_frame_row = [this](const StackFrameInfo& frame) {
-            StackFrameRow row{};
-            row.name = frame.name;
-            row.line = static_cast<std::uint32_t>(std::max<std::int64_t>(0, frame.line));
-            row.path = frame.path;
-            row.source_reference = frame.source_reference;
-            if (row.path.empty() && frame.source_reference > 0) {
-                row.path = "dap:source:" + std::to_string(frame.source_reference);
-            } else if (row.path.empty() && !model_.execution_path.empty()) {
-                row.path = model_.execution_path;
-                row.source_reference = model_.execution_source_reference;
-            }
-            return row;
-        };
-
-        std::unordered_map<std::int64_t, std::vector<StackFrameRow>> stacks_by_thread;
-        for (const ThreadStackInfo& stack : model_.thread_stacks) {
-            std::vector<StackFrameRow> rows;
-            rows.reserve(stack.frames.size());
-            for (const StackFrameInfo& frame : stack.frames) {
-                rows.push_back(to_stack_frame_row(frame));
-            }
-            stacks_by_thread[stack.thread_id] = std::move(rows);
-        }
-        if (stacks_by_thread.empty() && !model_.stack_frames.empty() && model_.stopped_thread_id > 0) {
-            std::vector<StackFrameRow> rows;
-            rows.reserve(model_.stack_frames.size());
-            for (const StackFrameInfo& frame : model_.stack_frames) {
-                rows.push_back(to_stack_frame_row(frame));
-            }
-            stacks_by_thread[model_.stopped_thread_id] = std::move(rows);
-        }
-
-        const bool preserve_stopped_thread =
-            model_.stopped_thread_id > 0 &&
-            (is_session_stopped() || model_.session_state == "running");
-
-        std::vector<ThreadStackContent> thread_contents;
-        thread_contents.reserve(model_.threads.size());
-        for (const ThreadInfo& thread : model_.threads) {
-            ThreadStackContent content{};
-            content.id = thread.id;
-            content.name = thread.name.empty() ? ("Thread " + std::to_string(thread.id)) : thread.name;
-            content.stopped = preserve_stopped_thread && thread.id == model_.stopped_thread_id;
-            const auto frames_it = stacks_by_thread.find(thread.id);
-            if (frames_it != stacks_by_thread.end()) {
-                content.frames = frames_it->second;
-            }
-            thread_contents.push_back(std::move(content));
-        }
-
-        if (thread_contents.empty() && !model_.stack_frames.empty()) {
-            ThreadStackContent content{};
-            content.id = model_.stopped_thread_id > 0 ? model_.stopped_thread_id : 1;
-            content.name = "MainThread";
-            content.stopped = preserve_stopped_thread || model_.stopped_thread_id <= 0;
-            for (const StackFrameInfo& frame : model_.stack_frames) {
-                content.frames.push_back(to_stack_frame_row(frame));
-            }
-            thread_contents.push_back(std::move(content));
-        }
-
-        stacks_panel_->set_thread_stacks(std::move(thread_contents));
-    }
+    sync_threads_list_panel();
     if (is_session_stopped()) {
         resolve_watches_from_locals();
     } else {
@@ -2798,19 +2635,24 @@ std::vector<PanelSlotConfig> DebugApp::sidebar_slot_configs() const {
 }
 
 void DebugApp::init_default_sidebar_slots() {
-    auto push_slot = [this](SidebarPanelType type, const std::optional<std::string>& scope_filter) {
+    auto push_slot = [this](PanelSlotConfig config) {
+        config.id = next_slot_id_++;
+        config.tab_label = make_panel_tab_label(config, sidebar_slot_configs());
         SidebarSlot slot;
-        slot.config.id = next_slot_id_++;
-        slot.config.type = type;
-        slot.config.scope_filter = scope_filter;
-        slot.config.tab_label = make_panel_tab_label(type, scope_filter, sidebar_slot_configs());
+        slot.config = std::move(config);
         sidebar_slots_.push_back(std::move(slot));
     };
 
-    push_slot(SidebarPanelType::Variables, std::nullopt);
-    push_slot(SidebarPanelType::Threads, std::nullopt);
-    push_slot(SidebarPanelType::Breakpoints, std::nullopt);
-    push_slot(SidebarPanelType::Watches, std::nullopt);
+    auto make_config = [](SidebarPanelType type) {
+        PanelSlotConfig config;
+        config.type = type;
+        return config;
+    };
+
+    push_slot(make_config(SidebarPanelType::Variables));
+    push_slot(make_config(SidebarPanelType::Threads));
+    push_slot(make_config(SidebarPanelType::Breakpoints));
+    push_slot(make_config(SidebarPanelType::Watches));
     if (!model_.watches.empty()) {
         sidebar_slots_.back().watches_data = std::move(model_.watches);
         model_.watches.clear();
@@ -2847,6 +2689,117 @@ void DebugApp::wire_watches_panel(WatchesPanel& panel, SidebarSlot& /*slot*/) {
     panel.set_on_inline_edit_cancel([this]() { blur_watch_input(); });
 }
 
+void DebugApp::wire_stacks_panel(StacksPanel& panel) {
+    panel.set_on_continue([this]() { send_command("continue"); });
+    panel.set_on_activate([this](const StackFrameRow& frame) {
+        std::string path = frame.path;
+        std::int64_t source_reference = frame.source_reference;
+        if (path.rfind("dap:source:", 0) == 0) {
+            path.clear();
+        }
+        if (path.empty() && source_reference <= 0) {
+            return;
+        }
+        open_source_file(path, std::max(1, static_cast<int>(frame.line)), true, source_reference);
+        model_.status_message = "Jumped to " + frame.name;
+        sync_status_bar();
+    });
+    panel.set_on_context([this](const StackFrameRow& frame, tuinator::Point anchor) {
+        show_stack_frame_context_menu(frame, anchor);
+    });
+}
+
+void DebugApp::wire_breakpoints_panel(BreakpointsPanel& panel) {
+    panel.set_on_activate([this](const BreakpointRow& row) {
+        if (row.kind == BreakpointRowKind::Data) {
+            model_.status_message = "Data breakpoint: " + row.source_text;
+            sync_status_bar();
+            return;
+        }
+        if (row.kind == BreakpointRowKind::Function) {
+            model_.status_message = "Function breakpoint: " + row.source_text;
+            sync_status_bar();
+            return;
+        }
+        if (row.kind == BreakpointRowKind::Exception) {
+            toggle_exception_breakpoint(row.data_id);
+            return;
+        }
+        open_source_file(row.path, row.line, true);
+        model_.status_message =
+            "Opened " + panel_title_from_path(row.path) + ":" + std::to_string(row.line);
+        sync_status_bar();
+    });
+    panel.set_on_remove([this](const BreakpointRow& row) {
+        if (row.kind == BreakpointRowKind::Data) {
+            remove_data_breakpoint(row.data_id);
+        } else if (row.kind == BreakpointRowKind::Function) {
+            remove_function_breakpoint(row.source_text);
+        } else if (row.kind == BreakpointRowKind::Exception) {
+            if (exception_breakpoints_[row.data_id].enabled) {
+                exception_breakpoints_[row.data_id].enabled = false;
+                push_exception_breakpoints_to_session();
+                sync_breakpoints_list_panel();
+                model_.status_message = "Disabled exception breakpoint: " + row.source_text;
+                sync_status_bar();
+            }
+        } else {
+            remove_breakpoint_at(row.path, row.line);
+        }
+    });
+    panel.set_on_add_condition([this](const BreakpointRow& row, int display_index, tuinator::Point action_anchor) {
+        if (row.kind == BreakpointRowKind::Exception) {
+            if (!row.exception_supports_condition) {
+                model_.status_message = "This exception filter does not support conditions";
+                sync_status_bar();
+                return;
+            }
+            begin_edit_exception_condition(row.data_id);
+            return;
+        }
+        open_breakpoint_condition_editor(row.path, row.line, action_anchor, display_index);
+    });
+    panel.set_on_edit_when_condition([this](const BreakpointRow& row, tuinator::Point /*action_anchor*/) {
+        if (row.kind == BreakpointRowKind::Exception) {
+            begin_edit_exception_condition(row.data_id);
+            return;
+        }
+        begin_edit_breakpoint_condition(row.path, row.line);
+    });
+    panel.set_on_edit_hit_condition([this](const BreakpointRow& row, tuinator::Point /*action_anchor*/) {
+        begin_edit_breakpoint_hit_condition(row.path, row.line);
+    });
+    panel.set_on_clear_when_condition([this](const BreakpointRow& row) {
+        if (row.kind == BreakpointRowKind::Exception) {
+            set_exception_breakpoint_condition(row.data_id, "");
+            return;
+        }
+        set_breakpoint_condition(row.path, row.line, "");
+    });
+    panel.set_on_clear_hit_condition([this](const BreakpointRow& row) {
+        set_breakpoint_hit_condition(row.path, row.line, "");
+    });
+    panel.set_on_submit([this](const std::string& condition) {
+        if (!editing_exception_filter_.empty()) {
+            set_exception_breakpoint_condition(editing_exception_filter_, condition);
+            blur_breakpoint_input(false);
+            return;
+        }
+        if (!editing_breakpoint_path_.empty() && editing_breakpoint_line_ > 0) {
+            submit_breakpoint_condition(condition);
+        }
+    });
+    panel.set_on_change([this](const std::string& condition) {
+        if (!editing_exception_filter_.empty() ||
+            (!editing_breakpoint_path_.empty() && editing_breakpoint_line_ > 0)) {
+            breakpoint_input_draft_ = condition;
+            breakpoint_input_focused_ = true;
+            model_.focus = Focus::Breakpoints;
+        }
+    });
+    panel.set_on_inline_edit_cancel([this]() { blur_breakpoint_input(true); });
+}
+
 void DebugApp::ensure_sidebar_slot_panels(SidebarSlot& slot, const tuinator::ScrollViewOptions& scroll_options) {
     switch (slot.config.type) {
     case SidebarPanelType::Variables:
@@ -2862,13 +2815,15 @@ void DebugApp::ensure_sidebar_slot_panels(SidebarSlot& slot, const tuinator::Scr
         }
         break;
     case SidebarPanelType::Threads:
-        if (slot.shared_host == nullptr && stacks_shell_ != nullptr) {
-            slot.shared_host = std::make_unique<SharedWidgetHost>(stacks_shell_.get());
+        if (slot.stacks == nullptr) {
+            slot.stacks = std::make_unique<StacksPanel>(dap_theme_, scroll_options);
+            wire_stacks_panel(*slot.stacks);
         }
         break;
     case SidebarPanelType::Breakpoints:
-        if (slot.shared_host == nullptr && breakpoints_shell_ != nullptr) {
-            slot.shared_host = std::make_unique<SharedWidgetHost>(breakpoints_shell_.get());
+        if (slot.breakpoints == nullptr) {
+            slot.breakpoints = std::make_unique<BreakpointsPanel>(dap_theme_, scroll_options);
+            wire_breakpoints_panel(*slot.breakpoints);
         }
         break;
     }
@@ -2887,9 +2842,13 @@ std::unique_ptr<tuinator::Widget> DebugApp::release_sidebar_slot_widget(SidebarS
         }
         break;
     case SidebarPanelType::Threads:
+        if (slot.stacks != nullptr) {
+            return slot.stacks->release_widget();
+        }
+        break;
     case SidebarPanelType::Breakpoints:
-        if (slot.shared_host != nullptr) {
-            return std::move(slot.shared_host);
+        if (slot.breakpoints != nullptr) {
+            return slot.breakpoints->release_widget();
         }
         break;
     }
@@ -2917,12 +2876,20 @@ SidebarSlot* DebugApp::sidebar_slot_by_id(std::uint64_t slot_id) {
 void DebugApp::update_active_sidebar_panels() {
     scopes_panel_ = nullptr;
     watches_panel_ = nullptr;
+    stacks_panel_ = nullptr;
+    breakpoints_panel_ = nullptr;
     if (SidebarSlot* slot = active_sidebar_slot()) {
         if (slot->scopes != nullptr) {
             scopes_panel_ = slot->scopes.get();
         }
         if (slot->watches != nullptr) {
             watches_panel_ = slot->watches.get();
+        }
+        if (slot->stacks != nullptr) {
+            stacks_panel_ = slot->stacks.get();
+        }
+        if (slot->breakpoints != nullptr) {
+            breakpoints_panel_ = slot->breakpoints.get();
         }
     }
 }
@@ -2966,6 +2933,51 @@ std::vector<WatchEntry>& DebugApp::active_watch_list() {
     return fallback;
 }
 
+void DebugApp::sync_thread_slot(SidebarSlot& slot, const std::vector<ThreadStackContent>& threads) {
+    if (slot.stacks == nullptr || slot.config.type != SidebarPanelType::Threads) {
+        return;
+    }
+    if (!slot.config.thread_filter.has_value() && !slot.config.thread_id_filter.has_value()) {
+        slot.stacks->set_thread_stacks(threads);
+        return;
+    }
+
+    std::vector<ThreadStackContent> filtered;
+    filtered.reserve(threads.size());
+    for (const ThreadStackContent& thread : threads) {
+        if (slot.config.thread_id_filter.has_value() && thread.id != *slot.config.thread_id_filter) {
+            continue;
+        }
+        if (slot.config.thread_filter == ThreadPanelFilter::Stopped && !thread.stopped) {
+            continue;
+        }
+        if (slot.config.thread_filter == ThreadPanelFilter::Running && thread.stopped) {
+            continue;
+        }
+        filtered.push_back(thread);
+    }
+    slot.stacks->set_thread_stacks(std::move(filtered));
+}
+
+void DebugApp::sync_breakpoint_slot(SidebarSlot& slot, const std::vector<BreakpointRow>& rows) {
+    if (slot.breakpoints == nullptr || slot.config.type != SidebarPanelType::Breakpoints) {
+        return;
+    }
+    if (!slot.config.breakpoint_filter.has_value()) {
+        slot.breakpoints->set_breakpoints(rows);
+        return;
+    }
+
+    std::vector<BreakpointRow> filtered;
+    filtered.reserve(rows.size());
+    for (const BreakpointRow& row : rows) {
+        if (row.kind == *slot.config.breakpoint_filter) {
+            filtered.push_back(row);
+        }
+    }
+    slot.breakpoints->set_breakpoints(std::move(filtered));
+}
+
 void DebugApp::show_add_sidebar_scope_menu(SidebarPanelType type, tuinator::Point anchor) {
     if (context_menu_ == nullptr) {
         return;
@@ -3003,12 +3015,12 @@ void DebugApp::show_add_sidebar_panel_menu(tuinator::Point anchor) {
         [this, anchor]() { show_add_sidebar_scope_menu(SidebarPanelType::Watches, anchor); },
     });
     items.push_back(ContextMenu::Item{
-        "Threads",
-        [this]() { add_sidebar_panel(SidebarPanelType::Threads, std::nullopt); },
+        "Threads ›",
+        [this, anchor]() { show_add_sidebar_thread_menu(anchor); },
     });
     items.push_back(ContextMenu::Item{
-        "Breakpoints",
-        [this]() { add_sidebar_panel(SidebarPanelType::Breakpoints, std::nullopt); },
+        "Breakpoints ›",
+        [this, anchor]() { show_add_sidebar_breakpoint_menu(anchor); },
     });
 
     context_menu_->open(anchor, overlay_clip_bounds(), std::move(items));
@@ -3016,7 +3028,72 @@ void DebugApp::show_add_sidebar_panel_menu(tuinator::Point anchor) {
     request_full_screen_refresh();
 }
 
-void DebugApp::add_sidebar_panel(SidebarPanelType type, std::optional<std::string> scope_filter) {
+void DebugApp::show_add_sidebar_breakpoint_menu(tuinator::Point anchor) {
+    if (context_menu_ == nullptr) {
+        return;
+    }
+
+    std::vector<ContextMenu::Item> items;
+    items.push_back(ContextMenu::Item{
+        "All",
+        [this]() { add_sidebar_panel(SidebarPanelType::Breakpoints, std::nullopt, std::nullopt); },
+    });
+    for (BreakpointRowKind kind :
+         {BreakpointRowKind::Source, BreakpointRowKind::Data, BreakpointRowKind::Function,
+          BreakpointRowKind::Exception}) {
+        items.push_back(ContextMenu::Item{
+            breakpoint_kind_label(kind),
+            [this, kind]() { add_sidebar_panel(SidebarPanelType::Breakpoints, std::nullopt, kind); },
+        });
+    }
+
+    context_menu_->open(anchor, overlay_clip_bounds(), std::move(items));
+    context_menu_->layout(overlay_clip_bounds());
+    request_full_screen_refresh();
+}
+
+void DebugApp::show_add_sidebar_thread_menu(tuinator::Point anchor) {
+    if (context_menu_ == nullptr) {
+        return;
+    }
+
+    std::vector<ContextMenu::Item> items;
+    items.push_back(ContextMenu::Item{
+        "All",
+        [this]() { add_sidebar_panel(SidebarPanelType::Threads); },
+    });
+    items.push_back(ContextMenu::Item{
+        thread_filter_label(ThreadPanelFilter::Stopped),
+        [this]() { add_sidebar_panel(SidebarPanelType::Threads, std::nullopt, std::nullopt,
+                                      ThreadPanelFilter::Stopped); },
+    });
+    items.push_back(ContextMenu::Item{
+        thread_filter_label(ThreadPanelFilter::Running),
+        [this]() { add_sidebar_panel(SidebarPanelType::Threads, std::nullopt, std::nullopt,
+                                      ThreadPanelFilter::Running); },
+    });
+    for (const ThreadInfo& thread : model_.threads) {
+        const std::string label =
+            thread.name.empty() ? ("Thread " + std::to_string(thread.id)) : thread.name;
+        items.push_back(ContextMenu::Item{
+            label,
+            [this, thread_id = thread.id, name = label]() {
+                add_sidebar_panel(SidebarPanelType::Threads, std::nullopt, std::nullopt, std::nullopt, thread_id,
+                                  name);
+            },
+        });
+    }
+
+    context_menu_->open(anchor, overlay_clip_bounds(), std::move(items));
+    context_menu_->layout(overlay_clip_bounds());
+    request_full_screen_refresh();
+}
+
+void DebugApp::add_sidebar_panel(SidebarPanelType type, std::optional<std::string> scope_filter,
+                                 std::optional<BreakpointRowKind> breakpoint_filter,
+                                 std::optional<ThreadPanelFilter> thread_filter,
+                                 std::optional<std::int64_t> thread_id_filter,
+                                 std::optional<std::string> thread_name_filter) {
     if (sidebar_stack_ == nullptr) {
         return;
     }
@@ -3025,7 +3102,11 @@ void DebugApp::add_sidebar_panel(SidebarPanelType type, std::optional<std::strin
     config.id = next_slot_id_++;
     config.type = type;
     config.scope_filter = scope_filter;
-    config.tab_label = make_panel_tab_label(type, scope_filter, sidebar_slot_configs());
+    config.breakpoint_filter = breakpoint_filter;
+    config.thread_filter = thread_filter;
+    config.thread_id_filter = thread_id_filter;
+    config.thread_name_filter = thread_name_filter;
+    config.tab_label = make_panel_tab_label(config, sidebar_slot_configs());
 
     SidebarSlot slot;
     slot.config = config;
@@ -3036,6 +3117,12 @@ void DebugApp::add_sidebar_panel(SidebarPanelType type, std::optional<std::strin
     ensure_sidebar_slot_panels(new_slot, scroll_options);
     if (new_slot.config.type == SidebarPanelType::Variables) {
         sync_scope_slot(new_slot);
+    }
+    if (new_slot.config.type == SidebarPanelType::Breakpoints) {
+        sync_breakpoint_slot(new_slot, build_breakpoint_rows());
+    }
+    if (new_slot.config.type == SidebarPanelType::Threads) {
+        sync_thread_slot(new_slot, build_thread_stack_contents());
     }
 
     auto widget = release_sidebar_slot_widget(new_slot);
@@ -3156,8 +3243,47 @@ void DebugApp::sync_source_stack_title() {
         return;
     }
     const int index = std::clamp(source_stack_index_, 0, static_cast<int>(source_slots_.size()) - 1);
+    if (source_slots_[static_cast<std::size_t>(index)].tab_label_customized) {
+        return;
+    }
     source_slots_[static_cast<std::size_t>(index)].tab_label = title;
     source_stack_->set_entry_label(index, title);
+}
+
+bool DebugApp::handle_stacked_pane_rename_key(const tuinator::Event& event) {
+    for (StackedPane* stack : {sidebar_stack_, source_stack_, bottom_stack_}) {
+        if (stack != nullptr && stack->is_renaming()) {
+            return stack->handle_event(event);
+        }
+    }
+    return false;
+}
+
+void DebugApp::rename_sidebar_panel(int index, const std::string& label) {
+    if (SidebarSlot* slot = sidebar_slot_at(index)) {
+        slot->config.tab_label = label;
+        model_.status_message = "Renamed panel: " + label;
+        sync_status_bar();
+    }
+}
+
+void DebugApp::rename_bottom_panel(int index, const std::string& label) {
+    if (index < 0 || index >= static_cast<int>(bottom_slots_.size())) {
+        return;
+    }
+    bottom_slots_[static_cast<std::size_t>(index)].tab_label = label;
+    model_.status_message = "Renamed panel: " + label;
+    sync_status_bar();
+}
+
+void DebugApp::rename_source_panel(int index, const std::string& label) {
+    if (index < 0 || index >= static_cast<int>(source_slots_.size())) {
+        return;
+    }
+    source_slots_[static_cast<std::size_t>(index)].tab_label = label;
+    source_slots_[static_cast<std::size_t>(index)].tab_label_customized = true;
+    model_.status_message = "Renamed panel: " + label;
+    sync_status_bar();
 }
 
 void DebugApp::show_add_bottom_panel_menu(tuinator::Point anchor) {
@@ -4709,11 +4835,81 @@ void DebugApp::maybe_follow_execution() {
     open_source_file(path, line, false, model_.execution_source_reference);
 }
 
-void DebugApp::sync_breakpoints_list_panel() {
-    if (breakpoints_panel_ == nullptr) {
-        return;
+std::vector<ThreadStackContent> DebugApp::build_thread_stack_contents() const {
+    auto to_stack_frame_row = [this](const StackFrameInfo& frame) {
+        StackFrameRow row{};
+        row.name = frame.name;
+        row.line = static_cast<std::uint32_t>(std::max<std::int64_t>(0, frame.line));
+        row.path = frame.path;
+        row.source_reference = frame.source_reference;
+        if (row.path.empty() && frame.source_reference > 0) {
+            row.path = "dap:source:" + std::to_string(frame.source_reference);
+        } else if (row.path.empty() && !model_.execution_path.empty()) {
+            row.path = model_.execution_path;
+            row.source_reference = model_.execution_source_reference;
+        }
+        return row;
+    };
+
+    std::unordered_map<std::int64_t, std::vector<StackFrameRow>> stacks_by_thread;
+    for (const ThreadStackInfo& stack : model_.thread_stacks) {
+        std::vector<StackFrameRow> rows;
+        rows.reserve(stack.frames.size());
+        for (const StackFrameInfo& frame : stack.frames) {
+            rows.push_back(to_stack_frame_row(frame));
+        }
+        stacks_by_thread[stack.thread_id] = std::move(rows);
+    }
+    if (stacks_by_thread.empty() && !model_.stack_frames.empty() && model_.stopped_thread_id > 0) {
+        std::vector<StackFrameRow> rows;
+        rows.reserve(model_.stack_frames.size());
+        for (const StackFrameInfo& frame : model_.stack_frames) {
+            rows.push_back(to_stack_frame_row(frame));
+        }
+        stacks_by_thread[model_.stopped_thread_id] = std::move(rows);
     }
 
+    const bool preserve_stopped_thread =
+        model_.stopped_thread_id > 0 && (is_session_stopped() || model_.session_state == "running");
+
+    std::vector<ThreadStackContent> thread_contents;
+    thread_contents.reserve(model_.threads.size());
+    for (const ThreadInfo& thread : model_.threads) {
+        ThreadStackContent content{};
+        content.id = thread.id;
+        content.name = thread.name.empty() ? ("Thread " + std::to_string(thread.id)) : thread.name;
+        content.stopped = preserve_stopped_thread && thread.id == model_.stopped_thread_id;
+        const auto frames_it = stacks_by_thread.find(thread.id);
+        if (frames_it != stacks_by_thread.end()) {
+            content.frames = frames_it->second;
+        }
+        thread_contents.push_back(std::move(content));
+    }
+
+    if (thread_contents.empty() && !model_.stack_frames.empty()) {
+        ThreadStackContent content{};
+        content.id = model_.stopped_thread_id > 0 ? model_.stopped_thread_id : 1;
+        content.name = "MainThread";
+        content.stopped = preserve_stopped_thread || model_.stopped_thread_id <= 0;
+        for (const StackFrameInfo& frame : model_.stack_frames) {
+            content.frames.push_back(to_stack_frame_row(frame));
+        }
+        thread_contents.push_back(std::move(content));
+    }
+
+    return thread_contents;
+}
+
+void DebugApp::sync_threads_list_panel() {
+    const std::vector<ThreadStackContent> threads = build_thread_stack_contents();
+    for (SidebarSlot& slot : sidebar_slots_) {
+        if (slot.config.type == SidebarPanelType::Threads) {
+            sync_thread_slot(slot, threads);
+        }
+    }
+}
+
+std::vector<BreakpointRow> DebugApp::build_breakpoint_rows() const {
     std::vector<BreakpointRow> rows;
     for (const DataBreakpointEntry& entry : data_breakpoints_) {
         BreakpointRow row{};
@@ -4773,7 +4969,16 @@ void DebugApp::sync_breakpoints_list_panel() {
         rows.push_back(std::move(row));
     }
 
-    breakpoints_panel_->set_breakpoints(std::move(rows));
+    return rows;
+}
+
+void DebugApp::sync_breakpoints_list_panel() {
+    const std::vector<BreakpointRow> rows = build_breakpoint_rows();
+    for (SidebarSlot& slot : sidebar_slots_) {
+        if (slot.config.type == SidebarPanelType::Breakpoints) {
+            sync_breakpoint_slot(slot, rows);
+        }
+    }
 }
 
 void DebugApp::toggle_breakpoint() {
@@ -6254,6 +6459,12 @@ bool DebugApp::handle_repl_input_key(const tuinator::Event& event) {
 }
 
 void DebugApp::handle_pointer_pick(const tuinator::MouseEvent& mouse) {
+    for (StackedPane* stack : {sidebar_stack_, source_stack_, bottom_stack_}) {
+        if (stack != nullptr) {
+            stack->finish_rename_on_click_outside(mouse.position);
+        }
+    }
+
     if (repl_panel_ == nullptr || !repl_panel_->input_active()) {
         return;
     }
