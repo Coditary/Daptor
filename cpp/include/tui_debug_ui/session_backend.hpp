@@ -43,6 +43,8 @@ class SessionBackend {
                                     std::string& error_out) = 0;
     virtual bool evaluate(const std::string& expression, std::int64_t frame_id, const std::string& context,
                           std::string& result_out, std::string& error_out) = 0;
+    virtual bool fetch_completions(const std::string& text, std::int64_t column, std::int64_t frame_id,
+                                   std::string& json_out, std::string& error_out) = 0;
     virtual bool set_variable(std::int64_t variables_reference, const std::string& name, const std::string& value,
                               std::string& result_out, std::string& error_out) = 0;
     virtual bool set_breakpoints(const std::string& path, const std::string& lines_json,

@@ -322,6 +322,7 @@ impl RrDebugSession {
                 supports_goto_targets: false,
                 supports_data_breakpoints: false,
                 supports_function_breakpoints: false,
+                supports_completions_request: false,
                 exception_breakpoint_filters: Vec::new(),
             },
             breakpoint_hits: vec![],
@@ -343,6 +344,7 @@ impl RrDebugSession {
                 supports_goto_targets: false,
                 supports_data_breakpoints: false,
                 supports_function_breakpoints: false,
+                supports_completions_request: false,
                 exception_breakpoint_filters: Vec::new(),
             },
         }

@@ -135,6 +135,7 @@ class DebugUiModel {
     bool supports_goto_targets = false;
     bool supports_data_breakpoints = false;
     bool supports_function_breakpoints = false;
+    bool supports_completions_request = false;
 
     struct ExceptionBreakpointFilterInfo {
         std::string filter;

@@ -124,6 +124,7 @@ void SessionIoThread::post_command(const std::string& op) {
         has_pending_command_ = true;
         if (command_preempts_background_work(op)) {
             pending_evaluate_.reset();
+            pending_completions_.reset();
             scope_fetch_pending_ = false;
             scope_fetch_signature_.clear();
             scope_fetch_scopes_.clear();
@@ -144,6 +145,18 @@ void SessionIoThread::post_evaluate(const std::string& expression, std::int64_t 
         pending_evaluate_ = expression;
         pending_evaluate_frame_ = frame_id;
         pending_evaluate_context_ = context;
+    }
+    cv_.notify_all();
+}
+
+void SessionIoThread::post_completions(const std::string& text, std::int64_t column, std::int64_t frame_id,
+                                       std::uint64_t request_id) {
+    {
+        std::lock_guard lock(mutex_);
+        if (has_pending_command_ && command_preempts_background_work(pending_command_)) {
+            return;
+        }
+        pending_completions_ = PendingCompletions{text, column, frame_id, request_id};
     }
     cv_.notify_all();
 }
@@ -390,6 +403,7 @@ void SessionIoThread::sync_initial_state() {
 void SessionIoThread::clear_pending_adapter_work() {
     std::lock_guard lock(mutex_);
     pending_evaluate_.reset();
+    pending_completions_.reset();
     pending_set_variable_.reset();
     pending_breakpoints_path_.reset();
     pending_breakpoints_json_.reset();
@@ -746,6 +760,7 @@ void SessionIoThread::process_preempting_commands() {
         op = std::move(pending_command_);
         has_pending_command_ = false;
         pending_evaluate_.reset();
+        pending_completions_.reset();
         scope_fetch_pending_ = false;
         scope_fetch_signature_.clear();
         scope_fetch_scopes_.clear();
@@ -815,16 +830,48 @@ void SessionIoThread::process_pending_command() {
         }
     }
 
-    if (!evaluate_expr.has_value()) {
+    if (evaluate_expr.has_value()) {
+        {
+            std::lock_guard lock(mutex_);
+            if (has_pending_command_ && command_preempts_background_work(pending_command_)) {
+                pending_evaluate_ = std::move(evaluate_expr);
+                pending_evaluate_frame_ = evaluate_frame;
+                pending_evaluate_context_ = std::move(evaluate_context);
+                return;
+            }
+        }
+
+        std::string result;
+        std::string error;
+        bool ok = false;
+        if (!adapter_live_.load(std::memory_order_acquire)) {
+            error = "debug session disconnected";
+        } else {
+            ok = backend_->evaluate(*evaluate_expr, evaluate_frame, evaluate_context, result, error);
+        }
+        SessionIoEvent event{SessionIoEventKind::EvaluateFinished, ok, ok ? std::move(result) : std::move(error),
+                             *evaluate_expr};
+        push_event(std::move(event));
+        return;
+    }
+
+    std::optional<PendingCompletions> completions_request;
+    {
+        std::lock_guard lock(mutex_);
+        if (pending_completions_.has_value()) {
+            completions_request = std::move(pending_completions_);
+            pending_completions_.reset();
+        }
+    }
+
+    if (!completions_request.has_value()) {
         return;
     }
 
     {
         std::lock_guard lock(mutex_);
         if (has_pending_command_ && command_preempts_background_work(pending_command_)) {
-            pending_evaluate_ = std::move(evaluate_expr);
-            pending_evaluate_frame_ = evaluate_frame;
-            pending_evaluate_context_ = std::move(evaluate_context);
+            pending_completions_ = std::move(completions_request);
             return;
         }
     }
@@ -835,10 +882,11 @@ void SessionIoThread::process_pending_command() {
     if (!adapter_live_.load(std::memory_order_acquire)) {
         error = "debug session disconnected";
     } else {
-        ok = backend_->evaluate(*evaluate_expr, evaluate_frame, evaluate_context, result, error);
+        ok = backend_->fetch_completions(completions_request->text, completions_request->column,
+                                         completions_request->frame_id, result, error);
     }
-    SessionIoEvent event{SessionIoEventKind::EvaluateFinished, ok, ok ? std::move(result) : std::move(error),
-                         *evaluate_expr};
+    SessionIoEvent event{SessionIoEventKind::CompletionsFinished, ok, ok ? std::move(result) : std::move(error),
+                         std::to_string(completions_request->request_id)};
     push_event(std::move(event));
 }
 
@@ -923,7 +971,8 @@ void SessionIoThread::thread_main() {
             std::unique_lock lock(mutex_);
             cv_.wait_for(lock, kWorkerTick, [this]() {
                 return stop_.load(std::memory_order_acquire) || has_pending_command_ ||
-                       pending_evaluate_.has_value() || pending_set_variable_.has_value() ||
+                       pending_evaluate_.has_value() || pending_completions_.has_value() ||
+                       pending_set_variable_.has_value() ||
                        (pending_breakpoints_path_.has_value() && pending_breakpoints_json_.has_value()) ||
                        scope_fetch_pending_ || !variable_children_fetch_queue_.empty() ||
                        highlight_request_.has_value() ||

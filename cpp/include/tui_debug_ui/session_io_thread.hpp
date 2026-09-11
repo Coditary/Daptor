@@ -28,6 +28,7 @@ enum class SessionIoEventKind {
     HighlightReady,
     CommandFinished,
     EvaluateFinished,
+    CompletionsFinished,
     SetVariableFinished,
     BreakpointsFinished,
     DataBreakpointInfoReady,
@@ -72,6 +73,8 @@ class SessionIoThread {
     void post_command(const std::string& op);
     void post_terminal_input(const std::string& bytes);
     void post_evaluate(const std::string& expression, std::int64_t frame_id, const std::string& context);
+    void post_completions(const std::string& text, std::int64_t column, std::int64_t frame_id,
+                          std::uint64_t request_id);
     void post_set_variable(std::int64_t variables_reference, const std::string& name, const std::string& value);
     void post_set_breakpoints(const std::string& path, const std::string& lines_json);
     void request_data_breakpoint_info(std::int64_t variables_reference, std::int64_t frame_id,
@@ -146,6 +149,13 @@ class SessionIoThread {
     std::optional<std::string> pending_evaluate_;
     std::int64_t pending_evaluate_frame_ = 0;
     std::string pending_evaluate_context_;
+    struct PendingCompletions {
+        std::string text;
+        std::int64_t column = 0;
+        std::int64_t frame_id = 0;
+        std::uint64_t request_id = 0;
+    };
+    std::optional<PendingCompletions> pending_completions_;
     std::optional<PendingSetVariable> pending_set_variable_;
     std::optional<std::string> pending_breakpoints_path_;
     std::optional<std::string> pending_breakpoints_json_;

@@ -143,6 +143,7 @@ void apply_snapshot_object(DebugUiModel& model, const Json& snapshot) {
         model.supports_goto_targets = capabilities.value("supports_goto_targets", false);
         model.supports_data_breakpoints = capabilities.value("supports_data_breakpoints", false);
         model.supports_function_breakpoints = capabilities.value("supports_function_breakpoints", false);
+        model.supports_completions_request = capabilities.value("supports_completions_request", false);
 
         model.exception_breakpoint_filters.clear();
         if (capabilities.contains("exception_breakpoint_filters") &&

@@ -466,6 +466,49 @@ pub extern "C" fn tui_debug_evaluate(
     }
 }
 
+/// Request REPL completions for `text` at `column` (1-based) in `frame_id`.
+///
+/// On success, writes a JSON array of completion items to `result_out`.
+///
+/// Returns `0` on success and `-1` on error.
+#[no_mangle]
+pub extern "C" fn tui_debug_completions(
+    session: *mut c_void,
+    text: *const c_char,
+    column: i64,
+    frame_id: i64,
+    result_out: *mut c_char,
+    cap: usize,
+) -> c_int {
+    clear_last_error();
+
+    let Some(session) = session_from_ptr(session) else {
+        return -1;
+    };
+
+    let text = match c_str_to_rust(text, "text") {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err);
+            return -1;
+        }
+    };
+
+    match session.completions(text, column, frame_id) {
+        Ok(result) => match write_json_to_buffer(&result, result_out, cap) {
+            Ok(()) => 0,
+            Err(err) => {
+                set_last_error(err);
+                -1
+            }
+        },
+        Err(err) => {
+            set_last_error(err.to_string());
+            -1
+        }
+    }
+}
+
 /// Set breakpoints for `path`. `lines_json` is a JSON array of line numbers (`[1,5]`) or
 /// breakpoint objects (`[{"line":24,"condition":"x > 1","hitCondition":">= 5"}]`).
 /// On success, writes adapter results to `results_out` as

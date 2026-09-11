@@ -39,6 +39,11 @@
 #include <unordered_set>
 #include <utility>
 
+#if __has_include(<nlohmann/json.hpp>)
+#include <nlohmann/json.hpp>
+#define TUI_DEBUG_UI_HAS_NLOHMANN_JSON 1
+#endif
+
 namespace tui_debug_ui {
 
 class DebugApp;
@@ -53,6 +58,77 @@ constexpr int kSplitDividerRows = 1;
 constexpr int kFullFileSourceLineThreshold = 500;
 constexpr int kHighlightLineMargin = 12;
 constexpr int kMaxHighlightLinesPerRequest = 128;
+constexpr auto kReplCompletionFetchDelay = std::chrono::milliseconds(200);
+constexpr auto kReplCompletionShowDelay = std::chrono::milliseconds(500);
+
+bool repl_completion_ident_char(char ch) {
+    return std::isalnum(static_cast<unsigned char>(ch)) || ch == '_';
+}
+
+std::pair<std::size_t, std::size_t> repl_completion_token_range(const std::string& text, std::size_t cursor) {
+    const std::size_t bounded_cursor = std::min(cursor, text.size());
+    std::size_t start = bounded_cursor;
+    while (start > 0 && repl_completion_ident_char(text[start - 1])) {
+        --start;
+    }
+    return {start, bounded_cursor - start};
+}
+
+std::string repl_completion_ghost_suffix(const std::string& typed, const std::string& label) {
+    if (label.size() <= typed.size()) {
+        return {};
+    }
+    if (label.compare(0, typed.size(), typed) != 0) {
+        return {};
+    }
+    return label.substr(typed.size());
+}
+
+std::vector<tui_debug_ui::ReplCompletionCandidate> parse_repl_completions(const std::string& json) {
+#if defined(TUI_DEBUG_UI_HAS_NLOHMANN_JSON)
+    try {
+        const nlohmann::json root = nlohmann::json::parse(json);
+        if (!root.is_array() || root.empty()) {
+            return {};
+        }
+
+        std::vector<tui_debug_ui::ReplCompletionCandidate> items;
+        for (const nlohmann::json& entry : root) {
+            if (!entry.is_object() || !entry.contains("label") || !entry.at("label").is_string()) {
+                continue;
+            }
+            tui_debug_ui::ReplCompletionCandidate item;
+            item.label = entry.at("label").get<std::string>();
+            if (item.label.empty()) {
+                continue;
+            }
+            if (entry.contains("sortText") && entry.at("sortText").is_string()) {
+                item.sort_text = entry.at("sortText").get<std::string>();
+            }
+            items.push_back(std::move(item));
+        }
+
+        std::sort(items.begin(), items.end(),
+                  [](const tui_debug_ui::ReplCompletionCandidate& left, const tui_debug_ui::ReplCompletionCandidate& right) {
+            const std::string& left_sort = left.sort_text.empty() ? left.label : left.sort_text;
+            const std::string& right_sort = right.sort_text.empty() ? right.label : right.sort_text;
+            if (left_sort != right_sort) {
+                return left_sort < right_sort;
+            }
+            if (left.label.size() != right.label.size()) {
+                return left.label.size() > right.label.size();
+            }
+            return left.label < right.label;
+        });
+        return items;
+    } catch (const std::exception&) {
+        return {};
+    }
+#else
+    (void)json;
+    return {};
+#endif
+}
 
 std::string humanize_execution_command_error(const std::string& op, const std::string& detail,
                                            const std::string& session_state) {
@@ -1370,6 +1446,16 @@ void DebugApp::build_ui() {
         repl_input_draft_ = expression;
         repl_input_focused_ = true;
         model_.focus = Focus::Repl;
+        repl_last_edit_time_ = std::chrono::steady_clock::now();
+        clear_repl_completion_state();
+    });
+    repl_panel_->set_on_completion_request([this]() { request_repl_completion(); });
+    repl_panel_->set_on_completion_cycle([this](int delta) { return cycle_repl_completion(delta); });
+    repl_panel_->set_on_completion_cancel([this]() {
+        repl_completion_results_ready_ = false;
+        repl_completion_candidates_.clear();
+        repl_completion_matches_.clear();
+        repl_completion_selected_index_ = 0;
     });
     repl_panel_->set_on_activate([this]() {
         model_.focus = Focus::Repl;
@@ -1887,6 +1973,9 @@ void DebugApp::handle_session_event(const SessionIoEvent& event) {
             }
         }
         break;
+    case SessionIoEventKind::CompletionsFinished:
+        handle_repl_completions_event(event);
+        break;
     case SessionIoEventKind::EvaluateFinished:
         if (!event.detail.empty()) {
             std::string entry = "> " + event.detail + "\n= ";
@@ -2012,6 +2101,10 @@ void DebugApp::poll_session() {
     while (session_io_->try_pop_event(event)) {
         handle_session_event(event);
         needs_sync = true;
+    }
+
+    if (launch_complete_handled_) {
+        tick_repl_completion();
     }
 
     if (!launch_complete_handled_) {
@@ -5538,17 +5631,31 @@ bool DebugApp::handle_repl_input_key(const tuinator::Event& event) {
         return false;
     }
 
-    tuinator::TextInput* input = repl_panel_->input_widget();
-    if (input == nullptr) {
-        return false;
+    if (const auto* key = std::get_if<tuinator::KeyPress>(&event)) {
+        const bool completion_up = key->key == tuinator::Key::Up;
+        const bool completion_down = key->key == tuinator::Key::Down;
+        if (completion_up || completion_down) {
+            const bool completion_active = repl_completion_results_ready_ || repl_completion_pending_id_ != 0 ||
+                                           repl_panel_->has_ghost_suggestion();
+            if (completion_active) {
+                if (repl_completion_results_ready_) {
+                    rebuild_repl_completion_matches();
+                    if (!repl_completion_matches_.empty()) {
+                        cycle_repl_completion(completion_up ? -1 : 1);
+                    }
+                }
+                return true;
+            }
+        }
     }
 
-    input->set_focused(true);
+    if (repl_panel_->input_widget() != nullptr) {
+        repl_panel_->input_widget()->set_focused(true);
+    }
     if (repl_panel_->history_widget() != nullptr) {
         repl_panel_->history_widget()->set_focused(false);
     }
-    input->handle_event(event);
-    return true;
+    return repl_panel_->handle_input_event(event);
 }
 
 void DebugApp::handle_pointer_pick(const tuinator::MouseEvent& mouse) {
@@ -5567,6 +5674,9 @@ void DebugApp::deactivate_repl_input(bool clear_draft) {
     if (repl_panel_ == nullptr) {
         return;
     }
+
+    clear_repl_completion_state();
+    repl_last_edit_time_ = {};
 
     if (clear_draft) {
         repl_input_draft_.clear();
@@ -6124,6 +6234,229 @@ void DebugApp::sync_repl_panel() {
         }
     }
     repl_panel_->set_history_lines(std::move(lines));
+}
+
+void DebugApp::rebuild_repl_completion_matches() {
+    repl_completion_matches_.clear();
+    if (repl_panel_ == nullptr || repl_completion_candidates_.empty()) {
+        return;
+    }
+
+    const std::string& text = repl_panel_->input_value();
+    const std::size_t cursor = repl_panel_->input_cursor_column();
+    const auto [token_start, token_length] = repl_completion_token_range(text, cursor);
+    const std::string typed = text.substr(token_start, token_length);
+
+    for (const ReplCompletionCandidate& candidate : repl_completion_candidates_) {
+        if (!typed.empty() && repl_completion_ghost_suffix(typed, candidate.label).empty()) {
+            continue;
+        }
+        repl_completion_matches_.push_back(candidate);
+    }
+
+    if (repl_completion_matches_.empty()) {
+        repl_completion_selected_index_ = 0;
+        return;
+    }
+
+    if (repl_completion_selected_index_ < 0 ||
+        repl_completion_selected_index_ >= static_cast<int>(repl_completion_matches_.size())) {
+        repl_completion_selected_index_ = 0;
+    }
+}
+
+void DebugApp::clear_repl_completion_state() {
+    repl_completion_pending_id_ = 0;
+    repl_completion_fetch_sent_ = false;
+    repl_completion_results_ready_ = false;
+    repl_completion_candidates_.clear();
+    repl_completion_matches_.clear();
+    repl_completion_selected_index_ = 0;
+    if (repl_panel_ != nullptr) {
+        repl_panel_->set_completion_menu_active(false);
+        repl_panel_->clear_ghost_suggestion();
+    }
+}
+
+void DebugApp::tick_repl_completion() {
+    if (repl_panel_ == nullptr || session_io_ == nullptr) {
+        return;
+    }
+    if (model_.focus != Focus::Repl || !repl_panel_->input_active()) {
+        return;
+    }
+    if (!is_session_stopped()) {
+        return;
+    }
+    if (!model_.supports_completions_request && mode_ != SessionMode::Mock) {
+        return;
+    }
+
+    const std::string text = repl_panel_->input_value();
+    if (text.empty()) {
+        return;
+    }
+    if (repl_last_edit_time_ == std::chrono::steady_clock::time_point{}) {
+        return;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    const auto elapsed = now - repl_last_edit_time_;
+
+    if (elapsed >= kReplCompletionFetchDelay && !repl_completion_fetch_sent_ && repl_completion_pending_id_ == 0) {
+        request_repl_completion();
+    }
+
+    if (repl_completion_results_ready_ && elapsed >= kReplCompletionShowDelay && !repl_panel_->has_ghost_suggestion()) {
+        show_repl_completion_ghost();
+    }
+}
+
+void DebugApp::request_repl_completion() {
+    if (repl_panel_ == nullptr || session_io_ == nullptr) {
+        return;
+    }
+    if (!is_session_stopped()) {
+        return;
+    }
+    if (!model_.supports_completions_request && mode_ != SessionMode::Mock) {
+        return;
+    }
+
+    const std::int64_t frame_id = current_frame_id();
+    if (frame_id <= 0) {
+        return;
+    }
+
+    const std::string text = repl_panel_->input_value();
+    if (text.empty()) {
+        return;
+    }
+
+    const std::size_t cursor = repl_panel_->input_cursor_column();
+    const std::int64_t column = static_cast<std::int64_t>(cursor) + 1;
+
+    repl_completion_fetch_sent_ = true;
+    repl_completion_results_ready_ = false;
+    repl_completion_candidates_.clear();
+    repl_completion_matches_.clear();
+    repl_completion_selected_index_ = 0;
+    repl_panel_->set_completion_menu_active(false);
+    repl_panel_->clear_ghost_suggestion();
+
+    repl_completion_request_id_++;
+    repl_completion_pending_id_ = repl_completion_request_id_;
+    repl_completion_request_text_ = text;
+    repl_completion_request_column_ = cursor;
+
+    session_io_->post_completions(text, column, frame_id, repl_completion_request_id_);
+}
+
+void DebugApp::show_repl_completion_ghost() {
+    if (repl_panel_ == nullptr) {
+        return;
+    }
+
+    rebuild_repl_completion_matches();
+    if (repl_completion_matches_.empty()) {
+        repl_panel_->set_completion_menu_active(false);
+        repl_panel_->clear_ghost_suggestion();
+        request_repaint();
+        return;
+    }
+
+    const std::string& text = repl_panel_->input_value();
+    const std::size_t cursor = repl_panel_->input_cursor_column();
+    const auto [token_start, token_length] = repl_completion_token_range(text, cursor);
+    const std::string typed = text.substr(token_start, token_length);
+
+    const ReplCompletionCandidate& candidate =
+        repl_completion_matches_[static_cast<std::size_t>(repl_completion_selected_index_)];
+    const std::string suffix = repl_completion_ghost_suffix(typed, candidate.label);
+    if (suffix.empty()) {
+        repl_panel_->set_completion_menu_active(false);
+        repl_panel_->clear_ghost_suggestion();
+        request_repaint();
+        return;
+    }
+
+    ReplGhostSuggestion ghost;
+    ghost.label = candidate.label;
+    ghost.replace_start = token_start;
+    ghost.replace_length = token_length;
+    ghost.suffix = suffix;
+    repl_panel_->set_completion_menu_active(repl_completion_matches_.size() > 1);
+    repl_panel_->set_ghost_suggestion(std::move(ghost));
+    request_repaint();
+}
+
+bool DebugApp::cycle_repl_completion(int delta) {
+    if (repl_panel_ == nullptr) {
+        return false;
+    }
+
+    rebuild_repl_completion_matches();
+    if (repl_completion_matches_.empty()) {
+        return false;
+    }
+
+    if (!repl_panel_->has_ghost_suggestion()) {
+        show_repl_completion_ghost();
+        return repl_panel_->has_ghost_suggestion();
+    }
+
+    if (repl_completion_matches_.size() < 2) {
+        return true;
+    }
+
+    const int count = static_cast<int>(repl_completion_matches_.size());
+    repl_completion_selected_index_ = (repl_completion_selected_index_ + delta + count) % count;
+    show_repl_completion_ghost();
+    return true;
+}
+
+void DebugApp::handle_repl_completions_event(const SessionIoEvent& event) {
+    if (repl_panel_ == nullptr) {
+        return;
+    }
+
+    std::uint64_t request_id = 0;
+    try {
+        request_id = static_cast<std::uint64_t>(std::stoull(event.detail));
+    } catch (const std::exception&) {
+        return;
+    }
+    if (request_id != repl_completion_pending_id_) {
+        return;
+    }
+    repl_completion_pending_id_ = 0;
+
+    if (!event.success) {
+        return;
+    }
+
+    if (repl_panel_->input_value() != repl_completion_request_text_ ||
+        repl_panel_->input_cursor_column() != repl_completion_request_column_) {
+        return;
+    }
+
+    repl_completion_candidates_ = parse_repl_completions(event.payload);
+    repl_completion_selected_index_ = 0;
+    repl_completion_results_ready_ = !repl_completion_candidates_.empty();
+    rebuild_repl_completion_matches();
+    if (!repl_completion_results_ready_) {
+        repl_panel_->set_completion_menu_active(false);
+        repl_panel_->clear_ghost_suggestion();
+        request_repaint();
+        return;
+    }
+
+    const auto elapsed = std::chrono::steady_clock::now() - repl_last_edit_time_;
+    if (elapsed >= kReplCompletionShowDelay) {
+        show_repl_completion_ghost();
+    } else {
+        request_repaint();
+    }
 }
 
 void DebugApp::submit_repl_expression(const std::string& expression) {

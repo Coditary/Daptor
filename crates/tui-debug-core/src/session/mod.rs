@@ -77,7 +77,23 @@ pub struct AdapterCapabilities {
     #[serde(default)]
     pub supports_function_breakpoints: bool,
     #[serde(default)]
+    pub supports_completions_request: bool,
+    #[serde(default)]
     pub exception_breakpoint_filters: Vec<ExceptionBreakpointFilter>,
+}
+
+/// A single REPL completion candidate from the debug adapter.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompletionItem {
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default)]
+    pub selection_start: usize,
+    #[serde(default)]
+    pub selection_length: usize,
 }
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -298,6 +314,7 @@ pub struct DebugSession {
     supports_goto_targets: bool,
     supports_data_breakpoints: bool,
     supports_function_breakpoints: bool,
+    supports_completions_request: bool,
     exception_breakpoint_filters: Vec<ExceptionBreakpointFilter>,
     adapter: DebugAdapterKind,
     breakpoint_hit_counts: HashMap<(String, u32), u32>,
@@ -336,6 +353,7 @@ impl DebugSession {
             supports_goto_targets: false,
             supports_data_breakpoints: false,
             supports_function_breakpoints: false,
+            supports_completions_request: false,
             exception_breakpoint_filters: Vec::new(),
             adapter: DebugAdapterKind::Debugpy,
             breakpoint_hit_counts: HashMap::new(),
@@ -377,6 +395,7 @@ impl DebugSession {
             supports_goto_targets: false,
             supports_data_breakpoints: false,
             supports_function_breakpoints: false,
+            supports_completions_request: false,
             exception_breakpoint_filters: Vec::new(),
             adapter: DebugAdapterKind::Lldb,
             breakpoint_hit_counts: HashMap::new(),
@@ -577,6 +596,12 @@ impl DebugSession {
         {
             self.supports_function_breakpoints = enabled;
         }
+        if let Some(enabled) = value
+            .get("supportsCompletionsRequest")
+            .and_then(|value| value.as_bool())
+        {
+            self.supports_completions_request = enabled;
+        }
         if let Some(filters) = value
             .get("exceptionBreakpointFilters")
             .and_then(|value| value.as_array())
@@ -627,6 +652,7 @@ impl DebugSession {
             supports_goto_targets: self.supports_goto_targets,
             supports_data_breakpoints: self.supports_data_breakpoints,
             supports_function_breakpoints: self.supports_function_breakpoints,
+            supports_completions_request: self.supports_completions_request,
             exception_breakpoint_filters: self.exception_breakpoint_filters.clone(),
         };
         snapshot.breakpoint_hits = self.collect_breakpoint_hits();
@@ -1683,6 +1709,72 @@ impl DebugSession {
 
         let parsed = serde_json::from_value::<EvalBody>(body)?;
         Ok(parsed.result)
+    }
+
+    pub fn completions(&self, text: &str, column: i64, frame_id: i64) -> Result<Vec<CompletionItem>> {
+        if !self.supports_completions_request {
+            return Ok(vec![]);
+        }
+        if !matches!(self.state, SessionState::Stopped { .. }) {
+            bail!("cannot complete while program is running");
+        }
+
+        let seq = self.transport.send_request(
+            "completions",
+            json!({
+                "frameId": frame_id,
+                "text": text,
+                "column": column,
+            }),
+        )?;
+        let body = self.wait_dap_response(seq, REQUEST_TIMEOUT)?;
+
+        #[derive(Deserialize)]
+        struct CompletionsBody {
+            targets: Vec<CompletionTarget>,
+        }
+
+        #[derive(Deserialize)]
+        struct CompletionTarget {
+            label: String,
+            #[serde(rename = "sortText", default)]
+            sort_text: Option<String>,
+            #[serde(default)]
+            detail: Option<String>,
+            #[serde(rename = "selectionStart", default)]
+            selection_start: Option<i64>,
+            #[serde(rename = "selectionLength", default)]
+            selection_length: Option<i64>,
+            #[serde(default)]
+            start: Option<i64>,
+            #[serde(default)]
+            length: Option<i64>,
+        }
+
+        let parsed = serde_json::from_value::<CompletionsBody>(body)?;
+        Ok(parsed
+            .targets
+            .into_iter()
+            .map(|target| {
+                let selection_start = target
+                    .selection_start
+                    .or(target.start)
+                    .unwrap_or(0)
+                    .max(0) as usize;
+                let selection_length = target
+                    .selection_length
+                    .or(target.length)
+                    .unwrap_or(0)
+                    .max(0) as usize;
+                CompletionItem {
+                    label: target.label,
+                    sort_text: target.sort_text,
+                    detail: target.detail,
+                    selection_start,
+                    selection_length,
+                }
+            })
+            .collect())
     }
 
     pub fn terminate(&mut self) -> Result<()> {

@@ -43,6 +43,7 @@ struct DapUiTheme {
     tuinator::Style title_source{tuinator::style_fg_bg(tuinator::Rgb{220, 200, 100}, kBackground)};
     tuinator::Style title_console{tuinator::style_fg_bg(tuinator::Rgb{120, 180, 255}, kBackground)};
     tuinator::Style title_repl{tuinator::style_fg_bg(tuinator::Rgb{180, 140, 220}, kBackground)};
+    tuinator::Style repl_ghost{tuinator::style_fg_bg(tuinator::Rgb{110, 110, 120}, kBackground)};
     tuinator::Style title_watches{tuinator::style_fg_bg(tuinator::Rgb{220, 180, 100}, kBackground)};
     tuinator::Style thread_header{tuinator::style_fg_bg(tuinator::Rgb{0, 255, 255}, kBackground)};
     tuinator::Style thread_stopped{tuinator::style_fg_bg(tuinator::Rgb{0, 255, 0}, kBackground)};

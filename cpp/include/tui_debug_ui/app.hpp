@@ -9,6 +9,7 @@
 #include "tui_debug_ui/highlight_bridge.hpp"
 #include "tui_debug_ui/source_panel.hpp"
 #include "tui_debug_ui/session_backend.hpp"
+#include "tui_debug_ui/repl_panel.hpp"
 #include "tui_debug_ui/session_io_thread.hpp"
 #include "tui_debug_ui/stacks_panel.hpp"
 #include "tui_debug_ui/step_in_selection.hpp"
@@ -242,6 +243,13 @@ class DebugApp {
     void sync_repl_panel();
     void submit_repl_expression(const std::string& expression);
     void deactivate_repl_input(bool clear_draft);
+    void tick_repl_completion();
+    void request_repl_completion();
+    void handle_repl_completions_event(const SessionIoEvent& event);
+    void show_repl_completion_ghost();
+    bool cycle_repl_completion(int delta);
+    void rebuild_repl_completion_matches();
+    void clear_repl_completion_state();
     void resolve_watches_from_locals();
     void capture_watch_input_state();
     void restore_watch_input_state();
@@ -302,6 +310,16 @@ class DebugApp {
     bool watch_input_focused_ = false;
     std::string repl_input_draft_;
     bool repl_input_focused_ = false;
+    std::chrono::steady_clock::time_point repl_last_edit_time_{};
+    std::uint64_t repl_completion_request_id_ = 0;
+    std::uint64_t repl_completion_pending_id_ = 0;
+    std::string repl_completion_request_text_;
+    std::size_t repl_completion_request_column_ = 0;
+    bool repl_completion_fetch_sent_ = false;
+    bool repl_completion_results_ready_ = false;
+    std::vector<ReplCompletionCandidate> repl_completion_candidates_;
+    std::vector<ReplCompletionCandidate> repl_completion_matches_;
+    int repl_completion_selected_index_ = 0;
     int editing_watch_index_ = -1;
     std::string breakpoint_input_draft_;
     bool breakpoint_input_focused_ = false;

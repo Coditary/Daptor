@@ -396,6 +396,47 @@ class MockSessionBackend final : public SessionBackend {
         return true;
     }
 
+    bool fetch_completions(const std::string& text, std::int64_t column, std::int64_t frame_id,
+                           std::string& json_out, std::string& error_out) override {
+        (void)frame_id;
+        if (!launched_) {
+            error_out = "mock session not launched";
+            return false;
+        }
+        if (!stopped_) {
+            error_out = "cannot complete while program is running";
+            return false;
+        }
+
+        const std::size_t replace_start =
+            column > 0 ? static_cast<std::size_t>(column - 1) : text.size();
+        const std::string prefix = replace_start <= text.size() ? text.substr(0, replace_start) : text;
+        const std::size_t token_start = prefix.find_last_of(" .(,=[{+-*/%&|^<>!?");
+        const std::string token =
+            token_start == std::string::npos ? prefix : prefix.substr(token_start + 1);
+        const std::size_t selection_start =
+            token_start == std::string::npos ? 0 : token_start + 1;
+
+        const std::vector<std::string> candidates = {"mock_value", "mock_list", "mock_func", "mock_obj"};
+        std::vector<std::string> matches;
+        for (const std::string& candidate : candidates) {
+            if (token.empty() || candidate.rfind(token, 0) == 0) {
+                matches.push_back(candidate);
+            }
+        }
+        std::sort(matches.begin(), matches.end());
+        if (matches.empty()) {
+            json_out = "[]";
+            return true;
+        }
+
+        const std::string& best = matches.front();
+        json_out = "[{\"label\":\"" + escape_json(best) + "\",\"sortText\":\"" + escape_json(best) +
+                   "\",\"selectionStart\":" + std::to_string(selection_start) + ",\"selectionLength\":" +
+                   std::to_string(token.size()) + "}]";
+        return true;
+    }
+
     bool set_variable(std::int64_t variables_reference, const std::string& name, const std::string& value,
                       std::string& result_out, std::string& error_out) override {
         if (!launched_) {
@@ -574,7 +615,7 @@ class MockSessionBackend final : public SessionBackend {
 
     std::string build_snapshot() const {
         std::ostringstream json;
-        json << R"({"type":"snapshot","snapshot":{"capabilities":{"supports_step_back":true,"supports_step_in_targets":true,"supports_goto_targets":true,"supports_data_breakpoints":true,"supports_function_breakpoints":true,"exception_breakpoint_filters":[{"filter":"raised","label":"Raised Exceptions","default":false},{"filter":"uncaught","label":"Uncaught Exceptions","default":true},{"filter":"cxx-throw","label":"C++ Throw","default":false,"supports_condition":true}]},)";
+        json << R"({"type":"snapshot","snapshot":{"capabilities":{"supports_step_back":true,"supports_step_in_targets":true,"supports_goto_targets":true,"supports_data_breakpoints":true,"supports_function_breakpoints":true,"supports_completions_request":true,"exception_breakpoint_filters":[{"filter":"raised","label":"Raised Exceptions","default":false},{"filter":"uncaught","label":"Uncaught Exceptions","default":true},{"filter":"cxx-throw","label":"C++ Throw","default":false,"supports_condition":true}]},)";
         if (session_state_ == "exited") {
             json << R"("state":"Exited","threads":[],"stack_frames":[],"scopes":[],"variables":[]}})";
             return json.str();

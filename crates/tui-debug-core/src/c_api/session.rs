@@ -157,6 +157,16 @@ impl CSession {
         }
     }
 
+    pub fn completions(&mut self, text: &str, column: i64, frame_id: i64) -> Result<String> {
+        match &mut self.inner {
+            SessionEngine::Dap(session) => {
+                let items = session.completions(text, column, frame_id)?;
+                serde_json::to_string(&items).context("failed to serialize completions")
+            }
+            SessionEngine::Rr(_) => Ok("[]".to_string()),
+        }
+    }
+
     pub fn set_breakpoints(&mut self, path: &str, breakpoints: &[SourceBreakpoint]) -> Result<String> {
         match &mut self.inner {
             SessionEngine::Dap(session) => {

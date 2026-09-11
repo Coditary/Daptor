@@ -28,6 +28,7 @@ DapUiTheme::DapUiTheme() {
     title_console = bold(title_console);
     title_repl = bold(title_repl);
     frame_current = bold(frame_current);
+    repl_ghost.dim = true;
 }
 
 tuinator::BorderGlyphs DapUiTheme::border_glyphs() const {

@@ -207,6 +207,23 @@ class RustSessionBackend final : public SessionBackend {
         return false;
     }
 
+    bool fetch_completions(const std::string& text, std::int64_t column, std::int64_t frame_id,
+                           std::string& json_out, std::string& error_out) override {
+        if (session_ == nullptr) {
+            error_out = "no session";
+            return false;
+        }
+
+        char buffer[16384];
+        if (tui_debug_completions(session_, text.c_str(), column, frame_id, buffer, sizeof(buffer)) == 0) {
+            json_out = buffer;
+            return true;
+        }
+
+        error_out = adapter_last_error();
+        return false;
+    }
+
     bool set_breakpoints(const std::string& path, const std::string& lines_json,
                          std::string& error_out, std::string& results_out) override {
         if (session_ == nullptr) {
