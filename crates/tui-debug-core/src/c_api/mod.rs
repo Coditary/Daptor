@@ -10,7 +10,7 @@ use std::sync::{LazyLock, Mutex};
 use serde_json::Value;
 
 use session::CSession;
-use crate::session::SourceBreakpoint;
+use crate::session::{DataBreakpoint, SourceBreakpoint};
 
 static LAST_ERROR: LazyLock<Mutex<CString>> =
     LazyLock::new(|| Mutex::new(CString::new("").expect("empty string has no NUL")));
@@ -481,11 +481,14 @@ pub extern "C" fn tui_debug_set_breakpoints(
     }
 }
 
-/// Fetch variables for a DAP `variablesReference` into `json_out` as a JSON array.
+/// Resolve a variable to a DAP `dataId` for `setDataBreakpoints`.
+/// Writes `{"dataId":"...","description":"...","accessTypes":["write"]}` to `json_out`.
 #[no_mangle]
-pub extern "C" fn tui_debug_fetch_variables(
+pub extern "C" fn tui_debug_data_breakpoint_info(
     session: *mut c_void,
     variables_reference: i64,
+    frame_id: i64,
+    name: *const c_char,
     json_out: *mut c_char,
     cap: usize,
 ) -> c_int {
@@ -495,7 +498,153 @@ pub extern "C" fn tui_debug_fetch_variables(
         return -1;
     };
 
-    match session.fetch_variables_json(variables_reference) {
+    let name = if name.is_null() {
+        None
+    } else {
+        match c_str_to_rust(name, "name") {
+            Ok(value) => Some(value),
+            Err(err) => {
+                set_last_error(err);
+                return -1;
+            }
+        }
+    };
+
+    match session.data_breakpoint_info(variables_reference, frame_id, name.as_deref()) {
+        Ok(json) => match write_json_to_buffer(&json, json_out, cap) {
+            Ok(()) => 0,
+            Err(err) => {
+                set_last_error(err);
+                -1
+            }
+        },
+        Err(err) => {
+            set_last_error(err.to_string());
+            -1
+        }
+    }
+}
+
+/// Replace all data breakpoints. `breakpoints_json` is a JSON array of
+/// `{"dataId":"...","description":"x","accessType":"write","condition":"..."}`.
+/// On success, writes adapter results to `results_out` when non-null.
+#[no_mangle]
+pub extern "C" fn tui_debug_set_data_breakpoints(
+    session: *mut c_void,
+    breakpoints_json: *const c_char,
+    results_out: *mut c_char,
+    results_cap: usize,
+) -> c_int {
+    clear_last_error();
+
+    let Some(session) = session_from_ptr(session) else {
+        return -1;
+    };
+
+    let breakpoints_json = match c_str_to_rust(breakpoints_json, "breakpoints_json") {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err);
+            return -1;
+        }
+    };
+
+    let parsed: Value = match serde_json::from_str(breakpoints_json) {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(format!("invalid breakpoints_json: {err}"));
+            return -1;
+        }
+    };
+
+    let breakpoints: Vec<DataBreakpoint> = match parsed {
+        Value::Array(items) => items
+            .into_iter()
+            .filter_map(|item| {
+                if !item.is_object() {
+                    return None;
+                }
+                let data_id = item
+                    .get("dataId")
+                    .or_else(|| item.get("data_id"))
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+                    .filter(|value| !value.is_empty())?;
+                let description = item
+                    .get("description")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+                    .unwrap_or_default();
+                let access_type = item
+                    .get("accessType")
+                    .or_else(|| item.get("access_type"))
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| "write".to_string());
+                let condition = item
+                    .get("condition")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+                    .filter(|value| !value.is_empty());
+                Some(DataBreakpoint {
+                    data_id,
+                    description,
+                    access_type,
+                    condition,
+                })
+            })
+            .collect(),
+        _ => {
+            set_last_error("breakpoints_json must be a JSON array");
+            return -1;
+        }
+    };
+
+    match session.set_data_breakpoints(&breakpoints) {
+        Ok(results_json) => {
+            if !results_out.is_null() && results_cap > 0 {
+                if let Err(err) = write_json_to_buffer(&results_json, results_out, results_cap) {
+                    set_last_error(err);
+                    return -1;
+                }
+            }
+            0
+        }
+        Err(err) => {
+            set_last_error(err.to_string());
+            -1
+        }
+    }
+}
+
+/// Fetch variables for a DAP `variablesReference` into `json_out` as a JSON array.
+#[no_mangle]
+pub extern "C" fn tui_debug_fetch_variables(
+    session: *mut c_void,
+    variables_reference: i64,
+    scope_name: *const c_char,
+    json_out: *mut c_char,
+    cap: usize,
+) -> c_int {
+    clear_last_error();
+
+    let Some(session) = session_from_ptr(session) else {
+        return -1;
+    };
+
+    let scope = if scope_name.is_null() {
+        None
+    } else {
+        match c_str_to_rust(scope_name, "scope_name") {
+            Ok(name) => Some(name),
+            Err(err) => {
+                set_last_error(err);
+                return -1;
+            }
+        }
+    };
+
+    match session.fetch_variables_json(variables_reference, scope.as_deref()) {
         Ok(json) => match write_json_to_buffer(&json, json_out, cap) {
             Ok(()) => 0,
             Err(err) => {

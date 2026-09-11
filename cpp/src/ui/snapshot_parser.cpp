@@ -103,6 +103,7 @@ void apply_snapshot_object(DebugUiModel& model, const Json& snapshot) {
         model.supports_step_back = capabilities.value("supports_step_back", false);
         model.supports_step_in_targets = capabilities.value("supports_step_in_targets", false);
         model.supports_goto_targets = capabilities.value("supports_goto_targets", false);
+        model.supports_data_breakpoints = capabilities.value("supports_data_breakpoints", false);
     }
 
     model.threads.clear();
@@ -498,6 +499,7 @@ std::vector<VariableInfo> parse_variables_json(const std::string& json) {
             VariableInfo info{};
             info.name = entry.value("name", std::string{});
             info.value = entry.value("value", std::string{});
+            info.variables_reference = json_int64_or(entry, "variablesReference", 0);
             variables.push_back(std::move(info));
         }
         return variables;
@@ -537,7 +539,6 @@ bool apply_scope_variables_batch(DebugUiModel& model, const std::string& signatu
             return false;
         }
 
-        model.scope_variables.clear();
         for (auto it = variables.begin(); it != variables.end(); ++it) {
             const std::int64_t reference = std::stoll(it.key());
             model.scope_variables[reference] = parse_variables_json(it.value().dump());

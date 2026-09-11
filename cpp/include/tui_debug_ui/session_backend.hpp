@@ -45,7 +45,13 @@ class SessionBackend {
                               std::string& result_out, std::string& error_out) = 0;
     virtual bool set_breakpoints(const std::string& path, const std::string& lines_json,
                                  std::string& error_out, std::string& results_out) = 0;
-    virtual std::optional<std::string> fetch_variables_json(std::int64_t variables_reference) = 0;
+    virtual bool data_breakpoint_info(std::int64_t variables_reference, std::int64_t frame_id,
+                                    const std::string& name, std::string& json_out,
+                                    std::string& error_out) = 0;
+    virtual bool set_data_breakpoints(const std::string& breakpoints_json, std::string& error_out,
+                                      std::string& results_out) = 0;
+    virtual std::optional<std::string> fetch_variables_json(std::int64_t variables_reference,
+                                                            const std::string& scope_name = {}) = 0;
     virtual std::optional<std::string> fetch_source(std::int64_t source_reference) = 0;
     virtual std::optional<std::string> highlight_viewport(const std::string& language, const std::string& source,
                                                           int first_line, int line_count,

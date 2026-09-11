@@ -22,6 +22,13 @@ std::string basename_from_path(const std::string& path) {
     return path.substr(slash + 1);
 }
 
+std::string friendly_data_access_type(const std::string& access_type) {
+    if (access_type == "readWrite") {
+        return "read/write";
+    }
+    return access_type;
+}
+
 }  // namespace
 
 BreakpointsPanel::BreakpointsPanel(const DapUiTheme& theme, tuinator::ScrollViewOptions scroll_options,
@@ -49,6 +56,11 @@ BreakpointsPanel::BreakpointsPanel(const DapUiTheme& theme, tuinator::ScrollView
                 on_edit_hit_condition_(*row, anchor);
             } else if (action == RowActionType::Remove && on_clear_hit_condition_ != nullptr) {
                 on_clear_hit_condition_(*row);
+            }
+            return;
+        case DisplayLineKind::DataBreakpoint:
+            if (action == RowActionType::Remove && on_remove_ != nullptr) {
+                on_remove_(*row);
             }
             return;
         case DisplayLineKind::Breakpoint:
@@ -111,6 +123,12 @@ bool BreakpointsPanel::paths_match(const std::string& left, const std::string& r
 void BreakpointsPanel::set_breakpoints(std::vector<BreakpointRow> rows) {
     rows_ = std::move(rows);
     std::sort(rows_.begin(), rows_.end(), [](const BreakpointRow& left, const BreakpointRow& right) {
+        if (left.kind != right.kind) {
+            return left.kind == BreakpointRowKind::Data;
+        }
+        if (left.kind == BreakpointRowKind::Data) {
+            return left.source_text < right.source_text;
+        }
         if (left.path != right.path) {
             return left.path < right.path;
         }
@@ -129,9 +147,37 @@ void BreakpointsPanel::set_breakpoints(std::vector<BreakpointRow> rows) {
     display_kind.reserve(rows_.size() * 2);
     inline_edit_display_index_ = -1;
 
+    bool data_header_added = false;
     std::string current_path;
     for (std::size_t index = 0; index < rows_.size(); ++index) {
         const BreakpointRow& row = rows_[index];
+        if (row.kind == BreakpointRowKind::Data) {
+            if (!data_header_added) {
+                if (!items.empty()) {
+                    items.push_back("");
+                    display_to_row.push_back(-1);
+                    display_kind.push_back(DisplayLineKind::None);
+                }
+                items.push_back("Data:");
+                display_to_row.push_back(-1);
+                display_kind.push_back(DisplayLineKind::None);
+                data_header_added = true;
+            }
+
+            std::string entry = "  \u2295 " + row.source_text;
+            if (!row.access_type.empty()) {
+                entry += " \u00b7 " + friendly_data_access_type(row.access_type);
+            }
+            items.push_back(std::move(entry));
+            display_to_row.push_back(static_cast<int>(index));
+            display_kind.push_back(DisplayLineKind::DataBreakpoint);
+            continue;
+        }
+
+        if (row.kind != BreakpointRowKind::Source) {
+            continue;
+        }
+
         if (row.path != current_path) {
             if (!items.empty()) {
                 items.push_back("");

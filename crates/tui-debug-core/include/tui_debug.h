@@ -38,6 +38,7 @@ int tui_debug_set_breakpoints(void *session, const char *path, const char *lines
 
 int tui_debug_fetch_variables(void *session,
                               int64_t variables_reference,
+                              const char *scope_name,
                               char *json_out,
                               size_t cap);
 

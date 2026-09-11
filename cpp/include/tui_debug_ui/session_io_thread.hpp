@@ -23,12 +23,15 @@ enum class SessionIoEventKind {
     PollJson,
     ConsoleJson,
     ScopeVariablesReady,
+    VariableChildrenReady,
     SourceReady,
     HighlightReady,
     CommandFinished,
     EvaluateFinished,
     SetVariableFinished,
     BreakpointsFinished,
+    DataBreakpointInfoReady,
+    DataBreakpointsFinished,
     StepInTargetsReady,
     GotoTargetsReady,
 };
@@ -68,8 +71,12 @@ class SessionIoThread {
     void post_evaluate(const std::string& expression, std::int64_t frame_id, const std::string& context);
     void post_set_variable(std::int64_t variables_reference, const std::string& name, const std::string& value);
     void post_set_breakpoints(const std::string& path, const std::string& lines_json);
+    void request_data_breakpoint_info(std::int64_t variables_reference, std::int64_t frame_id,
+                                      const std::string& name, const std::string& access_type);
+    void post_set_data_breakpoints(const std::string& breakpoints_json);
     void request_scope_variables(const std::string& signature,
                                  const std::vector<std::pair<std::int64_t, std::string>>& scopes);
+    void request_variable_children(std::int64_t variables_reference, const std::string& path);
     void request_highlight(const std::string& language, const std::string& source, int first_line, int line_count);
     void request_source_fetch(std::int64_t source_reference, const std::string& cache_key);
     void request_step_in_targets(std::int64_t frame_id);
@@ -92,8 +99,11 @@ class SessionIoThread {
     void process_preempting_commands();
     void process_pending_command();
     void process_pending_breakpoints();
+    void process_data_breakpoint_info_fetch();
+    void process_pending_data_breakpoints();
     void dispatch_command(const std::string& op);
     void process_scope_fetch();
+    void process_variable_children_fetch();
     void process_highlight_request();
     void process_source_fetch();
     void process_step_in_targets_fetch();
@@ -131,9 +141,23 @@ class SessionIoThread {
     std::optional<std::string> pending_breakpoints_path_;
     std::optional<std::string> pending_breakpoints_json_;
     std::chrono::steady_clock::time_point breakpoints_posted_at_{};
+    struct DataBreakpointInfoRequest {
+        std::int64_t variables_reference = 0;
+        std::int64_t frame_id = 0;
+        std::string name;
+        std::string access_type;
+    };
+    std::optional<DataBreakpointInfoRequest> data_breakpoint_info_request_;
+    std::optional<std::string> pending_data_breakpoints_json_;
+    std::chrono::steady_clock::time_point data_breakpoints_posted_at_{};
     std::string scope_fetch_signature_;
     std::vector<std::pair<std::int64_t, std::string>> scope_fetch_scopes_;
     bool scope_fetch_pending_ = false;
+    struct VariableChildrenFetchRequest {
+        std::int64_t variables_reference = 0;
+        std::string path;
+    };
+    std::deque<VariableChildrenFetchRequest> variable_children_fetch_queue_;
     std::optional<HighlightRequest> highlight_request_;
     std::optional<std::int64_t> source_fetch_reference_;
     std::string source_fetch_cache_key_;

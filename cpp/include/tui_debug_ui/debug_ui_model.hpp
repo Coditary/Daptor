@@ -62,12 +62,25 @@ struct ScopeInfo {
     std::int64_t variables_reference = 0;
 };
 
+struct ScopeVariableRowMeta {
+    std::int64_t container_reference = 0;
+    std::int64_t expand_reference = 0;
+    /// Stable expand key: scope name + `\x1F`-separated variable names (survives DAP ref changes).
+    std::string expand_path;
+    std::string variable_name;
+    bool show_edit = false;
+};
+
 struct VariableInfo {
     std::string name;
     std::string value;
+    std::int64_t variables_reference = 0;
+
+    [[nodiscard]] bool has_children() const { return variables_reference > 0; }
 
     friend bool operator==(const VariableInfo& lhs, const VariableInfo& rhs) {
-        return lhs.name == rhs.name && lhs.value == rhs.value;
+        return lhs.name == rhs.name && lhs.value == rhs.value &&
+               lhs.variables_reference == rhs.variables_reference;
     }
 };
 
@@ -115,6 +128,7 @@ class DebugUiModel {
     bool supports_step_back = false;
     bool supports_step_in_targets = false;
     bool supports_goto_targets = false;
+    bool supports_data_breakpoints = false;
 
     /// Apply a JSON snapshot from the Rust session.
     void apply_snapshot_json(const std::string& json);

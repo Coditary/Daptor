@@ -16,6 +16,23 @@ use crate::dap::{DapTransport, spawn_debugpy_adapter, spawn_lldb_dap_adapter};
 mod rr_session;
 pub use rr_session::RrDebugSession;
 
+fn is_heavy_register_group(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    ["vector", "simd", "mmx", "sse", "avx", "neon"]
+        .iter()
+        .any(|token| lower.contains(token))
+}
+
+fn is_simd_register_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.starts_with("xmm")
+        || lower.starts_with("ymm")
+        || lower.starts_with("zmm")
+        || (lower.starts_with("mm")
+            && lower.len() >= 3
+            && lower[2..].chars().all(|ch| ch.is_ascii_digit()))
+}
+
 /// Which DAP adapter backs this session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DebugAdapterKind {
@@ -32,6 +49,8 @@ pub struct AdapterCapabilities {
     pub supports_step_in_targets: bool,
     #[serde(default)]
     pub supports_goto_targets: bool,
+    #[serde(default)]
+    pub supports_data_breakpoints: bool,
 }
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -158,6 +177,31 @@ pub struct BreakpointHitInfo {
     pub hit_count: u32,
 }
 
+/// Data breakpoint sent to the debug adapter (`setDataBreakpoints`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataBreakpoint {
+    pub data_id: String,
+    pub description: String,
+    pub access_type: String,
+    pub condition: Option<String>,
+}
+
+/// Result of `dataBreakpointInfo`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataBreakpointInfoResult {
+    pub data_id: String,
+    pub description: Option<String>,
+    pub access_types: Vec<String>,
+}
+
+/// Adapter response for one data breakpoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataBreakpointResult {
+    pub data_id: String,
+    pub verified: bool,
+    pub message: Option<String>,
+}
+
 /// Snapshot of debugger state at a stop point.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionSnapshot {
@@ -186,6 +230,7 @@ pub struct DebugSession {
     supports_step_in_targets: bool,
     supports_step_back: bool,
     supports_goto_targets: bool,
+    supports_data_breakpoints: bool,
     adapter: DebugAdapterKind,
     breakpoint_hit_counts: HashMap<(String, u32), u32>,
     breakpoint_ids: HashMap<i64, (String, u32)>,
@@ -214,6 +259,7 @@ impl DebugSession {
             supports_step_in_targets: false,
             supports_step_back: false,
             supports_goto_targets: false,
+            supports_data_breakpoints: false,
             adapter: DebugAdapterKind::Debugpy,
             breakpoint_hit_counts: HashMap::new(),
             breakpoint_ids: HashMap::new(),
@@ -245,6 +291,7 @@ impl DebugSession {
             supports_step_in_targets: false,
             supports_step_back: false,
             supports_goto_targets: false,
+            supports_data_breakpoints: false,
             adapter: DebugAdapterKind::Lldb,
             breakpoint_hit_counts: HashMap::new(),
             breakpoint_ids: HashMap::new(),
@@ -381,6 +428,12 @@ impl DebugSession {
         {
             self.supports_step_back = enabled;
         }
+        if let Some(enabled) = value
+            .get("supportsDataBreakpoints")
+            .and_then(|value| value.as_bool())
+        {
+            self.supports_data_breakpoints = enabled;
+        }
     }
 
     fn attach_capabilities(&self, mut snapshot: SessionSnapshot) -> SessionSnapshot {
@@ -388,6 +441,7 @@ impl DebugSession {
             supports_step_back: self.supports_step_back,
             supports_step_in_targets: self.supports_step_in_targets,
             supports_goto_targets: self.supports_goto_targets,
+            supports_data_breakpoints: self.supports_data_breakpoints,
         };
         snapshot.breakpoint_hits = self.collect_breakpoint_hits();
         snapshot
@@ -993,6 +1047,64 @@ impl DebugSession {
         Ok(parsed.variables)
     }
 
+    /// Flatten empty container variables for display (locals, globals, etc.).
+    pub fn variables_for_display(&self, variables_reference: i64) -> Result<Vec<Variable>> {
+        self.variables_expanded(variables_reference, 0)
+    }
+
+    /// Show the useful subset of LLDB register groups (GPR / flags), not full SIMD dumps.
+    pub fn variables_registers_display(&self, variables_reference: i64) -> Result<Vec<Variable>> {
+        let groups = self.variables(variables_reference)?;
+        let mut flattened = Vec::new();
+        for group in groups {
+            if group.variables_reference > 0 && group.value.trim().is_empty() {
+                if is_heavy_register_group(&group.name) {
+                    continue;
+                }
+                let children = self.variables(group.variables_reference)?;
+                for child in children {
+                    if !is_simd_register_name(&child.name) {
+                        flattened.push(child);
+                    }
+                }
+            } else if !is_simd_register_name(&group.name) {
+                flattened.push(group);
+            }
+        }
+        Ok(flattened)
+    }
+
+    pub fn variables_for_scope_display(
+        &self,
+        variables_reference: i64,
+        scope_name: &str,
+    ) -> Result<Vec<Variable>> {
+        if scope_name == "Registers" || scope_name.starts_with("Register") {
+            self.variables_registers_display(variables_reference)
+        } else {
+            self.variables_for_display(variables_reference)
+        }
+    }
+
+    fn variables_expanded(&self, variables_reference: i64, depth: u32) -> Result<Vec<Variable>> {
+        const MAX_DEPTH: u32 = 2;
+        let variables = self.variables(variables_reference)?;
+        if depth >= MAX_DEPTH {
+            return Ok(variables);
+        }
+
+        let mut flattened = Vec::new();
+        for var in variables {
+            if var.variables_reference > 0 && var.value.trim().is_empty() {
+                let children = self.variables_expanded(var.variables_reference, depth + 1)?;
+                flattened.extend(children);
+            } else {
+                flattened.push(var);
+            }
+        }
+        Ok(flattened)
+    }
+
     pub fn set_variable(&self, variables_reference: i64, name: &str, value: &str) -> Result<Variable> {
         if !matches!(self.state, SessionState::Stopped { .. }) {
             bail!("cannot set variable while program is running");
@@ -1108,6 +1220,106 @@ impl DebugSession {
             .collect::<Vec<_>>();
         self.apply_source_breakpoint_results(&path_key, &request_lines, &results);
         Ok(results)
+    }
+
+    /// Resolve a variable to a DAP `dataId` for `setDataBreakpoints`.
+    pub fn data_breakpoint_info(
+        &mut self,
+        variables_reference: i64,
+        frame_id: i64,
+        name: Option<&str>,
+    ) -> Result<DataBreakpointInfoResult> {
+        if !self.supports_data_breakpoints {
+            bail!("debug adapter does not support data breakpoints");
+        }
+
+        let mut args = json!({
+            "variablesReference": variables_reference,
+            "frameId": frame_id,
+        });
+        if let Some(name) = name.filter(|value| !value.is_empty()) {
+            args["name"] = json!(name);
+        }
+
+        let seq = self.transport.send_request("dataBreakpointInfo", args)?;
+        let body = self.transport.wait_response(seq, REQUEST_TIMEOUT)?;
+
+        #[derive(Deserialize)]
+        struct InfoBody {
+            #[serde(rename = "dataId")]
+            data_id: Option<String>,
+            description: Option<String>,
+            #[serde(rename = "accessTypes", default)]
+            access_types: Vec<String>,
+        }
+
+        let parsed = serde_json::from_value::<InfoBody>(body).context("invalid dataBreakpointInfo response")?;
+        let data_id = parsed
+            .data_id
+            .filter(|value| !value.is_empty())
+            .context("dataBreakpointInfo returned no dataId")?;
+
+        Ok(DataBreakpointInfoResult {
+            data_id,
+            description: parsed.description,
+            access_types: parsed.access_types,
+        })
+    }
+
+    /// Push UI data breakpoints to the debug adapter.
+    pub fn set_data_breakpoints(&mut self, breakpoints: &[DataBreakpoint]) -> Result<Vec<DataBreakpointResult>> {
+        if !self.supports_data_breakpoints {
+            bail!("debug adapter does not support data breakpoints");
+        }
+
+        let payload: Vec<serde_json::Value> = breakpoints
+            .iter()
+            .map(|breakpoint| {
+                let mut entry = json!({
+                    "dataId": breakpoint.data_id,
+                    "accessType": breakpoint.access_type,
+                });
+                if let Some(condition) = &breakpoint.condition {
+                    if !condition.is_empty() {
+                        entry["condition"] = json!(condition);
+                    }
+                }
+                entry
+            })
+            .collect();
+
+        let seq = self
+            .transport
+            .send_request("setDataBreakpoints", json!({ "breakpoints": payload }))?;
+        let body = self.transport.wait_response(seq, REQUEST_TIMEOUT)?;
+
+        #[derive(Deserialize)]
+        struct BpResponse {
+            breakpoints: Vec<BpInfo>,
+        }
+        #[derive(Deserialize)]
+        struct BpInfo {
+            verified: Option<bool>,
+            message: Option<String>,
+        }
+
+        let parsed = serde_json::from_value::<BpResponse>(body).context("invalid setDataBreakpoints response")?;
+        Ok(parsed
+            .breakpoints
+            .into_iter()
+            .enumerate()
+            .map(|(index, bp)| {
+                let data_id = breakpoints
+                    .get(index)
+                    .map(|entry| entry.data_id.clone())
+                    .unwrap_or_default();
+                DataBreakpointResult {
+                    data_id,
+                    verified: bp.verified.unwrap_or(false),
+                    message: bp.message,
+                }
+            })
+            .collect())
     }
 
     pub fn shutdown(&mut self) -> Result<()> {

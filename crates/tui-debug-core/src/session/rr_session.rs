@@ -316,6 +316,7 @@ impl RrDebugSession {
                 supports_step_back: true,
                 supports_step_in_targets: false,
                 supports_goto_targets: false,
+                supports_data_breakpoints: false,
             },
             breakpoint_hits: vec![],
         })
@@ -334,6 +335,7 @@ impl RrDebugSession {
                 supports_step_back: true,
                 supports_step_in_targets: false,
                 supports_goto_targets: false,
+                supports_data_breakpoints: false,
             },
         }
     }

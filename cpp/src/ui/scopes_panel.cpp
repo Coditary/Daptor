@@ -29,9 +29,7 @@ ScopesPanel::ScopesPanel(const DapUiTheme& theme, tuinator::ScrollViewOptions sc
         if (!name.has_value()) {
             return;
         }
-        if (action == RowActionType::Add && on_watch_ != nullptr) {
-            on_watch_(*name);
-        } else if (action == RowActionType::Edit && on_edit_variable_ != nullptr) {
+        if (action == RowActionType::Edit && on_edit_variable_ != nullptr) {
             on_edit_variable_(*name);
         }
     });
@@ -53,6 +51,11 @@ ScopesPanel::ScopesPanel(const DapUiTheme& theme, tuinator::ScrollViewOptions sc
             on_inline_edit_cancel_();
         }
     });
+    list_->set_on_row_context([this](int index, const std::string& /*item*/, tuinator::Point anchor) {
+        if (on_context_ != nullptr) {
+            on_context_(index, anchor);
+        }
+    });
 
     pane_ = std::make_unique<TitledScrollPane>(title, std::move(list), theme.title_scopes, theme.panel_background,
                                                std::move(scroll_options), true);
@@ -64,38 +67,53 @@ ScopesPanel::ScopesPanel(const DapUiTheme& theme, tuinator::ScrollViewOptions sc
 std::unique_ptr<tuinator::Widget> ScopesPanel::release_widget() { return pane_->release_widget(); }
 
 std::optional<std::string> ScopesPanel::variable_name_from_row(const std::string& line) {
-    if (line.size() < 5 || line[0] != ' ' || line[1] != ' ') {
-        return std::nullopt;
+    if (const auto parsed = NavigableListView::parse_scope_variable_row(line)) {
+        return std::string(parsed->name);
     }
-    const std::size_t equals = line.find(" = ", 2);
-    if (equals == std::string::npos) {
-        return std::nullopt;
-    }
-    return line.substr(2, equals - 2);
+    return std::nullopt;
 }
 
-void ScopesPanel::set_scope_names(std::vector<std::string> names) {
+void ScopesPanel::set_on_activate(ActivateCallback callback) {
+    on_activate_ = std::move(callback);
+    if (list_ != nullptr) {
+        list_->set_on_activate([this](int index) {
+            if (on_activate_) {
+                on_activate_(index);
+            }
+        });
+    }
+}
+
+void ScopesPanel::set_scope_names(std::vector<std::string> names, std::vector<bool> show_edit) {
     if (list_ == nullptr) {
         return;
     }
 
     std::vector<std::string> items;
     items.reserve(names.size());
+    std::vector<bool> row_show_edit;
+    row_show_edit.reserve(names.size());
     inline_edit_display_index_ = -1;
 
-    for (std::string& row : names) {
+    for (std::size_t row_index = 0; row_index < names.size(); ++row_index) {
+        std::string& row = names[row_index];
+        const bool editable =
+            row_index < show_edit.size() ? show_edit[row_index] : false;
         if (inline_edit_.active) {
             const std::optional<std::string> name = variable_name_from_row(row);
             if (name.has_value() && *name == inline_edit_.variable_name) {
                 items.push_back(kInlineVariableEditRow);
+                row_show_edit.push_back(false);
                 inline_edit_display_index_ = static_cast<int>(items.size()) - 1;
                 continue;
             }
         }
+        row_show_edit.push_back(editable);
         items.push_back(std::move(row));
     }
 
     const bool items_changed = list_->items() != items;
+    list_->set_variable_row_show_edit(row_show_edit);
     if (items_changed) {
         list_->assign_items(std::move(items));
     }
@@ -180,6 +198,8 @@ bool ScopesPanel::handle_inline_edit_key(const tuinator::Event& event) {
 }
 
 void ScopesPanel::set_on_watch(WatchCallback callback) { on_watch_ = std::move(callback); }
+
+void ScopesPanel::set_on_context(ContextCallback callback) { on_context_ = std::move(callback); }
 
 void ScopesPanel::set_on_edit_variable(EditVariableCallback callback) {
     on_edit_variable_ = std::move(callback);

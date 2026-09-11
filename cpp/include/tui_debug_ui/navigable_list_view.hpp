@@ -6,7 +6,9 @@
 
 #include <chrono>
 #include <functional>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_set>
 #include <variant>
 #include <vector>
@@ -44,6 +46,16 @@ enum class RowActionType {
 inline constexpr const char* kInlineWhenEditRow = "\x1E\x01when";
 inline constexpr const char* kInlineHitEditRow = "\x1E\x01hit";
 inline constexpr const char* kInlineVariableEditRow = "\x1E\x01var";
+inline constexpr const char* kScopeExpandCollapsed = "\xe2\x96\xb8 ";
+inline constexpr const char* kScopeExpandExpanded = "\xe2\x96\xbe ";
+
+struct ScopeVariableRowParts {
+    int depth = 0;
+    bool expandable = false;
+    bool expanded = false;
+    std::string_view name;
+    std::string_view value;
+};
 
 /// ListView that also accepts j/k for selection (vim-style navigation).
 class NavigableListView : public tuinator::ListView {
@@ -55,12 +67,14 @@ class NavigableListView : public tuinator::ListView {
     void set_paint_mode(ListPaintMode mode, const DapUiTheme* theme);
     void set_stopped_thread_headers(std::unordered_set<std::string> headers);
 
+    tuinator::Size preferred_size() const override;
     void paint(tuinator::PaintContext& ctx) const override;
     void layout(tuinator::Rect bounds) override;
     bool handle_event(const tuinator::Event& event) override;
 
     /// Replace items and reset scroll so the first row stays visible.
     void assign_items(std::vector<std::string> items);
+    void set_variable_row_show_edit(std::vector<bool> show_edit);
 
     using ActivateCallback = std::function<void(int index)>;
     using RowClickCallback = std::function<bool(int index, const std::string& item)>;
@@ -82,6 +96,8 @@ class NavigableListView : public tuinator::ListView {
     [[nodiscard]] static bool is_inline_when_edit_row(const std::string& item);
     [[nodiscard]] static bool is_inline_hit_edit_row(const std::string& item);
     [[nodiscard]] static bool is_inline_variable_edit_row(const std::string& item);
+    [[nodiscard]] static std::optional<ScopeVariableRowParts> parse_scope_variable_row(std::string_view line);
+    [[nodiscard]] static bool is_scope_loading_row(std::string_view line);
     using InlineEditChangeCallback = std::function<void(const std::string& value)>;
     using InlineEditSubmitCallback = std::function<void(const std::string& value)>;
     using InlineEditCancelCallback = std::function<void()>;
@@ -99,12 +115,15 @@ class NavigableListView : public tuinator::ListView {
                           const std::string& prefix, bool selected, int max_width) const;
     [[nodiscard]] bool row_shows_actions(int index, const std::string& item) const;
     [[nodiscard]] int row_action_reserve_width() const;
-    void paint_row_actions(tuinator::Canvas& canvas, int row, const std::string& item, int max_width) const;
+    [[nodiscard]] int row_action_reserve_width_for_item(int index, const std::string& item) const;
+    [[nodiscard]] bool variable_row_allows_edit(int index) const;
+    void paint_row_actions(tuinator::Canvas& canvas, int index, int row, const std::string& item, int max_width) const;
     void paint_inline_row_edit(tuinator::Canvas& canvas, int row, const std::string& prefix, int max_width) const;
     void paint_inline_variable_row_edit(tuinator::Canvas& canvas, int row, int max_width) const;
     [[nodiscard]] std::optional<RowActionType> row_action_at(int index, const std::string& item, int local_x) const;
     [[nodiscard]] tuinator::Point to_terminal_point(tuinator::Point event_position) const;
     [[nodiscard]] static bool is_breakpoint_condition_row(const std::string& item);
+    [[nodiscard]] static bool is_breakpoint_data_row(const std::string& item);
 
     tuinator::Style row_background_;
     tuinator::Style item_style_;
@@ -122,6 +141,7 @@ class NavigableListView : public tuinator::ListView {
     RowClickCallback on_row_click_;
     RowContextCallback on_row_context_;
     RowActionCallback on_row_action_;
+    std::vector<bool> variable_row_show_edit_;
     struct InlineRowEdit {
         int row = -1;
         std::string prefix;

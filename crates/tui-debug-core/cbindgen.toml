@@ -25,6 +25,8 @@ include = [
     "tui_debug_drain_console",
     "tui_debug_evaluate",
     "tui_debug_set_breakpoints",
+    "tui_debug_data_breakpoint_info",
+    "tui_debug_set_data_breakpoints",
     "tui_debug_fetch_variables",
     "tui_debug_set_variable",
     "tui_debug_fetch_source",

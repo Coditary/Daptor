@@ -62,9 +62,11 @@ class RustSessionBackend final : public SessionBackend {
         });
     }
 
-    std::optional<std::string> fetch_variables_json(std::int64_t variables_reference) override {
-        return read_json_buffer([this, variables_reference](char* out, std::size_t cap) {
-            return tui_debug_fetch_variables(session_, variables_reference, out, cap);
+    std::optional<std::string> fetch_variables_json(std::int64_t variables_reference,
+                                                    const std::string& scope_name) override {
+        return read_json_buffer([this, variables_reference, &scope_name](char* out, std::size_t cap) {
+            const char* scope = scope_name.empty() ? nullptr : scope_name.c_str();
+            return tui_debug_fetch_variables(session_, variables_reference, scope, out, cap);
         });
     }
 
@@ -170,6 +172,43 @@ class RustSessionBackend final : public SessionBackend {
         char results_buffer[4096];
         if (tui_debug_set_breakpoints(session_, path.c_str(), lines_json.c_str(), results_buffer,
                                       sizeof(results_buffer)) == 0) {
+            results_out = results_buffer;
+            return true;
+        }
+
+        error_out = adapter_last_error();
+        return false;
+    }
+
+    bool data_breakpoint_info(std::int64_t variables_reference, std::int64_t frame_id, const std::string& name,
+                              std::string& json_out, std::string& error_out) override {
+        if (session_ == nullptr) {
+            error_out = "no session";
+            return false;
+        }
+
+        char buffer[4096];
+        const char* name_ptr = name.empty() ? nullptr : name.c_str();
+        if (tui_debug_data_breakpoint_info(session_, variables_reference, frame_id, name_ptr, buffer,
+                                           sizeof(buffer)) == 0) {
+            json_out = buffer;
+            return true;
+        }
+
+        error_out = adapter_last_error();
+        return false;
+    }
+
+    bool set_data_breakpoints(const std::string& breakpoints_json, std::string& error_out,
+                              std::string& results_out) override {
+        if (session_ == nullptr) {
+            error_out = "no session";
+            return false;
+        }
+
+        char results_buffer[4096];
+        if (tui_debug_set_data_breakpoints(session_, breakpoints_json.c_str(), results_buffer,
+                                           sizeof(results_buffer)) == 0) {
             results_out = results_buffer;
             return true;
         }

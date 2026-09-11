@@ -435,6 +435,34 @@ class MockSessionBackend final : public SessionBackend {
         return true;
     }
 
+    bool data_breakpoint_info(std::int64_t variables_reference, std::int64_t frame_id, const std::string& name,
+                              std::string& json_out, std::string& error_out) override {
+        (void)variables_reference;
+        (void)frame_id;
+        if (!launched_) {
+            error_out = "mock session not launched";
+            return false;
+        }
+        if (name.empty()) {
+            error_out = "variable name required";
+            return false;
+        }
+        json_out = R"({"dataId":"mock:")" + escape_json(name) +
+                   R"(","description":")" + escape_json(name) + R"(","accessTypes":["read","write","readWrite"]})";
+        return true;
+    }
+
+    bool set_data_breakpoints(const std::string& breakpoints_json, std::string& error_out,
+                              std::string& results_out) override {
+        if (!launched_) {
+            error_out = "mock session not launched";
+            return false;
+        }
+        (void)breakpoints_json;
+        results_out = "[]";
+        return true;
+    }
+
     std::optional<std::string> fetch_source(std::int64_t source_reference) override {
         if (!launched_ || source_reference <= 0) {
             return std::nullopt;
@@ -442,7 +470,8 @@ class MockSessionBackend final : public SessionBackend {
         return "# mock adapter source\nimport json\n\ndef encode(obj):\n    return json.dumps(obj)\n";
     }
 
-    std::optional<std::string> fetch_variables_json(std::int64_t variables_reference) override {
+    std::optional<std::string> fetch_variables_json(std::int64_t variables_reference,
+                                                    const std::string& /*scope_name*/) override {
         if (!launched_) {
             return std::nullopt;
         }
@@ -522,7 +551,7 @@ class MockSessionBackend final : public SessionBackend {
 
     std::string build_snapshot() const {
         std::ostringstream json;
-        json << R"({"type":"snapshot","snapshot":{"capabilities":{"supports_step_back":true,"supports_step_in_targets":true,"supports_goto_targets":true},)";
+        json << R"({"type":"snapshot","snapshot":{"capabilities":{"supports_step_back":true,"supports_step_in_targets":true,"supports_goto_targets":true,"supports_data_breakpoints":true},)";
         if (session_state_ == "exited") {
             json << R"("state":"Exited","threads":[],"stack_frames":[],"scopes":[],"variables":[]}})";
             return json.str();

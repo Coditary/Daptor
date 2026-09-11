@@ -29,12 +29,16 @@ class ScopesPanel {
                 const std::string& title = "Locals");
 
     std::unique_ptr<tuinator::Widget> release_widget();
-    void set_scope_names(std::vector<std::string> names);
+    void set_scope_names(std::vector<std::string> names, std::vector<bool> show_edit = {});
+    using ActivateCallback = std::function<void(int index)>;
+    void set_on_activate(ActivateCallback callback);
     using WatchCallback = std::function<void(const std::string& variable_name)>;
+    using ContextCallback = std::function<void(int index, tuinator::Point anchor)>;
     using EditVariableCallback = std::function<void(const std::string& variable_name)>;
     using SubmitCallback = std::function<void(const std::string& value)>;
     using ChangeCallback = std::function<void(const std::string& value)>;
     void set_on_watch(WatchCallback callback);
+    void set_on_context(ContextCallback callback);
     void set_on_edit_variable(EditVariableCallback callback);
     void set_on_submit(SubmitCallback callback);
     void set_on_change(ChangeCallback callback);
@@ -65,7 +69,9 @@ class ScopesPanel {
     NavigableListView* list_ = nullptr;
     InlineEditTarget inline_edit_;
     int inline_edit_display_index_ = -1;
+    ActivateCallback on_activate_;
     WatchCallback on_watch_;
+    ContextCallback on_context_;
     EditVariableCallback on_edit_variable_;
     SubmitCallback on_submit_;
     ChangeCallback on_change_;

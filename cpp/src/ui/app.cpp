@@ -148,21 +148,45 @@ std::optional<std::string> try_resolve_watch_from_model(const tui_debug_ui::Debu
 }
 
 std::optional<std::string> variable_name_from_scope_row(const std::string& line) {
-    if (line.size() < 5 || line[0] != ' ' || line[1] != ' ') {
-        return std::nullopt;
+    if (const auto parsed = tui_debug_ui::NavigableListView::parse_scope_variable_row(line)) {
+        return std::string(parsed->name);
     }
-    const std::size_t equals = line.find(" = ", 2);
-    if (equals == std::string::npos) {
-        return std::nullopt;
+    return std::nullopt;
+}
+
+bool scope_variable_value_is_empty(const std::string& value) {
+    return std::find_if(value.begin(), value.end(),
+                        [](unsigned char ch) { return !std::isspace(ch); }) == value.end();
+}
+
+std::string truncate_scope_display_value(const std::string& value) {
+    constexpr std::size_t kMaxWidth = 56;
+    if (value.size() <= kMaxWidth) {
+        return value;
     }
-    return line.substr(2, equals - 2);
+    return value.substr(0, kMaxWidth - 1) + "…";
+}
+
+std::string format_scope_leaf_row(const std::string& indent, const std::string& name, const std::string& value) {
+    if (scope_variable_value_is_empty(value)) {
+        return indent + name;
+    }
+    return indent + name + " = " + truncate_scope_display_value(value);
 }
 
 void patch_scope_row_value(std::vector<std::string>& rows, const std::string& name, const std::string& value) {
     for (std::string& row : rows) {
-        const std::optional<std::string> row_name = variable_name_from_scope_row(row);
-        if (row_name.has_value() && *row_name == name) {
-            row = "  " + name + " = " + value;
+        const auto parsed = tui_debug_ui::NavigableListView::parse_scope_variable_row(row);
+        if (!parsed.has_value() || parsed->name != name) {
+            continue;
+        }
+        const std::string indent(static_cast<std::size_t>(parsed->depth) * 2, ' ');
+        if (parsed->expandable) {
+            row = indent + (parsed->expanded ? tui_debug_ui::kScopeExpandExpanded
+                                             : tui_debug_ui::kScopeExpandCollapsed) +
+                  name;
+        } else {
+            row = format_scope_leaf_row(indent, name, value);
         }
     }
 }
@@ -174,10 +198,10 @@ std::optional<std::string> try_resolve_watch_from_scope_rows(const std::vector<s
         return std::nullopt;
     }
 
-    const std::string prefix = "  " + key + " = ";
     for (const std::string& row : rows) {
-        if (row.rfind(prefix, 0) == 0) {
-            return row.substr(prefix.size());
+        const auto parsed = tui_debug_ui::NavigableListView::parse_scope_variable_row(row);
+        if (parsed.has_value() && parsed->name == key) {
+            return std::string(parsed->value);
         }
     }
 
@@ -228,7 +252,7 @@ bool is_locals_scope_name(const std::string& name) {
 
 bool scope_rows_include_variables(const std::vector<std::string>& rows) {
     for (const std::string& row : rows) {
-        if (row.size() >= 2 && row[0] == ' ' && row[1] == ' ') {
+        if (tui_debug_ui::NavigableListView::parse_scope_variable_row(row).has_value()) {
             return true;
         }
     }
@@ -242,29 +266,129 @@ struct VariableEditTarget {
 
 std::optional<VariableEditTarget> find_variable_for_edit(const tui_debug_ui::DebugUiModel& model,
                                                            const std::string& name) {
-    for (const tui_debug_ui::ScopeInfo& scope : model.scopes) {
-        const auto vars_it = model.scope_variables.find(scope.variables_reference);
-        if (vars_it == model.scope_variables.end()) {
-            continue;
-        }
-        for (const tui_debug_ui::VariableInfo& variable : vars_it->second) {
+    for (const auto& [variables_reference, variables] : model.scope_variables) {
+        for (const tui_debug_ui::VariableInfo& variable : variables) {
             if (variable.name == name) {
-                return VariableEditTarget{scope.variables_reference, variable.value};
+                return VariableEditTarget{variables_reference, variable.value};
             }
         }
     }
     return std::nullopt;
 }
 
-std::vector<std::string> build_scope_rows(const tui_debug_ui::DebugUiModel& model) {
+constexpr char kScopePathSeparator = '\x1F';
+
+using ExpandedScopePaths = std::unordered_set<std::string>;
+using PendingScopePaths = std::unordered_set<std::string>;
+
+std::optional<std::int64_t> resolve_scope_path_reference(const tui_debug_ui::DebugUiModel& model,
+                                                         const std::string& path) {
+    const std::size_t first_sep = path.find(kScopePathSeparator);
+    if (first_sep == std::string::npos) {
+        return std::nullopt;
+    }
+
+    const std::string scope_name = path.substr(0, first_sep);
+    const tui_debug_ui::ScopeInfo* scope = nullptr;
+    for (const tui_debug_ui::ScopeInfo& candidate : model.scopes) {
+        if (candidate.name == scope_name) {
+            scope = &candidate;
+            break;
+        }
+    }
+    if (scope == nullptr || scope->variables_reference <= 0) {
+        return std::nullopt;
+    }
+
+    std::int64_t container_reference = scope->variables_reference;
+    std::size_t pos = first_sep + 1;
+    while (pos < path.size()) {
+        const std::size_t next_sep = path.find(kScopePathSeparator, pos);
+        const std::string segment =
+            next_sep == std::string::npos ? path.substr(pos) : path.substr(pos, next_sep - pos);
+
+        const auto vars_it = model.scope_variables.find(container_reference);
+        if (vars_it == model.scope_variables.end()) {
+            return std::nullopt;
+        }
+
+        const tui_debug_ui::VariableInfo* variable = nullptr;
+        for (const tui_debug_ui::VariableInfo& candidate : vars_it->second) {
+            if (candidate.name == segment) {
+                variable = &candidate;
+                break;
+            }
+        }
+        if (variable == nullptr || variable->variables_reference <= 0) {
+            return std::nullopt;
+        }
+        if (next_sep == std::string::npos) {
+            return variable->variables_reference;
+        }
+
+        container_reference = variable->variables_reference;
+        pos = next_sep + 1;
+    }
+    return std::nullopt;
+}
+
+void append_scope_variables(const tui_debug_ui::DebugUiModel& model, std::int64_t container_reference, int depth,
+                            const std::string& path_prefix, const ExpandedScopePaths& expanded,
+                            const PendingScopePaths& pending, std::vector<std::string>& rows,
+                            std::vector<tui_debug_ui::ScopeVariableRowMeta>& meta) {
+    const auto vars_it = model.scope_variables.find(container_reference);
+    if (vars_it == model.scope_variables.end()) {
+        return;
+    }
+
+    const std::string indent(static_cast<std::size_t>(depth) * 2, ' ');
+    for (const tui_debug_ui::VariableInfo& variable : vars_it->second) {
+        tui_debug_ui::ScopeVariableRowMeta row_meta{};
+        row_meta.container_reference = container_reference;
+        row_meta.variable_name = variable.name;
+        row_meta.show_edit = !variable.has_children();
+
+        if (variable.has_children()) {
+            const std::string path = path_prefix + variable.name;
+            row_meta.expand_path = path;
+            row_meta.expand_reference = variable.variables_reference;
+            const bool is_expanded = expanded.count(path) > 0;
+            const bool is_pending = pending.count(path) > 0;
+            std::string row = indent;
+            row += is_expanded ? tui_debug_ui::kScopeExpandExpanded : tui_debug_ui::kScopeExpandCollapsed;
+            row += variable.name;
+            rows.push_back(std::move(row));
+            meta.push_back(row_meta);
+
+            if (is_expanded) {
+                if (is_pending) {
+                    rows.push_back(std::string(static_cast<std::size_t>(depth + 1) * 2, ' ') + "…");
+                    meta.push_back({});
+                } else {
+                    append_scope_variables(model, variable.variables_reference, depth + 1, path, expanded, pending,
+                                           rows, meta);
+                }
+            }
+            continue;
+        }
+
+        rows.push_back(format_scope_leaf_row(indent, variable.name, variable.value));
+        meta.push_back(row_meta);
+    }
+}
+
+std::vector<std::string> build_scope_rows(const tui_debug_ui::DebugUiModel& model, const ExpandedScopePaths& expanded,
+                                          const PendingScopePaths& pending,
+                                          std::vector<tui_debug_ui::ScopeVariableRowMeta>& meta) {
     std::vector<std::string> scope_rows;
+    meta.clear();
     for (const tui_debug_ui::ScopeInfo& scope : model.scopes) {
         scope_rows.push_back(scope.name + ":");
-        const auto vars_it = model.scope_variables.find(scope.variables_reference);
-        if (vars_it != model.scope_variables.end()) {
-            for (const tui_debug_ui::VariableInfo& variable : vars_it->second) {
-                scope_rows.push_back("  " + variable.name + " = " + variable.value);
-            }
+        meta.push_back({});
+        if (scope.variables_reference > 0) {
+            const std::string path_prefix = scope.name + std::string(1, kScopePathSeparator);
+            append_scope_variables(model, scope.variables_reference, 1, path_prefix, expanded, pending, scope_rows,
+                                   meta);
         }
     }
     return scope_rows;
@@ -919,6 +1043,10 @@ void DebugApp::build_ui() {
         model_.focus = Focus::Scopes;
     });
     scopes_panel_->set_on_inline_edit_cancel([this]() { blur_scope_input(); });
+    scopes_panel_->set_on_activate([this](int index) { toggle_scope_row_expand(index); });
+    scopes_panel_->set_on_context([this](int index, tuinator::Point anchor) {
+        show_scope_variable_context_menu(index, anchor);
+    });
     stacks_panel_ = std::make_unique<StacksPanel>(dap_theme_, scroll_options);
     breakpoints_panel_ = std::make_unique<BreakpointsPanel>(dap_theme_, scroll_options);
     const auto jump_to_stack_frame = [this](const StackFrameRow& frame) {
@@ -937,12 +1065,23 @@ void DebugApp::build_ui() {
     stacks_panel_->set_on_continue([this]() { send_command("continue"); });
     stacks_panel_->set_on_activate(jump_to_stack_frame);
     breakpoints_panel_->set_on_activate([this](const BreakpointRow& row) {
+        if (row.kind == BreakpointRowKind::Data) {
+            model_.status_message = "Data breakpoint: " + row.source_text;
+            sync_status_bar();
+            return;
+        }
         open_source_file(row.path, row.line, true);
         model_.status_message =
             "Opened " + panel_title_from_path(row.path) + ":" + std::to_string(row.line);
         sync_status_bar();
     });
-    breakpoints_panel_->set_on_remove([this](const BreakpointRow& row) { remove_breakpoint_at(row.path, row.line); });
+    breakpoints_panel_->set_on_remove([this](const BreakpointRow& row) {
+        if (row.kind == BreakpointRowKind::Data) {
+            remove_data_breakpoint(row.data_id);
+        } else {
+            remove_breakpoint_at(row.path, row.line);
+        }
+    });
     breakpoints_panel_->set_on_add_condition([this](const BreakpointRow& row, int display_index,
                                                     tuinator::Point action_anchor) {
         open_breakpoint_condition_editor(row.path, row.line, action_anchor, display_index);
@@ -1312,12 +1451,8 @@ void DebugApp::apply_snapshot_json_payload(const std::string& json) {
     step_in_targets_pending_ = false;
     model_.apply_snapshot_json(json);
     if (is_session_stopped()) {
-        for (const ScopeInfo& scope : model_.scopes) {
-            if (scope.variables_reference > 0 && is_locals_scope_name(scope.name) && !model_.variables.empty()) {
-                model_.scope_variables[scope.variables_reference] = model_.variables;
-            }
-        }
-        apply_scope_value_overrides();
+        pending_scope_paths_.clear();
+        scope_variables_fetch_pending_ = false;
     }
     if (!model_.execution_path.empty() && model_.execution_path.rfind("dap:source:", 0) != 0) {
         const std::string resolved = resolve_debugger_source_path(model_.execution_path, program_path_);
@@ -1326,7 +1461,6 @@ void DebugApp::apply_snapshot_json_payload(const std::string& json) {
         }
     }
     ++snapshot_generation_;
-    scope_variables_fetch_pending_ = false;
     scope_variables_fetch_signature_.clear();
     scope_variables_signature_.clear();
     if (const std::string preview_path = preferred_program_source_path(program_path_);
@@ -1335,7 +1469,7 @@ void DebugApp::apply_snapshot_json_payload(const std::string& json) {
     }
     apply_breakpoint_hits_from_snapshot_json(json);
     if (is_session_stopped()) {
-        maybe_follow_execution();
+        sync_execution_location_ui();
         record_breakpoint_hit();
         refresh_breakpoint_hit_counts_from_session();
     }
@@ -1374,7 +1508,86 @@ void DebugApp::apply_console_json_payload(const std::string& json) {
     }
 }
 
+void DebugApp::refresh_scope_rows() {
+    cached_scope_rows_ =
+        build_scope_rows(model_, expanded_scope_paths_, pending_scope_paths_, cached_scope_row_meta_);
+    apply_scope_value_overrides();
+    sync_scopes_list_panel();
+}
+
+void DebugApp::restore_expanded_scope_children() {
+    if (session_io_ == nullptr) {
+        return;
+    }
+
+    for (const std::string& path : expanded_scope_paths_) {
+        if (pending_scope_paths_.count(path) > 0) {
+            continue;
+        }
+
+        const std::optional<std::int64_t> variables_reference = resolve_scope_path_reference(model_, path);
+        if (!variables_reference.has_value() || *variables_reference <= 0) {
+            continue;
+        }
+
+        const auto cached = model_.scope_variables.find(*variables_reference);
+        if (cached != model_.scope_variables.end() && !cached->second.empty()) {
+            continue;
+        }
+
+        pending_scope_paths_.insert(path);
+        session_io_->request_variable_children(*variables_reference, path);
+    }
+}
+
+void DebugApp::apply_variable_children_payload(std::int64_t variables_reference, const std::string& path,
+                                               const std::string& json, bool success) {
+    pending_scope_paths_.erase(path);
+    if (success) {
+        model_.scope_variables[variables_reference] = parse_variables_json(json);
+        apply_scope_value_overrides();
+    }
+    refresh_scope_rows();
+    restore_expanded_scope_children();
+    request_repaint();
+}
+
+void DebugApp::toggle_scope_row_expand(int row_index) {
+    if (scopes_panel_ != nullptr && scopes_panel_->has_active_inline_edit()) {
+        return;
+    }
+    if (row_index < 0 || row_index >= static_cast<int>(cached_scope_row_meta_.size())) {
+        return;
+    }
+
+    const ScopeVariableRowMeta& row_meta = cached_scope_row_meta_[static_cast<std::size_t>(row_index)];
+    if (row_meta.expand_path.empty() || row_meta.expand_reference <= 0) {
+        return;
+    }
+
+    const std::string& path = row_meta.expand_path;
+    if (expanded_scope_paths_.count(path) > 0) {
+        expanded_scope_paths_.erase(path);
+        refresh_scope_rows();
+        request_repaint();
+        return;
+    }
+
+    expanded_scope_paths_.insert(path);
+    const std::int64_t ref = row_meta.expand_reference;
+    const auto cached = model_.scope_variables.find(ref);
+    if (cached == model_.scope_variables.end() || cached->second.empty()) {
+        pending_scope_paths_.insert(path);
+        if (session_io_ != nullptr) {
+            session_io_->request_variable_children(ref, path);
+        }
+    }
+    refresh_scope_rows();
+    request_repaint();
+}
+
 void DebugApp::apply_scope_variables_payload(const std::string& signature, const std::string& json) {
+    model_.scope_variables.clear();
     if (!apply_scope_variables_batch(model_, signature, json)) {
         scope_variables_fetch_pending_ = false;
         return;
@@ -1386,11 +1599,8 @@ void DebugApp::apply_scope_variables_payload(const std::string& signature, const
         apply_scope_value_overrides();
         return;
     }
-    apply_scope_value_overrides();
-    cached_scope_rows_ = build_scope_rows(model_);
-    if (scopes_panel_ != nullptr) {
-        scopes_panel_->set_scope_names(cached_scope_rows_);
-    }
+    refresh_scope_rows();
+    restore_expanded_scope_children();
     resolve_watches_from_locals();
     request_repaint();
 }
@@ -1423,6 +1633,9 @@ void DebugApp::handle_session_event(const SessionIoEvent& event) {
         } else {
             scope_variables_fetch_pending_ = false;
         }
+        break;
+    case SessionIoEventKind::VariableChildrenReady:
+        apply_variable_children_payload(event.scope_ref, event.detail, event.payload, event.success);
         break;
     case SessionIoEventKind::SourceReady:
         if (event.success && event.detail == pending_source_fetch_key_) {
@@ -1545,6 +1758,19 @@ void DebugApp::handle_session_event(const SessionIoEvent& event) {
             source_panel_->mark_dirty();
         }
         break;
+    case SessionIoEventKind::DataBreakpointInfoReady:
+        handle_data_breakpoint_info_payload(event);
+        break;
+    case SessionIoEventKind::DataBreakpointsFinished:
+        model_.status_message = event.success
+                                    ? "Data breakpoints updated"
+                                    : (event.detail.empty() ? "Data breakpoint update failed" : event.detail);
+        if (event.success) {
+            sync_breakpoints_list_panel();
+            mark_all_panels_dirty();
+        }
+        sync_status_bar();
+        break;
     case SessionIoEventKind::StepInTargetsReady:
         handle_step_in_targets_payload(event);
         break;
@@ -1608,17 +1834,20 @@ void DebugApp::sync_ui_from_model() {
     maybe_apply_reverse_continue_hint();
     sync_status_bar();
     if (scopes_panel_ != nullptr && !variable_set_in_flight_) {
-        apply_scope_value_overrides();
-        std::vector<std::string> scope_rows = build_scope_rows(model_);
+        std::vector<ScopeVariableRowMeta> meta;
+        std::vector<std::string> scope_rows =
+            build_scope_rows(model_, expanded_scope_paths_, pending_scope_paths_, meta);
         const bool next_has_values = scope_rows_include_variables(scope_rows);
         const bool cached_has_values = scope_rows_include_variables(cached_scope_rows_);
-        const bool keep_stale_values =
-            !next_has_values && cached_has_values &&
-            (scope_variables_fetch_pending_ || !is_session_stopped() || !model_.scope_variables.empty());
+        const bool keep_stale_values = cached_has_values && !next_has_values &&
+                                       (scope_variables_fetch_pending_ || !is_session_stopped() ||
+                                        !model_.scope_variables.empty());
 
         if (!keep_stale_values && scope_rows != cached_scope_rows_) {
-            cached_scope_rows_ = scope_rows;
-            scopes_panel_->set_scope_names(scope_rows);
+            cached_scope_rows_ = std::move(scope_rows);
+            cached_scope_row_meta_ = std::move(meta);
+            apply_scope_value_overrides();
+            sync_scopes_list_panel();
         }
     }
     if (stacks_panel_ != nullptr) {
@@ -1781,6 +2010,9 @@ void DebugApp::invalidate_scope_variables() {
     scope_variables_fetch_pending_ = false;
     model_.scope_variables.clear();
     cached_scope_rows_.clear();
+    cached_scope_row_meta_.clear();
+    expanded_scope_paths_.clear();
+    pending_scope_paths_.clear();
 }
 
 void DebugApp::request_scope_variables_refresh() {
@@ -1805,9 +2037,7 @@ void DebugApp::patch_local_variable_value(const std::string& name, const std::st
     }
 
     patch_scope_row_value(cached_scope_rows_, name, value);
-    if (scopes_panel_ != nullptr) {
-        scopes_panel_->set_scope_names(cached_scope_rows_);
-    }
+    sync_scopes_list_panel();
 }
 
 void DebugApp::apply_scope_value_overrides() {
@@ -1862,18 +2092,13 @@ void DebugApp::maybe_request_scope_variables() {
     std::vector<std::pair<std::int64_t, std::string>> scopes;
     scopes.reserve(model_.scopes.size());
     for (const ScopeInfo& scope : model_.scopes) {
-        if (!is_locals_scope_name(scope.name) || scope.variables_reference <= 0) {
+        if (scope.variables_reference <= 0) {
             continue;
         }
         scopes.emplace_back(scope.variables_reference, scope.name);
     }
     if (scopes.empty()) {
-        for (const ScopeInfo& scope : model_.scopes) {
-            if (scope.variables_reference > 0) {
-                scopes.emplace_back(scope.variables_reference, scope.name);
-                break;
-            }
-        }
+        return;
     }
 
     scope_variables_fetch_pending_ = true;
@@ -3190,12 +3415,33 @@ void DebugApp::sync_breakpoints_list_panel() {
     }
 
     std::vector<BreakpointRow> rows;
+    for (const DataBreakpointEntry& entry : data_breakpoints_) {
+        BreakpointRow row{};
+        row.kind = BreakpointRowKind::Data;
+        if (!entry.variable_name.empty()) {
+            row.source_text = entry.variable_name;
+        } else if (!entry.description.empty()) {
+            row.source_text = entry.description;
+        } else {
+            row.source_text = entry.data_id;
+        }
+        row.data_id = entry.data_id;
+        row.access_type = entry.access_type;
+        rows.push_back(std::move(row));
+    }
     for (const auto& [path, breakpoints] : breakpoints_by_path_) {
         const std::string normalized = normalize_source_path(path);
         const std::string file_text = read_file_or_empty(normalized);
         for (const auto& [bp_line, info] : breakpoints) {
-            rows.push_back(BreakpointRow{normalized, bp_line, trimmed_line_text_at(file_text, bp_line),
-                                         info.condition, info.hit_condition, info.hit_count});
+            BreakpointRow row{};
+            row.kind = BreakpointRowKind::Source;
+            row.path = normalized;
+            row.line = bp_line;
+            row.source_text = trimmed_line_text_at(file_text, bp_line);
+            row.condition = info.condition;
+            row.hit_condition = info.hit_condition;
+            row.hit_count = info.hit_count;
+            rows.push_back(std::move(row));
         }
     }
 
@@ -3258,6 +3504,201 @@ void DebugApp::flush_breakpoints_to_session() {
         pushed.insert(normalized);
         push_breakpoints_to_session(normalized);
     }
+    flush_data_breakpoints_to_session();
+}
+
+std::string DebugApp::build_data_breakpoints_json() const {
+    std::string json = "[";
+    bool first = true;
+    for (const DataBreakpointEntry& entry : data_breakpoints_) {
+        if (entry.data_id.empty()) {
+            continue;
+        }
+        if (!first) {
+            json += ',';
+        }
+        json += "{\"dataId\":\"" + escape_json_string(entry.data_id) + "\"";
+        if (!entry.description.empty()) {
+            json += ",\"description\":\"" + escape_json_string(entry.description) + "\"";
+        }
+        if (!entry.access_type.empty()) {
+            json += ",\"accessType\":\"" + escape_json_string(entry.access_type) + "\"";
+        }
+        if (!entry.condition.empty()) {
+            json += ",\"condition\":\"" + escape_json_string(entry.condition) + "\"";
+        }
+        json += '}';
+        first = false;
+    }
+    json += ']';
+    return json;
+}
+
+void DebugApp::push_data_breakpoints_to_session() {
+    if (session_io_ == nullptr || !session_io_->is_active() || model_.session_state == "disconnected") {
+        return;
+    }
+    if (!model_.supports_data_breakpoints) {
+        return;
+    }
+    session_io_->post_set_data_breakpoints(build_data_breakpoints_json());
+}
+
+void DebugApp::flush_data_breakpoints_to_session() { push_data_breakpoints_to_session(); }
+
+void DebugApp::request_data_breakpoint(const std::string& variable_name, std::int64_t container_reference,
+                                       const std::string& access_type) {
+    if (!model_.supports_data_breakpoints) {
+        model_.status_message = "Data breakpoints not supported by this adapter";
+        sync_status_bar();
+        return;
+    }
+    if (!is_session_stopped()) {
+        model_.status_message = "Set data breakpoints while stopped";
+        sync_status_bar();
+        return;
+    }
+    if (session_io_ == nullptr || variable_name.empty() || container_reference <= 0) {
+        return;
+    }
+
+    pending_data_breakpoint_ = PendingDataBreakpointRequest{variable_name, access_type};
+    session_io_->request_data_breakpoint_info(container_reference, current_frame_id(), variable_name, access_type);
+    model_.status_message = "Resolving data breakpoint for " + variable_name + "…";
+    sync_status_bar();
+}
+
+void DebugApp::remove_data_breakpoint(const std::string& data_id) {
+    if (data_id.empty()) {
+        return;
+    }
+
+    const auto it = std::remove_if(data_breakpoints_.begin(), data_breakpoints_.end(),
+                                   [&](const DataBreakpointEntry& entry) { return entry.data_id == data_id; });
+    if (it == data_breakpoints_.end()) {
+        return;
+    }
+    data_breakpoints_.erase(it, data_breakpoints_.end());
+    model_.status_message = "Removed data breakpoint";
+    sync_breakpoints_list_panel();
+    push_data_breakpoints_to_session();
+    sync_status_bar();
+    mark_all_panels_dirty();
+}
+
+namespace {
+
+std::optional<std::string> extract_json_string_field(const std::string& json, const std::string& key) {
+    const std::string needle = "\"" + key + "\":\"";
+    const std::size_t start = json.find(needle);
+    if (start == std::string::npos) {
+        return std::nullopt;
+    }
+    std::size_t index = start + needle.size();
+    std::string value;
+    while (index < json.size()) {
+        const char ch = json[index++];
+        if (ch == '\\' && index < json.size()) {
+            value.push_back(json[index++]);
+            continue;
+        }
+        if (ch == '"') {
+            return value;
+        }
+        value.push_back(ch);
+    }
+    return std::nullopt;
+}
+
+}  // namespace
+
+void DebugApp::handle_data_breakpoint_info_payload(const SessionIoEvent& event) {
+    if (!pending_data_breakpoint_.has_value()) {
+        return;
+    }
+
+    PendingDataBreakpointRequest pending = *pending_data_breakpoint_;
+    pending_data_breakpoint_.reset();
+
+    if (!event.success || event.payload.empty()) {
+        model_.status_message =
+            event.detail.empty() ? "Failed to resolve data breakpoint" : ("Data breakpoint failed: " + event.detail);
+        sync_status_bar();
+        return;
+    }
+
+    const std::optional<std::string> data_id = extract_json_string_field(event.payload, "dataId");
+    if (!data_id.has_value() || data_id->empty()) {
+        model_.status_message = "Adapter returned no data breakpoint id";
+        sync_status_bar();
+        return;
+    }
+
+    const std::optional<std::string> description = extract_json_string_field(event.payload, "description");
+    DataBreakpointEntry entry{};
+    entry.data_id = *data_id;
+    entry.variable_name = pending.variable_name;
+    entry.description = description.has_value() && !description->empty() ? *description : pending.variable_name;
+    entry.access_type = event.detail.empty() ? pending.access_type : event.detail;
+
+    const std::string status_label = entry.variable_name.empty() ? entry.description : entry.variable_name;
+    const std::string status_access = entry.access_type;
+    auto existing = std::find_if(data_breakpoints_.begin(), data_breakpoints_.end(),
+                                 [&](const DataBreakpointEntry& candidate) { return candidate.data_id == entry.data_id; });
+    if (existing != data_breakpoints_.end()) {
+        *existing = std::move(entry);
+    } else {
+        data_breakpoints_.push_back(std::move(entry));
+    }
+
+    model_.status_message = "Data breakpoint on " + status_label + " (" + status_access + ")";
+    sync_breakpoints_list_panel();
+    push_data_breakpoints_to_session();
+    sync_status_bar();
+    mark_all_panels_dirty();
+}
+
+void DebugApp::show_scope_variable_context_menu(int row_index, tuinator::Point anchor) {
+    if (context_menu_ == nullptr || row_index < 0 || row_index >= static_cast<int>(cached_scope_row_meta_.size())) {
+        return;
+    }
+
+    const ScopeVariableRowMeta& row_meta = cached_scope_row_meta_[static_cast<std::size_t>(row_index)];
+    if (row_meta.variable_name.empty() || row_meta.container_reference <= 0) {
+        return;
+    }
+
+    std::vector<ContextMenu::Item> items;
+    if (model_.supports_data_breakpoints && is_session_stopped()) {
+        items.push_back(ContextMenu::Item{
+            "Break on write",
+            [this, name = row_meta.variable_name, container = row_meta.container_reference]() {
+                request_data_breakpoint(name, container, "write");
+            },
+        });
+        items.push_back(ContextMenu::Item{
+            "Break on read",
+            [this, name = row_meta.variable_name, container = row_meta.container_reference]() {
+                request_data_breakpoint(name, container, "read");
+            },
+        });
+        items.push_back(ContextMenu::Item{
+            "Break on read/write",
+            [this, name = row_meta.variable_name, container = row_meta.container_reference]() {
+                request_data_breakpoint(name, container, "readWrite");
+            },
+        });
+    }
+
+    if (items.empty()) {
+        return;
+    }
+
+    model_.focus = Focus::Scopes;
+    apply_focus();
+    context_menu_->open(anchor, overlay_clip_bounds(), std::move(items));
+    context_menu_->layout(overlay_clip_bounds());
+    request_full_screen_refresh();
 }
 
 void DebugApp::sync_breakpoints_to_panel() {
@@ -4058,11 +4499,47 @@ void DebugApp::restore_scope_input_state() {
     scopes_panel_->focus_input();
 }
 
+void DebugApp::sync_execution_location_ui() {
+    if (!is_session_stopped() || source_panel_ == nullptr || model_.execution_line <= 0 ||
+        model_.execution_path.empty()) {
+        if (source_panel_ != nullptr) {
+            source_panel_->set_execution_line(0);
+        }
+        return;
+    }
+
+    const bool viewing =
+        viewing_same_source(model_.source_path, model_.source_reference, model_.execution_path,
+                            model_.execution_source_reference);
+    const int line = static_cast<int>(model_.execution_line);
+
+    if (follow_execution_) {
+        maybe_follow_execution();
+    }
+
+    source_panel_->set_execution_line(viewing ? line : 0);
+    if (viewing) {
+        source_panel_->set_cursor_line(line);
+        if (follow_execution_) {
+            scroll_source_to_line(line);
+        } else {
+            source_panel_->mark_dirty();
+        }
+        cached_follow_line_ = model_.execution_line;
+    }
+    sync_status_bar();
+}
+
 void DebugApp::sync_scopes_list_panel() {
     if (scopes_panel_ == nullptr) {
         return;
     }
-    scopes_panel_->set_scope_names(cached_scope_rows_);
+    std::vector<bool> show_edit;
+    show_edit.reserve(cached_scope_row_meta_.size());
+    for (const ScopeVariableRowMeta& row : cached_scope_row_meta_) {
+        show_edit.push_back(row.show_edit);
+    }
+    scopes_panel_->set_scope_names(cached_scope_rows_, std::move(show_edit));
 }
 
 bool DebugApp::scope_prompt_active() const {

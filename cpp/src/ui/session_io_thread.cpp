@@ -1,5 +1,6 @@
 #include "tui_debug_ui/session_io_thread.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <sstream>
 #include <utility>
@@ -107,6 +108,7 @@ void SessionIoThread::post_command(const std::string& op) {
             scope_fetch_pending_ = false;
             scope_fetch_signature_.clear();
             scope_fetch_scopes_.clear();
+            variable_children_fetch_queue_.clear();
             scope_fetch_aborted_.store(true, std::memory_order_release);
         }
     }
@@ -146,6 +148,28 @@ void SessionIoThread::post_set_breakpoints(const std::string& path, const std::s
     cv_.notify_all();
 }
 
+void SessionIoThread::request_data_breakpoint_info(std::int64_t variables_reference, std::int64_t frame_id,
+                                                   const std::string& name, const std::string& access_type) {
+    if (variables_reference <= 0 || name.empty()) {
+        return;
+    }
+    {
+        std::lock_guard lock(mutex_);
+        data_breakpoint_info_request_ =
+            DataBreakpointInfoRequest{variables_reference, frame_id, name, access_type};
+    }
+    cv_.notify_all();
+}
+
+void SessionIoThread::post_set_data_breakpoints(const std::string& breakpoints_json) {
+    {
+        std::lock_guard lock(mutex_);
+        pending_data_breakpoints_json_ = breakpoints_json;
+        data_breakpoints_posted_at_ = std::chrono::steady_clock::now();
+    }
+    cv_.notify_all();
+}
+
 void SessionIoThread::request_scope_variables(const std::string& signature,
                                               const std::vector<std::pair<std::int64_t, std::string>>& scopes) {
     {
@@ -153,6 +177,23 @@ void SessionIoThread::request_scope_variables(const std::string& signature,
         scope_fetch_signature_ = signature;
         scope_fetch_scopes_ = scopes;
         scope_fetch_pending_ = true;
+    }
+    cv_.notify_all();
+}
+
+void SessionIoThread::request_variable_children(std::int64_t variables_reference, const std::string& path) {
+    if (variables_reference <= 0 || path.empty()) {
+        return;
+    }
+    {
+        std::lock_guard lock(mutex_);
+        if (std::find_if(variable_children_fetch_queue_.begin(), variable_children_fetch_queue_.end(),
+                         [&](const VariableChildrenFetchRequest& request) {
+                             return request.path == path;
+                         }) != variable_children_fetch_queue_.end()) {
+            return;
+        }
+        variable_children_fetch_queue_.push_back(VariableChildrenFetchRequest{variables_reference, path});
     }
     cv_.notify_all();
 }
@@ -318,6 +359,7 @@ void SessionIoThread::clear_pending_adapter_work() {
     scope_fetch_pending_ = false;
     scope_fetch_signature_.clear();
     scope_fetch_scopes_.clear();
+    variable_children_fetch_queue_.clear();
     highlight_request_.reset();
     source_fetch_reference_.reset();
     source_fetch_cache_key_.clear();
@@ -356,19 +398,28 @@ void SessionIoThread::process_scope_fetch() {
 
     scope_fetch_aborted_.store(false, std::memory_order_release);
 
+    auto requeue_scope_fetch = [&]() {
+        std::lock_guard lock(mutex_);
+        scope_fetch_pending_ = true;
+        scope_fetch_signature_ = signature;
+        scope_fetch_scopes_ = scopes;
+    };
+
     std::ostringstream json;
     json << "{\"signature\":\"" << signature << "\",\"variables\":{";
     bool first_scope = true;
     for (const auto& [variables_reference, scope_name] : scopes) {
         (void)scope_name;
         if (has_pending_execution_command() || scope_fetch_aborted_.load(std::memory_order_acquire)) {
+            requeue_scope_fetch();
             return;
         }
         if (variables_reference <= 0) {
             continue;
         }
-        const auto vars_json = backend_->fetch_variables_json(variables_reference);
+        const auto vars_json = backend_->fetch_variables_json(variables_reference, scope_name);
         if (has_pending_execution_command() || scope_fetch_aborted_.load(std::memory_order_acquire)) {
+            requeue_scope_fetch();
             return;
         }
         if (!vars_json.has_value()) {
@@ -383,6 +434,48 @@ void SessionIoThread::process_scope_fetch() {
     json << "}}";
 
     push_event(SessionIoEvent{SessionIoEventKind::ScopeVariablesReady, true, json.str(), signature});
+}
+
+void SessionIoThread::process_variable_children_fetch() {
+    if (!adapter_live_.load(std::memory_order_acquire)) {
+        return;
+    }
+
+    if (has_pending_execution_command()) {
+        return;
+    }
+
+    VariableChildrenFetchRequest request{};
+    {
+        std::lock_guard lock(mutex_);
+        if (variable_children_fetch_queue_.empty()) {
+            return;
+        }
+        request = variable_children_fetch_queue_.front();
+        variable_children_fetch_queue_.pop_front();
+    }
+
+    if (has_pending_execution_command() || scope_fetch_aborted_.load(std::memory_order_acquire)) {
+        std::lock_guard lock(mutex_);
+        variable_children_fetch_queue_.push_front(request);
+        return;
+    }
+
+    const auto vars_json = backend_->fetch_variables_json(request.variables_reference, {});
+    if (has_pending_execution_command() || scope_fetch_aborted_.load(std::memory_order_acquire)) {
+        std::lock_guard lock(mutex_);
+        variable_children_fetch_queue_.push_front(request);
+        return;
+    }
+
+    if (!vars_json.has_value()) {
+        push_event(SessionIoEvent{SessionIoEventKind::VariableChildrenReady, false, {}, request.path,
+                                 request.variables_reference});
+        return;
+    }
+
+    push_event(SessionIoEvent{SessionIoEventKind::VariableChildrenReady, true, *vars_json, request.path,
+                             request.variables_reference});
 }
 
 void SessionIoThread::process_source_fetch() {
@@ -436,6 +529,60 @@ void SessionIoThread::process_highlight_request() {
         .highlight_line_count = request.line_count,
     };
     push_event(std::move(event));
+}
+
+void SessionIoThread::process_data_breakpoint_info_fetch() {
+    if (!adapter_live_.load(std::memory_order_acquire) || has_pending_execution_command()) {
+        return;
+    }
+
+    std::optional<DataBreakpointInfoRequest> request;
+    {
+        std::lock_guard lock(mutex_);
+        if (!data_breakpoint_info_request_.has_value()) {
+            return;
+        }
+        request = std::move(data_breakpoint_info_request_);
+        data_breakpoint_info_request_.reset();
+    }
+
+    std::string error;
+    std::string json;
+    const bool ok = backend_->data_breakpoint_info(request->variables_reference, request->frame_id, request->name,
+                                                   json, error);
+    push_event(SessionIoEvent{
+        .kind = SessionIoEventKind::DataBreakpointInfoReady,
+        .success = ok,
+        .payload = ok ? std::move(json) : std::string{},
+        .detail = ok ? request->access_type : std::move(error),
+        .scope_ref = request->variables_reference,
+    });
+}
+
+void SessionIoThread::process_pending_data_breakpoints() {
+    if (!adapter_live_.load(std::memory_order_acquire) || has_pending_execution_command()) {
+        return;
+    }
+
+    std::optional<std::string> json;
+    {
+        std::lock_guard lock(mutex_);
+        if (!pending_data_breakpoints_json_.has_value()) {
+            return;
+        }
+        const auto elapsed = std::chrono::steady_clock::now() - data_breakpoints_posted_at_;
+        if (elapsed < kBreakpointDebounce) {
+            return;
+        }
+        json = std::move(pending_data_breakpoints_json_);
+        pending_data_breakpoints_json_.reset();
+    }
+
+    std::string error;
+    std::string results;
+    const bool ok = backend_->set_data_breakpoints(*json, error, results);
+    push_event(SessionIoEvent{SessionIoEventKind::DataBreakpointsFinished, ok,
+                              ok ? std::move(results) : std::string{}, ok ? std::move(*json) : std::move(error)});
 }
 
 void SessionIoThread::process_pending_breakpoints() {
@@ -643,8 +790,15 @@ void SessionIoThread::thread_main() {
                     process_pending_command();
                 }
                 process_pending_breakpoints();
+                process_pending_data_breakpoints();
+                if (!has_pending_execution_command()) {
+                    process_data_breakpoint_info_fetch();
+                }
                 if (!has_pending_execution_command()) {
                     process_scope_fetch();
+                }
+                if (!has_pending_execution_command()) {
+                    process_variable_children_fetch();
                 }
                 if (!has_pending_execution_command()) {
                     process_step_in_targets_fetch();
@@ -659,7 +813,8 @@ void SessionIoThread::thread_main() {
                 return stop_.load(std::memory_order_acquire) || has_pending_command_ ||
                        pending_evaluate_.has_value() || pending_set_variable_.has_value() ||
                        (pending_breakpoints_path_.has_value() && pending_breakpoints_json_.has_value()) ||
-                       scope_fetch_pending_ || highlight_request_.has_value() ||
+                       scope_fetch_pending_ || !variable_children_fetch_queue_.empty() ||
+                       highlight_request_.has_value() ||
                        source_fetch_reference_.has_value() || step_in_targets_frame_.has_value() ||
                        goto_targets_request_.has_value() ||
                        (!launch_started_.load(std::memory_order_acquire) && !program_path_.empty());

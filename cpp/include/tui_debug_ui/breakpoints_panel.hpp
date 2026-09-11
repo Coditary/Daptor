@@ -22,13 +22,21 @@ class TitledScrollPane;
 
 namespace tui_debug_ui {
 
+enum class BreakpointRowKind {
+    Source,
+    Data,
+};
+
 struct BreakpointRow {
+    BreakpointRowKind kind = BreakpointRowKind::Source;
     std::string path;
     int line = 0;
     std::string source_text;
     std::string condition;
     std::string hit_condition;
     std::uint64_t hit_count = 0;
+    std::string data_id;
+    std::string access_type;
 };
 
 struct DapUiTheme;
@@ -86,6 +94,7 @@ class BreakpointsPanel {
         HitCondition,
         WhenConditionEditing,
         HitConditionEditing,
+        DataBreakpoint,
     };
 
     [[nodiscard]] const BreakpointRow* breakpoint_at_display_index(int index) const;

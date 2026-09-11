@@ -1,6 +1,7 @@
 #pragma once
 
 #include "tui_debug_ui/breakpoint_info.hpp"
+#include "tui_debug_ui/data_breakpoint_info.hpp"
 #include "tui_debug_ui/context_menu.hpp"
 #include "tui_debug_ui/dap_ui_theme.hpp"
 #include "tui_debug_ui/debug_ui_model.hpp"
@@ -97,6 +98,11 @@ class DebugApp {
     bool uses_full_file_source() const;
     void sync_status_bar();
     void apply_scope_variables_payload(const std::string& signature, const std::string& json);
+    void apply_variable_children_payload(std::int64_t variables_reference, const std::string& path,
+                                         const std::string& json, bool success);
+    void refresh_scope_rows();
+    void restore_expanded_scope_children();
+    void toggle_scope_row_expand(int row_index);
     void maybe_start_launch();
     void handle_launch_complete();
     bool update_connecting_spinner();
@@ -131,6 +137,7 @@ class DebugApp {
     void capture_scope_input_state();
     void restore_scope_input_state();
     void sync_scopes_list_panel();
+    void sync_execution_location_ui();
     [[nodiscard]] bool scope_prompt_active() const;
     void begin_watch_expression(const std::string& seed);
     void show_breakpoint_context_menu(const std::string& path, int line, tuinator::Point anchor,
@@ -154,6 +161,14 @@ class DebugApp {
     void sync_breakpoints_to_panel();
     void push_breakpoints_to_session(const std::string& path);
     void flush_breakpoints_to_session();
+    void push_data_breakpoints_to_session();
+    void flush_data_breakpoints_to_session();
+    void request_data_breakpoint(const std::string& variable_name, std::int64_t container_reference,
+                                 const std::string& access_type);
+    void remove_data_breakpoint(const std::string& data_id);
+    void show_scope_variable_context_menu(int row_index, tuinator::Point anchor);
+    void handle_data_breakpoint_info_payload(const SessionIoEvent& event);
+    [[nodiscard]] std::string build_data_breakpoints_json() const;
     std::string normalize_source_path(const std::string& path) const;
     void normalize_breakpoint_path_keys();
     void open_source_file(const std::string& path, int line, bool pin, std::int64_t source_reference = 0);
@@ -260,6 +275,9 @@ class DebugApp {
     std::string cached_source_title_;
     std::string cached_status_bar_text_;
     std::vector<std::string> cached_scope_rows_;
+    std::vector<ScopeVariableRowMeta> cached_scope_row_meta_;
+    std::unordered_set<std::string> expanded_scope_paths_;
+    std::unordered_set<std::string> pending_scope_paths_;
     std::vector<std::string> cached_stack_lines_;
     std::uint64_t cached_follow_generation_ = 0;
     std::uint32_t cached_follow_line_ = 0;
@@ -298,6 +316,12 @@ class DebugApp {
     std::optional<BreakpointStopRecord> last_counted_breakpoint_stop_;
     std::unordered_map<std::string, std::vector<HighlightedLine>> source_plain_lines_cache_;
     BreakpointsByPath breakpoints_by_path_;
+    DataBreakpoints data_breakpoints_;
+    struct PendingDataBreakpointRequest {
+        std::string variable_name;
+        std::string access_type;
+    };
+    std::optional<PendingDataBreakpointRequest> pending_data_breakpoint_;
     std::chrono::steady_clock::time_point last_spinner_update_{};
 };
 

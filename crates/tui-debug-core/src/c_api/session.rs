@@ -5,7 +5,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::session::{
-    DebugSession, RrDebugSession, SessionSnapshot, SessionState, SourceBreakpoint,
+    DataBreakpoint, DebugSession, RrDebugSession, SessionSnapshot, SessionState, SourceBreakpoint,
 };
 
 enum SessionEngine {
@@ -173,7 +173,51 @@ impl CSession {
         }
     }
 
-    pub fn fetch_variables_json(&self, variables_reference: i64) -> Result<String> {
+    pub fn data_breakpoint_info(
+        &mut self,
+        variables_reference: i64,
+        frame_id: i64,
+        name: Option<&str>,
+    ) -> Result<String> {
+        match &mut self.inner {
+            SessionEngine::Dap(session) => {
+                let info = session.data_breakpoint_info(variables_reference, frame_id, name)?;
+                serde_json::to_string(&json!({
+                    "dataId": info.data_id,
+                    "description": info.description,
+                    "accessTypes": info.access_types,
+                }))
+                .context("failed to serialize dataBreakpointInfo response")
+            }
+            SessionEngine::Rr(_) => anyhow::bail!("data breakpoints are not supported in rr sessions"),
+        }
+    }
+
+    pub fn set_data_breakpoints(&mut self, breakpoints: &[DataBreakpoint]) -> Result<String> {
+        match &mut self.inner {
+            SessionEngine::Dap(session) => {
+                let results = session.set_data_breakpoints(breakpoints)?;
+                let json = results
+                    .iter()
+                    .map(|breakpoint| {
+                        json!({
+                            "dataId": breakpoint.data_id,
+                            "verified": breakpoint.verified,
+                            "message": breakpoint.message,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                serde_json::to_string(&json).context("failed to serialize data breakpoint results")
+            }
+            SessionEngine::Rr(_) => anyhow::bail!("data breakpoints are not supported in rr sessions"),
+        }
+    }
+
+    pub fn fetch_variables_json(
+        &self,
+        variables_reference: i64,
+        _scope_name: Option<&str>,
+    ) -> Result<String> {
         let variables = match &self.inner {
             SessionEngine::Dap(session) => session.variables(variables_reference)?,
             SessionEngine::Rr(session) => session.variables(variables_reference)?,
