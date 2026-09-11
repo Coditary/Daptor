@@ -38,8 +38,9 @@ cargo run -p tui-debug-cli -- run --mock --program fixtures/hello.py
 
 ### Layout / resize
 
-- **Mouse:** drag the cyan dividers between panes.
-- **Keyboard:** `Alt` + arrow keys resize sidebar and bottom tray; `Alt` + `[` / `]` resize REPL vs console; `Ctrl` + up/down with scopes focused resizes scopes vs stacks.
+- **Mouse:** drag the cyan dividers between main areas; click pane names in the header to switch views, or `◄` / `►` when not all names fit.
+- **Keyboard:** `Alt` + arrow keys resize sidebar width and bottom tray height.
+- **Panel swap:** with sidebar or bottom tray focused, press `[` / `]` (or `<` / `>`) to cycle views. When all names fit, they are shown inline (active name highlighted). Otherwise arrows and `(n/total)` are reserved first; as many names as fit are shown between `◄` and `►`. Only when fewer than two names fit does the header collapse to `◄ Name ►`.
 
 ## Layout
 

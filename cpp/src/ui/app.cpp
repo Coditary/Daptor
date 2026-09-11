@@ -6,6 +6,7 @@
 #include "tui_debug_ui/dap_ui_theme.hpp"
 #include "tui_debug_ui/highlight_bridge.hpp"
 #include "tui_debug_ui/resizable_split_pane.hpp"
+#include "tui_debug_ui/stacked_pane.hpp"
 #include "tui_debug_ui/scopes_panel.hpp"
 #include "tui_debug_ui/snapshot_parser.hpp"
 #include "tui_debug_ui/source_panel.hpp"
@@ -795,16 +796,6 @@ int sidebar_first_size(int terminal_width, std::uint16_t sidebar_pct) {
     return std::max(24, terminal_width * pct / 100);
 }
 
-int repl_first_size(int terminal_width, std::uint16_t repl_pct) {
-    const int pct = static_cast<int>(repl_pct);
-    return std::max(16, terminal_width * pct / 100);
-}
-
-int watches_sidebar_size(int sidebar_height, std::uint16_t watches_pct) {
-    const int pct = static_cast<int>(watches_pct);
-    return std::max(5, sidebar_height * pct / 100);
-}
-
 int bottom_tray_height(int terminal_height, std::uint16_t bottom_pct) {
     const int pct = static_cast<int>(bottom_pct);
     return std::max(8, terminal_height * pct / 100);
@@ -1292,62 +1283,30 @@ void DebugApp::build_ui() {
     auto scopes_widget = scopes_panel_->release_widget();
     auto stacks_widget = stacks_panel_->release_widget();
     auto breakpoints_widget = breakpoints_panel_->release_widget();
-
-    const int scopes_first = std::max(6, main_h * model_.layout.scopes_pct / 100);
-    const int lower_half = std::max(6, (main_h - scopes_first) / 2);
-
-    auto stacks_breakpoints = std::make_unique<ResizableSplitPane>(
-        std::move(stacks_widget), std::move(breakpoints_widget),
-        tuinator::SplitPaneOptions{
-            .orientation = tuinator::SplitOrientation::Vertical,
-            .first_size = lower_half,
-            .divider_style = dap_theme_.divider,
-        },
-        dap_theme_.panel_background);
-    bind_split_pane(stacks_breakpoints.get());
-
     auto watches_widget = watches_panel_->release_widget();
-    watches_widget->set_flex(0);
+    scopes_widget->set_flex(1);
+    stacks_widget->set_flex(1);
+    breakpoints_widget->set_flex(1);
+    watches_widget->set_flex(1);
 
-    auto watches_stacks = std::make_unique<ResizableSplitPane>(
-        std::move(watches_widget), std::move(stacks_breakpoints),
-        tuinator::SplitPaneOptions{
-            .orientation = tuinator::SplitOrientation::Vertical,
-            .first_size = watches_sidebar_size(main_h, model_.layout.watches_pct),
-            .divider_style = dap_theme_.divider,
-        },
-        dap_theme_.panel_background);
-    sidebar_watches_split_ = watches_stacks.get();
-    bind_split_pane(sidebar_watches_split_);
-    sidebar_watches_split_->set_on_first_size_changed([this](int /*first*/) {
-        persist_split_size_as_pct(sidebar_watches_split_, model_.layout.watches_pct, false);
-        if (!divider_drag_active_) {
-            model_.status_message = "Watches " + std::to_string(model_.layout.watches_pct) + "%";
-            if (status_bar_ != nullptr) {
-                status_bar_->set_text(format_status_bar_text());
-            }
-        }
+    std::vector<StackedPane::Entry> sidebar_entries;
+    sidebar_entries.push_back({"Locals", std::move(scopes_widget)});
+    sidebar_entries.push_back({"Threads", std::move(stacks_widget)});
+    sidebar_entries.push_back({"Breakpoints", std::move(breakpoints_widget)});
+    sidebar_entries.push_back({"Watches", std::move(watches_widget)});
+    auto sidebar = std::make_unique<StackedPane>(std::move(sidebar_entries), dap_theme_.panel_background,
+                                                 dap_theme_.label, dap_theme_.title_focused);
+    sidebar_stack_ = sidebar.get();
+    sidebar_stack_->set_active_index(sidebar_stack_index_);
+    sidebar_stack_->set_on_active_changed([this](int index) {
+        sidebar_stack_index_ = index;
+        model_.focus = focus_for_sidebar_index(index);
+        apply_focus();
+        model_.status_message = "Sidebar: " + sidebar_stack_->active_label() + " (" + std::to_string(index + 1) +
+                                "/" + std::to_string(sidebar_stack_->count()) + ") — ◄ ► or [ ]";
+        sync_status_bar();
     });
-
-    auto sidebar = std::make_unique<ResizableSplitPane>(
-        std::move(scopes_widget), std::move(watches_stacks),
-        tuinator::SplitPaneOptions{
-            .orientation = tuinator::SplitOrientation::Vertical,
-            .first_size = scopes_first,
-            .divider_style = dap_theme_.divider,
-        },
-        dap_theme_.panel_background);
-    sidebar_split_ = sidebar.get();
-    bind_split_pane(sidebar_split_);
-    sidebar_split_->set_on_first_size_changed([this](int /*first*/) {
-        persist_split_size_as_pct(sidebar_split_, model_.layout.scopes_pct, false);
-        if (!divider_drag_active_) {
-            model_.status_message = "Scopes " + std::to_string(model_.layout.scopes_pct) + "%";
-            if (status_bar_ != nullptr) {
-                status_bar_->set_text(format_status_bar_text());
-            }
-        }
-    });
+    sidebar->set_flex(0);
 
     auto source_panel = std::make_unique<SourcePanel>();
     source_panel_ = source_panel.get();
@@ -1483,24 +1442,23 @@ void DebugApp::build_ui() {
     auto console_shell = console_section->release_widget();
     console_shell->set_flex(1);
 
-    auto bottom_tray = std::make_unique<ResizableSplitPane>(
-        std::move(repl_shell), std::move(console_shell),
-        tuinator::SplitPaneOptions{
-            .orientation = tuinator::SplitOrientation::Horizontal,
-            .first_size = repl_first_size(term_size.width, model_.layout.repl_pct),
-            .divider_style = dap_theme_.divider,
-        },
-        dap_theme_.panel_background);
-    repl_console_split_ = bottom_tray.get();
-    bind_split_pane(repl_console_split_);
-    repl_console_split_->set_on_first_size_changed([this](int /*first*/) {
-        persist_split_size_as_pct(repl_console_split_, model_.layout.repl_pct, true);
-        if (!divider_drag_active_) {
-            model_.status_message = "REPL " + std::to_string(model_.layout.repl_pct) + "%";
-            if (status_bar_ != nullptr) {
-                status_bar_->set_text(format_status_bar_text());
-            }
+    std::vector<StackedPane::Entry> bottom_entries;
+    bottom_entries.push_back({"REPL", std::move(repl_shell)});
+    bottom_entries.push_back({"Console", std::move(console_shell)});
+    auto bottom_tray = std::make_unique<StackedPane>(std::move(bottom_entries), dap_theme_.panel_background,
+                                                     dap_theme_.label, dap_theme_.title_focused);
+    bottom_stack_ = bottom_tray.get();
+    bottom_stack_->set_active_index(bottom_stack_index_);
+    bottom_stack_->set_on_active_changed([this](int index) {
+        bottom_stack_index_ = index;
+        model_.focus = index == 0 ? Focus::Repl : Focus::Console;
+        if (model_.focus == Focus::Repl) {
+            repl_input_focused_ = false;
         }
+        apply_focus();
+        model_.status_message = "Bottom: " + bottom_stack_->active_label() + " (" + std::to_string(index + 1) +
+                                "/" + std::to_string(bottom_stack_->count()) + ") — ◄ ► or [ ]";
+        sync_status_bar();
     });
 
     auto content_split = std::make_unique<ResizableSplitPane>(
@@ -2761,22 +2719,106 @@ void DebugApp::persist_split_size_as_pct(ResizableSplitPane* split, std::uint16_
     pct_out = static_cast<std::uint16_t>(std::clamp(value * 100 / total, 1, 99));
 }
 
+bool DebugApp::is_sidebar_focus(Focus focus) {
+    return focus == Focus::Scopes || focus == Focus::Stacks || focus == Focus::Breakpoints ||
+           focus == Focus::Watches;
+}
+
+Focus DebugApp::focus_for_sidebar_index(int index) {
+    switch (index) {
+    case 0:
+        return Focus::Scopes;
+    case 1:
+        return Focus::Stacks;
+    case 2:
+        return Focus::Breakpoints;
+    case 3:
+        return Focus::Watches;
+    default:
+        return Focus::Scopes;
+    }
+}
+
+int DebugApp::sidebar_index_for_focus(Focus focus) {
+    switch (focus) {
+    case Focus::Scopes:
+        return 0;
+    case Focus::Stacks:
+        return 1;
+    case Focus::Breakpoints:
+        return 2;
+    case Focus::Watches:
+        return 3;
+    default:
+        return -1;
+    }
+}
+
+void DebugApp::sync_stack_panes_to_focus() {
+    if (sidebar_stack_ != nullptr) {
+        const int sidebar_index = sidebar_index_for_focus(model_.focus);
+        if (sidebar_index >= 0 && sidebar_index != sidebar_stack_->active_index()) {
+            sidebar_stack_index_ = sidebar_index;
+            sidebar_stack_->set_active_index(sidebar_index);
+        }
+    }
+    if (bottom_stack_ != nullptr) {
+        int bottom_index = -1;
+        if (model_.focus == Focus::Repl) {
+            bottom_index = 0;
+        } else if (model_.focus == Focus::Console) {
+            bottom_index = 1;
+        }
+        if (bottom_index >= 0 && bottom_index != bottom_stack_->active_index()) {
+            bottom_stack_index_ = bottom_index;
+            bottom_stack_->set_active_index(bottom_index);
+        }
+    }
+}
+
+void DebugApp::cycle_sidebar_stack(int delta) {
+    if (sidebar_stack_ != nullptr && delta != 0) {
+        sidebar_stack_->cycle(delta);
+    }
+}
+
+void DebugApp::cycle_bottom_stack(int delta) {
+    if (bottom_stack_ != nullptr && delta != 0) {
+        bottom_stack_->cycle(delta);
+    }
+}
+
+bool DebugApp::handle_panel_swap_key(const tuinator::KeyPress& key) {
+    if (key.ctrl || key.alt) {
+        return false;
+    }
+    if (is_watch_input_focused() || is_repl_input_focused() || is_breakpoint_input_focused() ||
+        is_scope_input_focused()) {
+        return false;
+    }
+
+    int delta = 0;
+    if (key.character == '<' || key.character == '[') {
+        delta = -1;
+    } else if (key.character == '>' || key.character == ']') {
+        delta = 1;
+    } else {
+        return false;
+    }
+
+    if (is_sidebar_focus(model_.focus)) {
+        cycle_sidebar_stack(delta);
+        return true;
+    }
+    if (model_.focus == Focus::Repl || model_.focus == Focus::Console) {
+        cycle_bottom_stack(delta);
+        return true;
+    }
+    return false;
+}
+
 bool DebugApp::handle_layout_resize_key(const tuinator::KeyPress& key) {
     if (!key.alt) {
-        if (key.ctrl && model_.focus == Focus::Scopes) {
-            if (key.key == tuinator::Key::Up) {
-                model_.layout.grow_scopes();
-                model_.status_message = "Scopes pane enlarged";
-                build_ui();
-                return true;
-            }
-            if (key.key == tuinator::Key::Down) {
-                model_.layout.shrink_scopes();
-                model_.status_message = "Scopes pane shrunk";
-                build_ui();
-                return true;
-            }
-        }
         return false;
     }
 
@@ -2803,29 +2845,6 @@ bool DebugApp::handle_layout_resize_key(const tuinator::KeyPress& key) {
         return true;
     default:
         break;
-    }
-
-    if (key.character == '[') {
-        if (model_.focus == Focus::Watches) {
-            model_.layout.narrow_watches();
-            model_.status_message = "Watches " + std::to_string(model_.layout.watches_pct) + "%";
-        } else {
-            model_.layout.narrow_repl();
-            model_.status_message = "REPL " + std::to_string(model_.layout.repl_pct) + "%";
-        }
-        build_ui();
-        return true;
-    }
-    if (key.character == ']') {
-        if (model_.focus == Focus::Watches) {
-            model_.layout.widen_watches();
-            model_.status_message = "Watches " + std::to_string(model_.layout.watches_pct) + "%";
-        } else {
-            model_.layout.widen_repl();
-            model_.status_message = "REPL " + std::to_string(model_.layout.repl_pct) + "%";
-        }
-        build_ui();
-        return true;
     }
 
     return false;
@@ -2918,6 +2937,10 @@ bool DebugApp::handle_global_key(const tuinator::KeyPress& key) {
         return true;
     }
 
+    if (handle_panel_swap_key(key)) {
+        return true;
+    }
+
     if (model_.focus == Focus::Console || model_.focus == Focus::Repl) {
         return false;
     }
@@ -2964,6 +2987,10 @@ bool DebugApp::handle_global_key(const tuinator::KeyPress& key) {
 
     if (key.character == 'r' || key.character == 'R') {
         model_.focus = Focus::Repl;
+        bottom_stack_index_ = 0;
+        if (bottom_stack_ != nullptr) {
+            bottom_stack_->set_active_index(0);
+        }
         repl_input_focused_ = true;
         apply_focus();
         if (repl_panel_ != nullptr) {
@@ -3498,6 +3525,8 @@ void DebugApp::cycle_focus_next() {
 }
 
 void DebugApp::apply_focus() {
+    sync_stack_panes_to_focus();
+
     if (model_.focus != Focus::Watches) {
         watch_input_focused_ = false;
     }

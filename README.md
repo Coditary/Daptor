@@ -87,7 +87,8 @@ fixtures/hello.py
 | Keyboard: c/n/i/u step, Tab focus, b breakpoints | ✅ |
 | REPL evaluate (`tui_debug_evaluate`) | ✅ |
 | Breakpoints via DAP (`tui_debug_set_breakpoints`) | ✅ |
-| Resizable split panes (Tuinator native drag) | 🔜 |
+| Resizable split panes (sidebar / bottom tray height) | ✅ |
+| Panel swap (sidebar + bottom tray, `<` `>` or `[` `]`) | ✅ |
 | Watches / breakpoint list panel | 🔜 |
 | Legacy ratatui UI | deprecated |
 

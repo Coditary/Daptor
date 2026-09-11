@@ -44,6 +44,7 @@ class StacksPanel;
 class BreakpointsPanel;
 class WatchesPanel;
 class TitledScrollPane;
+class StackedPane;
 
 /// Tuinator application wrapper for the tui-debug shell.
 class DebugApp {
@@ -225,6 +226,13 @@ class DebugApp {
     void apply_execution_command_started(const char* op);
     bool has_active_session() const;
     bool handle_layout_resize_key(const tuinator::KeyPress& key);
+    bool handle_panel_swap_key(const tuinator::KeyPress& key);
+    void cycle_sidebar_stack(int delta);
+    void cycle_bottom_stack(int delta);
+    void sync_stack_panes_to_focus();
+    [[nodiscard]] static bool is_sidebar_focus(Focus focus);
+    [[nodiscard]] static Focus focus_for_sidebar_index(int index);
+    [[nodiscard]] static int sidebar_index_for_focus(Focus focus);
     std::string format_status_bar_text() const;
     std::string command_status_message(const char* op) const;
     void persist_split_size_as_pct(ResizableSplitPane* split, std::uint16_t& pct_out, bool horizontal,
@@ -306,9 +314,10 @@ class DebugApp {
     tuinator::ScrollView* console_scroll_view_ = nullptr;
     std::size_t console_synced_line_count_ = 0;
     std::unique_ptr<ReplPanel> repl_panel_;
-    ResizableSplitPane* repl_console_split_ = nullptr;
-    ResizableSplitPane* sidebar_split_ = nullptr;
-    ResizableSplitPane* sidebar_watches_split_ = nullptr;
+    StackedPane* sidebar_stack_ = nullptr;
+    StackedPane* bottom_stack_ = nullptr;
+    int sidebar_stack_index_ = 0;
+    int bottom_stack_index_ = 0;
     ResizableSplitPane* main_row_split_ = nullptr;
     ResizableSplitPane* content_split_ = nullptr;
     std::string watch_input_draft_;

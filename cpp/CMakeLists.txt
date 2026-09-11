@@ -39,6 +39,7 @@ add_executable(tui-debug-ui
     src/ui/rust_session_backend.cpp
     src/ui/mock_session_backend.cpp
     src/ui/resizable_split_pane.cpp
+    src/ui/stacked_pane.cpp
     src/ui/background_widget.cpp
     src/ui/dap_ui_theme.cpp
     src/ui/controls_bar.cpp
