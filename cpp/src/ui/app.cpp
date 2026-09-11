@@ -995,7 +995,7 @@ void DebugApp::build_ui() {
                                             : line_text_at(cached_source_text_, line);
             seed = identifier_at_line_column(line_text, code_column);
         }
-        show_breakpoint_context_menu(path, line, anchor, seed);
+        begin_source_context_menu(goto_probe_source_path(), line, code_column, anchor, seed);
     });
     source_panel_->set_on_request_viewport([this](int /*center_line*/) {
         cached_highlight_first_line_ = -1;
@@ -1475,6 +1475,9 @@ void DebugApp::handle_session_event(const SessionIoEvent& event) {
         break;
     case SessionIoEventKind::StepInTargetsReady:
         handle_step_in_targets_payload(event);
+        break;
+    case SessionIoEventKind::GotoTargetsReady:
+        handle_goto_targets_payload(event);
         break;
     }
 }
@@ -2303,8 +2306,7 @@ bool DebugApp::handle_global_key(const tuinator::KeyPress& key) {
             const std::string path = effective_source_path();
             const int line = source_panel_->cursor_line();
             if (!path.empty() && line > 0) {
-                const tuinator::Rect panel_bounds = source_panel_->bounds();
-                tuinator::Point anchor{panel_bounds.x + 2, panel_bounds.y + 2};
+                const tuinator::Point anchor = source_panel_->context_menu_anchor(line, 0);
                 std::optional<std::string> seed;
                 if (cached_source_path_ != path) {
                     cached_source_path_ = path;
@@ -2438,7 +2440,8 @@ void DebugApp::apply_execution_command_started(const char* op) {
 
     if (std::strcmp(op, "step_over") == 0 || std::strcmp(op, "next") == 0 || std::strcmp(op, "step_into") == 0 ||
         std::strcmp(op, "step_in") == 0 || std::strcmp(op, "step_out") == 0 || std::strcmp(op, "step_back") == 0 ||
-        std::strcmp(op, "step_back_into") == 0 || std::strcmp(op, "reverse_continue") == 0) {
+        std::strcmp(op, "step_back_into") == 0 || std::strcmp(op, "reverse_continue") == 0 ||
+        std::strcmp(op, "goto") == 0) {
         model_.session_state = "running";
         model_.stop_reason.clear();
         return;
@@ -3561,6 +3564,16 @@ tuinator::Rect DebugApp::overlay_clip_bounds() const {
     return {0, 0, term.width, term.height};
 }
 
+tuinator::Rect DebugApp::source_context_clip_bounds() const {
+    if (source_scroll_view_ != nullptr) {
+        return source_scroll_view_->bounds();
+    }
+    if (source_panel_ != nullptr) {
+        return source_panel_->bounds();
+    }
+    return overlay_clip_bounds();
+}
+
 std::optional<std::string> DebugApp::identifier_at_line_column(const std::string& line_text, int column) const {
     if (line_text.empty() || column < 0) {
         return std::nullopt;
@@ -3613,9 +3626,169 @@ void DebugApp::begin_watch_expression(const std::string& seed) {
 
 void DebugApp::show_breakpoint_context_menu(const std::string& path, int line, tuinator::Point anchor,
                                             const std::optional<std::string>& seed_identifier) {
+    open_source_context_menu(path, line, anchor, seed_identifier, {}, false);
+}
+
+std::string DebugApp::goto_probe_source_path() const {
+    if (!model_.execution_path.empty() && model_.execution_path.rfind("dap:source:", 0) != 0) {
+        return normalize_source_path(model_.execution_path);
+    }
+    if (!model_.source_path.empty() && model_.source_path.rfind("dap:source:", 0) != 0) {
+        return normalize_source_path(model_.source_path);
+    }
+    const std::string preferred = preferred_program_source_path(program_path_);
+    if (!preferred.empty()) {
+        return normalize_source_path(preferred);
+    }
+    return effective_source_path();
+}
+
+void DebugApp::begin_source_context_menu(const std::string& path, int line, int code_column,
+                                         tuinator::Point anchor,
+                                         const std::optional<std::string>& seed_identifier) {
     if (context_menu_ == nullptr || path.empty() || line <= 0) {
         return;
     }
+
+    const bool probe_goto =
+        adapter_ != DebugAdapter::Rr && is_session_stopped() && session_io_ != nullptr && session_io_->is_active();
+
+    if (!probe_goto) {
+        open_source_context_menu(path, line, anchor, seed_identifier, {}, false);
+        return;
+    }
+
+    pending_source_context_menu_ = PendingSourceContextMenu{path, line, anchor, seed_identifier};
+    goto_targets_pending_ = true;
+    const int dap_column = code_column >= 0 ? code_column + 1 : -1;
+    session_io_->request_goto_targets(path, line, dap_column);
+}
+
+namespace {
+
+std::vector<std::pair<std::int64_t, std::string>> parse_goto_targets_json(const std::string& json) {
+    std::vector<std::pair<std::int64_t, std::string>> targets;
+    std::size_t pos = 0;
+    while ((pos = json.find("\"id\"", pos)) != std::string::npos) {
+        const std::size_t id_colon = json.find(':', pos);
+        if (id_colon == std::string::npos) {
+            break;
+        }
+        std::size_t id_start = id_colon + 1;
+        while (id_start < json.size() && std::isspace(static_cast<unsigned char>(json[id_start])) != 0) {
+            ++id_start;
+        }
+        std::size_t id_end = id_start;
+        while (id_end < json.size() && (std::isdigit(static_cast<unsigned char>(json[id_end])) != 0 ||
+                                        json[id_end] == '-')) {
+            ++id_end;
+        }
+        if (id_end <= id_start) {
+            pos += 4;
+            continue;
+        }
+
+        const std::size_t label_key = json.find("\"label\"", id_end);
+        if (label_key == std::string::npos) {
+            break;
+        }
+        const std::size_t label_quote = json.find('"', json.find(':', label_key) + 1);
+        if (label_quote == std::string::npos) {
+            break;
+        }
+        const std::size_t label_start = label_quote + 1;
+        const std::size_t label_end = json.find('"', label_start);
+        if (label_end == std::string::npos) {
+            break;
+        }
+
+        try {
+            const std::int64_t id = std::stoll(json.substr(id_start, id_end - id_start));
+            targets.emplace_back(id, json.substr(label_start, label_end - label_start));
+        } catch (...) {
+        }
+
+        pos = label_end + 1;
+    }
+    return targets;
+}
+
+}  // namespace
+
+void DebugApp::handle_goto_targets_payload(const SessionIoEvent& event) {
+    goto_targets_pending_ = false;
+    if (!pending_source_context_menu_.has_value()) {
+        return;
+    }
+
+    PendingSourceContextMenu pending = std::move(*pending_source_context_menu_);
+    pending_source_context_menu_.reset();
+
+    if (event.scope_ref != pending.line ||
+        normalize_source_path(event.detail) != normalize_source_path(pending.path)) {
+        open_source_context_menu(pending.path, pending.line, pending.anchor, pending.seed_identifier, {}, false);
+        return;
+    }
+
+    std::vector<std::pair<std::int64_t, std::string>> goto_targets;
+    if (event.success) {
+        goto_targets = parse_goto_targets_json(event.payload);
+    }
+
+    const bool offer_lldb_line_jump =
+        goto_targets.empty() && adapter_ == DebugAdapter::Lldb && pending.line > 0 &&
+        static_cast<std::uint32_t>(pending.line) != model_.execution_line;
+
+    open_source_context_menu(pending.path, pending.line, pending.anchor, pending.seed_identifier,
+                             std::move(goto_targets), offer_lldb_line_jump);
+}
+
+void DebugApp::send_goto_command(std::int64_t target_id) {
+    if (session_io_ == nullptr || !session_io_->is_active()) {
+        model_.status_message = "No active session";
+        sync_status_bar();
+        return;
+    }
+
+    apply_execution_command_started("goto");
+    session_io_->post_command(R"({"op":"goto","target_id":)" + std::to_string(target_id) + "}");
+    model_.status_message = "Jump to here";
+    sync_ui_from_model();
+}
+
+void DebugApp::send_goto_line_command(const std::string& path, int line) {
+    if (session_io_ == nullptr || !session_io_->is_active()) {
+        model_.status_message = "No active session";
+        sync_status_bar();
+        return;
+    }
+
+    std::ostringstream cmd;
+    cmd << R"({"op":"goto_line","line":)" << line << R"(,"path":")";
+    for (char ch : path) {
+        if (ch == '"' || ch == '\\') {
+            cmd << '\\';
+        }
+        cmd << ch;
+    }
+    cmd << "\"}";
+    session_io_->post_command(cmd.str());
+    model_.status_message = "Jump to line " + std::to_string(line);
+    sync_ui_from_model();
+}
+
+void DebugApp::open_source_context_menu(
+    const std::string& path, int line, tuinator::Point anchor,
+    const std::optional<std::string>& seed_identifier,
+    const std::vector<std::pair<std::int64_t, std::string>>& goto_targets,
+    bool offer_lldb_line_jump) {
+    if (context_menu_ == nullptr || path.empty() || line <= 0) {
+        return;
+    }
+
+    const tuinator::Point menu_anchor =
+        source_panel_ != nullptr ? source_panel_->context_menu_anchor(line, 0) : anchor;
+    const tuinator::Rect clip_bounds = source_context_clip_bounds();
 
     const std::string normalized = normalize_source_path(path);
     const auto path_it = breakpoints_by_path_.find(normalized);
@@ -3641,6 +3814,21 @@ void DebugApp::show_breakpoint_context_menu(const std::string& path, int line, t
     };
 
     std::vector<ContextMenu::Item> items;
+    for (const auto& [target_id, label] : goto_targets) {
+        const std::string menu_label =
+            goto_targets.size() == 1 ? "Jump to here" : ("Jump to here: " + label);
+        items.push_back(ContextMenu::Item{
+            menu_label,
+            [this, target_id]() { send_goto_command(target_id); },
+        });
+    }
+    if (offer_lldb_line_jump) {
+        items.push_back(ContextMenu::Item{
+            "Jump to here",
+            [this, path, line]() { send_goto_line_command(path, line); },
+        });
+    }
+
     if (has_breakpoint) {
         items.push_back(ContextMenu::Item{
             "Edit condition",
@@ -3670,8 +3858,8 @@ void DebugApp::show_breakpoint_context_menu(const std::string& path, int line, t
         });
     }
 
-    context_menu_->open(anchor, overlay_clip_bounds(), std::move(items));
-    context_menu_->layout(overlay_clip_bounds());
+    context_menu_->open(menu_anchor, clip_bounds, std::move(items));
+    context_menu_->layout(clip_bounds);
     request_full_screen_refresh();
 }
 

@@ -107,6 +107,17 @@ impl CSession {
                 "terminate" => session.terminate(),
                 "disconnect" => session.disconnect(),
                 "restart" => session.restart(),
+                "goto" => {
+                    let target_id = cmd
+                        .target_id
+                        .context("goto requires target_id")?;
+                    session.dispatch_goto(target_id)
+                }
+                "goto_line" => {
+                    let line = cmd.line.context("goto_line requires line")?;
+                    let path = cmd.path.unwrap_or_default();
+                    session.dispatch_goto_line(&path, line)
+                }
                 other => anyhow::bail!("unknown command op: {other}"),
             },
             SessionEngine::Rr(session) => match cmd.op.as_str() {
@@ -178,6 +189,25 @@ impl CSession {
         serde_json::to_string(&targets).context("failed to serialize step-in targets")
     }
 
+    pub fn fetch_goto_targets_json(
+        &self,
+        path: &str,
+        line: i64,
+        column: i64,
+        source_reference: i64,
+    ) -> Result<String> {
+        let targets = match &self.inner {
+            SessionEngine::Dap(session) => session.goto_targets(
+                path,
+                line,
+                (column > 0).then_some(column),
+                (source_reference > 0).then_some(source_reference),
+            )?,
+            SessionEngine::Rr(session) => session.goto_targets(path, line, column, source_reference)?,
+        };
+        serde_json::to_string(&targets).context("failed to serialize goto targets")
+    }
+
     fn shutdown(&mut self) -> Result<()> {
         match &mut self.inner {
             SessionEngine::Dap(session) => session.shutdown(),
@@ -205,6 +235,10 @@ struct CommandRequest {
     op: String,
     #[serde(default)]
     target_id: Option<i64>,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    line: Option<i64>,
 }
 
 #[cfg(test)]

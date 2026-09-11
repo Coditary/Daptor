@@ -219,6 +219,16 @@ impl RrDebugSession {
         Ok(Vec::new())
     }
 
+    pub fn goto_targets(
+        &self,
+        _path: &str,
+        _line: i64,
+        _column: i64,
+        _source_reference: i64,
+    ) -> Result<Vec<crate::dap::protocol::GotoTarget>> {
+        Ok(Vec::new())
+    }
+
     pub fn shutdown(&mut self) -> Result<()> {
         let _ = self.mi.shutdown();
         let _ = self.replay_child.kill();
@@ -305,6 +315,7 @@ impl RrDebugSession {
             capabilities: AdapterCapabilities {
                 supports_step_back: true,
                 supports_step_in_targets: false,
+                supports_goto_targets: false,
             },
         })
     }
@@ -320,6 +331,7 @@ impl RrDebugSession {
             capabilities: AdapterCapabilities {
                 supports_step_back: true,
                 supports_step_in_targets: false,
+                supports_goto_targets: false,
             },
         }
     }

@@ -120,9 +120,20 @@ class DebugApp {
     void begin_watch_expression(const std::string& seed);
     void show_breakpoint_context_menu(const std::string& path, int line, tuinator::Point anchor,
                                       const std::optional<std::string>& seed_identifier);
+    void begin_source_context_menu(const std::string& path, int line, int code_column, tuinator::Point anchor,
+                                   const std::optional<std::string>& seed_identifier);
+    void open_source_context_menu(const std::string& path, int line, tuinator::Point anchor,
+                                  const std::optional<std::string>& seed_identifier,
+                                  const std::vector<std::pair<std::int64_t, std::string>>& goto_targets,
+                                  bool offer_lldb_line_jump = false);
+    void handle_goto_targets_payload(const SessionIoEvent& event);
+    void send_goto_command(std::int64_t target_id);
+    void send_goto_line_command(const std::string& path, int line);
+    [[nodiscard]] std::string goto_probe_source_path() const;
     [[nodiscard]] std::optional<std::string> identifier_at_line_column(const std::string& line_text,
                                                                      int column) const;
     [[nodiscard]] tuinator::Rect overlay_clip_bounds() const;
+    [[nodiscard]] tuinator::Rect source_context_clip_bounds() const;
     std::string effective_source_path() const;
     void sync_breakpoints_to_panel();
     void push_breakpoints_to_session(const std::string& path);
@@ -240,6 +251,14 @@ class DebugApp {
     bool follow_execution_ = true;
     std::optional<StepInSelectionState> step_in_selection_;
     bool step_in_targets_pending_ = false;
+    struct PendingSourceContextMenu {
+        std::string path;
+        int line = 0;
+        tuinator::Point anchor{};
+        std::optional<std::string> seed_identifier;
+    };
+    std::optional<PendingSourceContextMenu> pending_source_context_menu_;
+    bool goto_targets_pending_ = false;
     std::unordered_map<std::string, std::vector<HighlightedLine>> source_plain_lines_cache_;
     BreakpointsByPath breakpoints_by_path_;
     std::chrono::steady_clock::time_point last_spinner_update_{};

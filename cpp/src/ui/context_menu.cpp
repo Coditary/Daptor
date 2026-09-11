@@ -121,13 +121,7 @@ void ContextMenu::paint(tuinator::PaintContext& ctx) const {
     const tuinator::Size size{menu.width, menu.height};
 
     canvas.fill_rect({origin, size}, ' ', background_);
-    for (int row = 0; row < menu.height; ++row) {
-        canvas.draw_text({origin.x, origin.y + row}, std::string(size.width, ' '), border_style_);
-    }
-    for (int col = 0; col < menu.width; ++col) {
-        canvas.draw_text({origin.x + col, origin.y}, " ", border_style_);
-        canvas.draw_text({origin.x + col, origin.y + menu.height - 1}, " ", border_style_);
-    }
+    canvas.draw_box({origin, size}, border_style_, ctx.glyphs());
 
     for (int index = 0; index < static_cast<int>(items_.size()); ++index) {
         const Item& item = items_[static_cast<std::size_t>(index)];

@@ -2,11 +2,13 @@
 #include "tui_debug_ui/step_in_selection.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <fstream>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
+#include <optional>
 #include <vector>
 
 namespace tui_debug_ui {
@@ -81,6 +83,49 @@ std::string line_text_at(const std::string& text, int line_number) {
         ++current;
     }
     return {};
+}
+
+bool mock_line_is_jump_target(const std::string& line_text) {
+    std::string trimmed = line_text;
+    while (!trimmed.empty() && std::isspace(static_cast<unsigned char>(trimmed.front())) != 0) {
+        trimmed.erase(trimmed.begin());
+    }
+    while (!trimmed.empty() && std::isspace(static_cast<unsigned char>(trimmed.back())) != 0) {
+        trimmed.pop_back();
+    }
+    if (trimmed.empty()) {
+        return false;
+    }
+    if (trimmed == "{" || trimmed == "}" || trimmed == "};") {
+        return false;
+    }
+    if (trimmed.rfind("//", 0) == 0 || trimmed.front() == '#') {
+        return false;
+    }
+    return true;
+}
+
+std::optional<std::int64_t> json_target_id(const std::string& json) {
+    const std::size_t key = json.find("\"target_id\"");
+    if (key == std::string::npos) {
+        return std::nullopt;
+    }
+    const std::size_t colon = json.find(':', key);
+    if (colon == std::string::npos) {
+        return std::nullopt;
+    }
+    std::size_t index = colon + 1;
+    while (index < json.size() && std::isspace(static_cast<unsigned char>(json[index])) != 0) {
+        ++index;
+    }
+    if (index >= json.size() || (json[index] != '-' && !std::isdigit(static_cast<unsigned char>(json[index])))) {
+        return std::nullopt;
+    }
+    try {
+        return std::stoll(json.substr(index));
+    } catch (...) {
+        return std::nullopt;
+    }
 }
 
 }  // namespace
@@ -253,6 +298,23 @@ class MockSessionBackend final : public SessionBackend {
             session_state_ = "stopped";
             return true;
         }
+        if (command == "goto") {
+            if (!stopped_) {
+                error_out = "cannot goto while program is running";
+                return false;
+            }
+            const std::optional<std::int64_t> target_id =
+                (!op.empty() && op.front() == '{') ? json_target_id(op) : std::nullopt;
+            if (!target_id.has_value() || *target_id <= 0) {
+                error_out = "goto requires target_id";
+                return false;
+            }
+            current_line_ = static_cast<int>(*target_id);
+            step_index_ = mock_line_index(current_line_);
+            stopped_ = true;
+            session_state_ = "stopped";
+            return true;
+        }
 
         error_out = "unknown mock command: " + command;
         return false;
@@ -287,6 +349,35 @@ class MockSessionBackend final : public SessionBackend {
         }
         json << ']';
         json_out = json.str();
+        return true;
+    }
+
+    bool fetch_goto_targets(const std::string& path, int line, int column, std::int64_t source_reference,
+                            std::string& json_out, std::string& error_out) override {
+        (void)path;
+        (void)column;
+        (void)source_reference;
+        if (!launched_) {
+            error_out = "mock session not launched";
+            return false;
+        }
+        if (!stopped_) {
+            error_out = "cannot resolve goto targets while running";
+            return false;
+        }
+        if (line <= 0 || line == current_line_) {
+            json_out = "[]";
+            return true;
+        }
+
+        const std::string line_text = line_text_at(source_text_, line);
+        if (!mock_line_is_jump_target(line_text)) {
+            json_out = "[]";
+            return true;
+        }
+
+        json_out = R"([{"id":)" + std::to_string(line) + R"(,"label":"line )" + std::to_string(line) +
+                     R"("}])";
         return true;
     }
 
@@ -430,7 +521,7 @@ class MockSessionBackend final : public SessionBackend {
 
     std::string build_snapshot() const {
         std::ostringstream json;
-        json << R"({"type":"snapshot","snapshot":{"capabilities":{"supports_step_back":true,"supports_step_in_targets":true},)";
+        json << R"({"type":"snapshot","snapshot":{"capabilities":{"supports_step_back":true,"supports_step_in_targets":true,"supports_goto_targets":true},)";
         if (session_state_ == "exited") {
             json << R"("state":"Exited","threads":[],"stack_frames":[],"scopes":[],"variables":[]}})";
             return json.str();

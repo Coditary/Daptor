@@ -200,6 +200,35 @@ int SourcePanel::line_number_at_row(int row) const {
     return scroll_offset_ + row + 1;
 }
 
+int SourcePanel::row_for_line_number(int line_number) const {
+    for (int row = 0; row < static_cast<int>(lines_.size()); ++row) {
+        if (lines_[static_cast<std::size_t>(row)].line_number == line_number) {
+            return row;
+        }
+    }
+
+    if (scroll_parent_ != nullptr) {
+        return std::max(0, line_number - 1);
+    }
+
+    return std::max(0, line_number - scroll_offset_ - 1);
+}
+
+tuinator::Point SourcePanel::context_menu_anchor(int line_number, int code_column) const {
+    const int row = row_for_line_number(line_number);
+    // Place the menu on the line below the click so it does not cover the target line.
+    const int menu_row = row + 1;
+
+    const int local_x = code_start_x() + std::max(0, code_column);
+    if (scroll_parent_ == nullptr) {
+        return {bounds_.x + local_x, bounds_.y + menu_row};
+    }
+
+    const tuinator::Rect scroll_bounds = scroll_parent_->bounds();
+    return {scroll_bounds.x + local_x - scroll_parent_->scroll_x(),
+            scroll_bounds.y + menu_row - scroll_parent_->scroll_y()};
+}
+
 int SourcePanel::code_start_x() const {
     return 2 + 2 + gutter_width() + 3;
 }
@@ -377,12 +406,12 @@ bool SourcePanel::handle_event(const Event& event) {
 
         const int line = line_number_at_row(local.y);
         const bool gutter = is_gutter_click(local.x);
-        const bool has_breakpoint = breakpoints_.contains(line);
+        const int code_col = code_column_from_local_x(local.x);
 
-        if ((gutter || has_breakpoint) && right_click && on_breakpoint_context_) {
+        if (right_click && on_breakpoint_context_) {
             set_focused(true);
             set_cursor_line(line);
-            on_breakpoint_context_(line, code_column_from_local_x(local.x), mouse->position);
+            on_breakpoint_context_(line, code_col, context_menu_anchor(line, code_col));
             return true;
         }
 

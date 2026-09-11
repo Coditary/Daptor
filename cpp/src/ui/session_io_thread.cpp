@@ -197,12 +197,12 @@ bool SessionIoThread::command_needs_snapshot(const std::string& op) {
     const std::string name = command_op_name(op);
     return name == "step_over" || name == "next" || name == "step_into" || name == "step_in" || name == "step_out" ||
            name == "step_back" || name == "step_back_into" || name == "reverse_continue" || name == "restart" ||
-           name == "disconnect" || name == "terminate";
+           name == "goto" || name == "disconnect" || name == "terminate";
 }
 
 bool SessionIoThread::command_syncs_snapshot(const std::string& op) {
     const std::string name = command_op_name(op);
-    return name == "continue" || name == "play_pause" || name == "pause";
+    return name == "continue" || name == "play_pause" || name == "pause" || name == "goto_line";
 }
 
 bool SessionIoThread::command_preempts_background_work(const std::string& op) {
@@ -236,6 +236,14 @@ void SessionIoThread::request_step_in_targets(std::int64_t frame_id) {
     cv_.notify_all();
 }
 
+void SessionIoThread::request_goto_targets(const std::string& path, int line, int column) {
+    {
+        std::lock_guard lock(mutex_);
+        goto_targets_request_ = GotoTargetsRequest{path, line, column};
+    }
+    cv_.notify_all();
+}
+
 void SessionIoThread::process_step_in_targets_fetch() {
     if (!adapter_live_.load(std::memory_order_acquire)) {
         return;
@@ -260,6 +268,37 @@ void SessionIoThread::process_step_in_targets_fetch() {
     const bool ok = backend_->fetch_step_in_targets(frame_id, json, error);
     SessionIoEvent event{SessionIoEventKind::StepInTargetsReady, ok, ok ? std::move(json) : std::move(error),
                          std::to_string(frame_id)};
+    push_event(std::move(event));
+}
+
+void SessionIoThread::process_goto_targets_fetch() {
+    if (!adapter_live_.load(std::memory_order_acquire)) {
+        return;
+    }
+
+    if (has_pending_execution_command()) {
+        return;
+    }
+
+    GotoTargetsRequest request{};
+    {
+        std::lock_guard lock(mutex_);
+        if (!goto_targets_request_.has_value()) {
+            return;
+        }
+        request = std::move(*goto_targets_request_);
+        goto_targets_request_.reset();
+    }
+
+    std::string json;
+    std::string error;
+    const bool ok = backend_->fetch_goto_targets(request.path, request.line, request.column, 0, json, error);
+    SessionIoEvent event{SessionIoEventKind::GotoTargetsReady,
+                         ok,
+                         ok ? std::move(json) : std::move(error),
+                         std::to_string(request.line)};
+    event.detail = request.path;
+    event.scope_ref = request.line;
     push_event(std::move(event));
 }
 
@@ -614,6 +653,9 @@ void SessionIoThread::thread_main() {
                 if (!has_pending_execution_command()) {
                     process_step_in_targets_fetch();
                 }
+                if (!has_pending_execution_command()) {
+                    process_goto_targets_fetch();
+                }
             }
 
             std::unique_lock lock(mutex_);
@@ -623,6 +665,7 @@ void SessionIoThread::thread_main() {
                        (pending_breakpoints_path_.has_value() && pending_breakpoints_json_.has_value()) ||
                        scope_fetch_pending_ || highlight_request_.has_value() ||
                        source_fetch_reference_.has_value() || step_in_targets_frame_.has_value() ||
+                       goto_targets_request_.has_value() ||
                        (!launch_started_.load(std::memory_order_acquire) && !program_path_.empty());
             });
         } catch (const std::exception& ex) {

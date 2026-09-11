@@ -122,6 +122,9 @@ pub struct StepInTarget {
     pub end_column: Option<i64>,
 }
 
+/// Same shape as [`StepInTarget`] in DAP `gotoTargets` responses.
+pub type GotoTarget = StepInTarget;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoppedEventBody {
     #[serde(rename = "threadId")]

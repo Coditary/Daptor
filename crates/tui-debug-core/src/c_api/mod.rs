@@ -591,3 +591,43 @@ pub extern "C" fn tui_debug_fetch_step_in_targets(
         }
     }
 }
+
+/// Fetch possible goto targets for a source location into `json_out` as a JSON array.
+#[no_mangle]
+pub extern "C" fn tui_debug_fetch_goto_targets(
+    session: *mut c_void,
+    path: *const c_char,
+    line: i64,
+    column: i64,
+    source_reference: i64,
+    json_out: *mut c_char,
+    cap: usize,
+) -> c_int {
+    clear_last_error();
+
+    let Some(session) = session_from_ptr(session) else {
+        return -1;
+    };
+
+    let path = match c_str_to_rust(path, "path") {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err);
+            return -1;
+        }
+    };
+
+    match session.fetch_goto_targets_json(&path, line, column, source_reference) {
+        Ok(json) => match write_json_to_buffer(&json, json_out, cap) {
+            Ok(()) => 0,
+            Err(err) => {
+                set_last_error(err);
+                -1
+            }
+        },
+        Err(err) => {
+            set_last_error(err.to_string());
+            -1
+        }
+    }
+}

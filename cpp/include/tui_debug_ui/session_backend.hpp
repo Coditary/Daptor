@@ -36,6 +36,9 @@ class SessionBackend {
     virtual bool send_command(const std::string& op, std::string& error_out) = 0;
     virtual bool fetch_step_in_targets(std::int64_t frame_id, std::string& json_out,
                                      std::string& error_out) = 0;
+    virtual bool fetch_goto_targets(const std::string& path, int line, int column,
+                                    std::int64_t source_reference, std::string& json_out,
+                                    std::string& error_out) = 0;
     virtual bool evaluate(const std::string& expression, std::int64_t frame_id, const std::string& context,
                           std::string& result_out, std::string& error_out) = 0;
     virtual bool set_variable(std::int64_t variables_reference, const std::string& name, const std::string& value,

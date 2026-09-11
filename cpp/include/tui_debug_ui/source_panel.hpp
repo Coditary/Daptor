@@ -60,6 +60,7 @@ class SourcePanel : public tuinator::Widget {
     void ensure_cursor_visible();
     void move_cursor_by(int delta);
     int line_number_at_row(int row) const;
+    [[nodiscard]] tuinator::Point context_menu_anchor(int line_number, int code_column = 0) const;
 
     using BreakpointToggleCallback = std::function<void(int line)>;
     using BreakpointContextCallback = std::function<void(int line, int code_column, tuinator::Point anchor)>;
@@ -96,6 +97,7 @@ class SourcePanel : public tuinator::Widget {
     void paint_line(tuinator::PaintContext& ctx, int row, const HighlightedLine& line) const;
     int code_start_x() const;
     bool is_gutter_click(int local_x) const;
+    [[nodiscard]] int row_for_line_number(int line_number) const;
 
     tuinator::Style style_for_code_column(int line_number, int code_column, HighlightKind base_kind) const;
     [[nodiscard]] bool is_step_in_column(int line_number, int code_column) const;

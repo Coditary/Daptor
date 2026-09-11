@@ -9,7 +9,7 @@ use tracing::{info, warn};
 use crate::dap::protocol::{
     InboundMessage, OutputEventBody, Scope, StackFrame, StoppedEventBody, Thread, Variable,
 };
-pub use crate::dap::protocol::StepInTarget;
+pub use crate::dap::protocol::{GotoTarget, StepInTarget};
 use crate::dap::{DapTransport, spawn_debugpy_adapter, spawn_lldb_dap_adapter};
 
 mod rr_session;
@@ -29,6 +29,8 @@ pub struct AdapterCapabilities {
     pub supports_step_back: bool,
     #[serde(default)]
     pub supports_step_in_targets: bool,
+    #[serde(default)]
+    pub supports_goto_targets: bool,
 }
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -116,6 +118,7 @@ pub struct DebugSession {
     initial_snapshot: Option<SessionSnapshot>,
     supports_step_in_targets: bool,
     supports_step_back: bool,
+    supports_goto_targets: bool,
     adapter: DebugAdapterKind,
 }
 
@@ -140,6 +143,7 @@ impl DebugSession {
             initial_snapshot: None,
             supports_step_in_targets: false,
             supports_step_back: false,
+            supports_goto_targets: false,
             adapter: DebugAdapterKind::Debugpy,
         };
 
@@ -167,6 +171,7 @@ impl DebugSession {
             initial_snapshot: None,
             supports_step_in_targets: false,
             supports_step_back: false,
+            supports_goto_targets: false,
             adapter: DebugAdapterKind::Lldb,
         };
 
@@ -209,8 +214,8 @@ impl DebugSession {
         let init_body = self.transport.wait_response(init_seq, REQUEST_TIMEOUT)?;
         self.merge_capabilities_from_value(&init_body);
         info!(
-            "DAP initialize complete (step_back={}, step_in_targets={}), launching debuggee",
-            self.supports_step_back, self.supports_step_in_targets
+            "DAP initialize complete (step_back={}, step_in_targets={}, goto_targets={}), launching debuggee",
+            self.supports_step_back, self.supports_step_in_targets, self.supports_goto_targets
         );
 
         // debugpy expects launch in-flight before configurationDone; initialized may
@@ -288,6 +293,12 @@ impl DebugSession {
             self.supports_step_in_targets = enabled;
         }
         if let Some(enabled) = value
+            .get("supportsGotoTargetsRequest")
+            .and_then(|value| value.as_bool())
+        {
+            self.supports_goto_targets = enabled;
+        }
+        if let Some(enabled) = value
             .get("supportsStepBack")
             .and_then(|value| value.as_bool())
         {
@@ -299,6 +310,7 @@ impl DebugSession {
         snapshot.capabilities = AdapterCapabilities {
             supports_step_back: self.supports_step_back,
             supports_step_in_targets: self.supports_step_in_targets,
+            supports_goto_targets: self.supports_goto_targets,
         };
         snapshot
     }
@@ -605,6 +617,74 @@ impl DebugSession {
             targets: vec![],
         });
         Ok(parsed.targets)
+    }
+
+    pub fn supports_goto_targets(&self) -> bool {
+        self.supports_goto_targets
+    }
+
+    pub fn goto_targets(
+        &self,
+        path: &str,
+        line: i64,
+        column: Option<i64>,
+        source_reference: Option<i64>,
+    ) -> Result<Vec<GotoTarget>> {
+        let mut source = json!({});
+        if !path.is_empty() {
+            source["path"] = json!(path);
+        }
+        if let Some(source_reference) = source_reference.filter(|value| *value > 0) {
+            source["sourceReference"] = json!(source_reference);
+        }
+
+        let mut args = json!({ "source": source, "line": line });
+        if let Some(column) = column.filter(|value| *value > 0) {
+            args["column"] = json!(column);
+        }
+
+        let seq = self.transport.send_request("gotoTargets", args)?;
+        let body = self.transport.wait_response(seq, REQUEST_TIMEOUT)?;
+
+        #[derive(Deserialize)]
+        struct GotoTargetsBody {
+            targets: Vec<GotoTarget>,
+        }
+
+        let parsed = serde_json::from_value::<GotoTargetsBody>(body).unwrap_or(GotoTargetsBody {
+            targets: vec![],
+        });
+        Ok(parsed.targets)
+    }
+
+    pub fn dispatch_goto(&mut self, target_id: i64) -> Result<()> {
+        let thread_id = self
+            .active_thread
+            .context("cannot goto without an active thread")?;
+        let seq = self.transport.send_request(
+            "goto",
+            json!({ "threadId": thread_id, "targetId": target_id }),
+        )?;
+        self.transport.wait_response(seq, REQUEST_TIMEOUT)?;
+        self.state = SessionState::Running;
+        Ok(())
+    }
+
+    pub fn dispatch_goto_line(&mut self, path: &str, line: i64) -> Result<()> {
+        match self.adapter {
+            DebugAdapterKind::Lldb => {}
+            DebugAdapterKind::Debugpy => bail!("jump to line is not supported for Python debug sessions"),
+        }
+
+        let frame_id = self.active_frame.context("no active frame")?;
+        let expression = if path.is_empty() {
+            format!("jump {line}")
+        } else {
+            format!("jump '{path}':{line}")
+        };
+        self.evaluate(&expression, frame_id, "repl")
+            .with_context(|| format!("failed to jump to {path}:{line}"))?;
+        Ok(())
     }
 
     pub fn step_over(&mut self) -> Result<SessionSnapshot> {

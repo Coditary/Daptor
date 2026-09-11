@@ -102,6 +102,7 @@ void apply_snapshot_object(DebugUiModel& model, const Json& snapshot) {
         const Json& capabilities = snapshot.at("capabilities");
         model.supports_step_back = capabilities.value("supports_step_back", false);
         model.supports_step_in_targets = capabilities.value("supports_step_in_targets", false);
+        model.supports_goto_targets = capabilities.value("supports_goto_targets", false);
     }
 
     model.threads.clear();
@@ -395,6 +396,12 @@ bool manual_apply_poll_json(DebugUiModel& model, const std::string& json) {
         } else if (snapshot_json.find("\"supports_step_in_targets\":false", capabilities_pos) !=
                    std::string_view::npos) {
             model.supports_step_in_targets = false;
+        }
+        if (snapshot_json.find("\"supports_goto_targets\":true", capabilities_pos) != std::string_view::npos) {
+            model.supports_goto_targets = true;
+        } else if (snapshot_json.find("\"supports_goto_targets\":false", capabilities_pos) !=
+                   std::string_view::npos) {
+            model.supports_goto_targets = false;
         }
     }
 

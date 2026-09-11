@@ -114,6 +114,7 @@ class DebugUiModel {
 
     bool supports_step_back = false;
     bool supports_step_in_targets = false;
+    bool supports_goto_targets = false;
 
     /// Apply a JSON snapshot from the Rust session.
     void apply_snapshot_json(const std::string& json);

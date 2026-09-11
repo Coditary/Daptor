@@ -106,6 +106,24 @@ class RustSessionBackend final : public SessionBackend {
         return false;
     }
 
+    bool fetch_goto_targets(const std::string& path, int line, int column, std::int64_t source_reference,
+                            std::string& json_out, std::string& error_out) override {
+        if (session_ == nullptr) {
+            error_out = "no session";
+            return false;
+        }
+
+        char buffer[16384];
+        if (tui_debug_fetch_goto_targets(session_, path.c_str(), line, column, source_reference, buffer,
+                                         sizeof(buffer)) == 0) {
+            json_out = buffer;
+            return true;
+        }
+
+        error_out = adapter_last_error();
+        return false;
+    }
+
     bool set_variable(std::int64_t variables_reference, const std::string& name, const std::string& value,
                       std::string& result_out, std::string& error_out) override {
         if (session_ == nullptr) {

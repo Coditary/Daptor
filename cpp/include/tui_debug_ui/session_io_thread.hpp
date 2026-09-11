@@ -30,6 +30,7 @@ enum class SessionIoEventKind {
     SetVariableFinished,
     BreakpointsFinished,
     StepInTargetsReady,
+    GotoTargetsReady,
 };
 
 struct PendingSetVariable {
@@ -72,6 +73,7 @@ class SessionIoThread {
     void request_highlight(const std::string& language, const std::string& source, int first_line, int line_count);
     void request_source_fetch(std::int64_t source_reference, const std::string& cache_key);
     void request_step_in_targets(std::int64_t frame_id);
+    void request_goto_targets(const std::string& path, int line, int column);
 
     bool try_pop_event(SessionIoEvent& out);
     [[nodiscard]] bool has_pending_execution_command() const;
@@ -95,6 +97,7 @@ class SessionIoThread {
     void process_highlight_request();
     void process_source_fetch();
     void process_step_in_targets_fetch();
+    void process_goto_targets_fetch();
     void maybe_begin_launch();
     void join_launch_worker();
     void sync_initial_state();
@@ -134,6 +137,12 @@ class SessionIoThread {
     std::optional<std::int64_t> source_fetch_reference_;
     std::string source_fetch_cache_key_;
     std::optional<std::int64_t> step_in_targets_frame_;
+    struct GotoTargetsRequest {
+        std::string path;
+        int line = 0;
+        int column = -1;
+    };
+    std::optional<GotoTargetsRequest> goto_targets_request_;
 
     std::mutex events_mutex_;
     std::deque<SessionIoEvent> events_;
