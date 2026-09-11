@@ -15,12 +15,15 @@ namespace tui_debug_ui {
 class TitledScrollPane {
   public:
     TitledScrollPane(std::string title, std::unique_ptr<tuinator::Widget> content, tuinator::Style title_style,
-                     tuinator::Style background, tuinator::ScrollViewOptions scroll_options, bool scrollable = true);
+                     tuinator::Style background, tuinator::ScrollViewOptions scroll_options, bool scrollable = true,
+                     std::unique_ptr<tuinator::Widget> header = nullptr,
+                     std::unique_ptr<tuinator::Widget> footer = nullptr);
 
     void set_title(std::string title);
     void set_title_action(std::string symbol, tuinator::Style style, std::function<void()> callback);
 
     tuinator::Widget* content_widget() const { return content_widget_; }
+    tuinator::Widget* root_widget() const { return root_.get(); }
     tuinator::ScrollView* scroll_view() const { return scroll_view_; }
 
     void refresh_scroll_content();

@@ -76,6 +76,7 @@ class DebugApp {
     void blur_watch_input();
     void blur_breakpoint_input(bool cancelled = true);
     void blur_scope_input();
+    bool handle_breakpoint_input_key(const tuinator::Event& event);
 
   private:
     void ensure_ui_built();
@@ -115,12 +116,13 @@ class DebugApp {
     void set_breakpoint_hit_condition(const std::string& path, int line, const std::string& hit_condition);
     void begin_edit_breakpoint_condition(const std::string& path, int line);
     void begin_edit_breakpoint_hit_condition(const std::string& path, int line);
+    void open_breakpoint_condition_editor(const std::string& path, int line,
+                                          std::optional<tuinator::Point> action_anchor = std::nullopt,
+                                          std::optional<int> breakpoints_display_index = std::nullopt);
     void submit_breakpoint_condition(const std::string& condition);
     void capture_breakpoint_input_state();
     void restore_breakpoint_input_state();
-    void sync_breakpoint_prompt();
-    void layout_breakpoint_prompt();
-    [[nodiscard]] tuinator::Rect breakpoint_prompt_bounds() const;
+    void sync_breakpoint_panel_input();
     void begin_edit_variable(const std::string& variable_name);
     void submit_variable_value(const std::string& value);
     void capture_scope_input_state();
@@ -141,6 +143,7 @@ class DebugApp {
     [[nodiscard]] std::optional<std::string> identifier_at_line_column(const std::string& line_text,
                                                                      int column) const;
     [[nodiscard]] tuinator::Rect overlay_clip_bounds() const;
+    [[nodiscard]] tuinator::Rect breakpoints_panel_clip_bounds() const;
     [[nodiscard]] tuinator::Rect source_context_clip_bounds() const;
     std::string effective_source_path() const;
     void sync_breakpoints_to_panel();
@@ -168,6 +171,7 @@ class DebugApp {
     void bind_split_pane(ResizableSplitPane* split);
     void on_split_drag_ended();
     void request_full_screen_refresh();
+    void request_repaint();
     void sync_controls_bar();
     bool is_session_stopped() const;
     void mark_all_panels_dirty();
@@ -220,7 +224,6 @@ class DebugApp {
     std::unique_ptr<BreakpointsPanel> breakpoints_panel_;
     std::unique_ptr<WatchesPanel> watches_panel_;
     std::unique_ptr<ContextMenu> context_menu_;
-    std::unique_ptr<tuinator::TextInput> breakpoint_prompt_input_;
     std::unique_ptr<TitledScrollPane> source_section_;
     SourcePanel* source_panel_ = nullptr;
     tuinator::ScrollView* source_scroll_view_ = nullptr;

@@ -18,7 +18,7 @@ WatchesPanel::WatchesPanel(const DapUiTheme& theme, tuinator::ScrollViewOptions 
     list_ = list.get();
     list_->set_paint_mode(ListPaintMode::Watches, &theme);
     list_->set_row_action_layout(ListRowActionLayout::WatchRow);
-    list_->set_on_row_action([this](int index, RowActionType action) {
+    list_->set_on_row_action([this](int index, RowActionType action, tuinator::Point /*anchor*/) {
         if (action == RowActionType::Remove && on_remove_ != nullptr) {
             on_remove_(index);
         } else if (action == RowActionType::Edit && on_edit_ != nullptr) {

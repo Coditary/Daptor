@@ -23,41 +23,46 @@ std::string basename_from_path(const std::string& path) {
     return path.substr(slash + 1);
 }
 
-bool is_file_header_row(const std::string& line) {
-    return !line.empty() && line.back() == ':' && line[0] != ' ';
-}
-
 }  // namespace
 
 BreakpointsPanel::BreakpointsPanel(const DapUiTheme& theme, tuinator::ScrollViewOptions scroll_options,
                                    const std::string& title) {
-    auto root = std::make_unique<tuinator::VBox>(tuinator::BoxOptions{.gap = 0, .padding = 0});
-
-    auto input = std::make_unique<tuinator::TextInput>(
-        tuinator::TextInputOptions{.placeholder = "> condition (when)"}, theme.label, theme.selection);
-    input->set_flex(0);
-    input_ = input.get();
-
     auto list = std::make_unique<NavigableListView>(theme.label, theme.selection, theme.panel_background, true);
     list_ = list.get();
     list_->set_paint_mode(ListPaintMode::Breakpoints, &theme);
     list_->set_row_action_layout(ListRowActionLayout::BreakpointRow);
-    list_->set_row_action_edit_state([this](int index) {
-        const BreakpointRow* row = breakpoint_at_display_index(index);
-        return row != nullptr && (!row->condition.empty() || !row->hit_condition.empty());
-    });
-    list_->set_on_row_action([this](int index, RowActionType action) {
+    list_->set_on_row_action([this](int index, RowActionType action, tuinator::Point anchor) {
         const BreakpointRow* row = breakpoint_at_display_index(index);
         if (row == nullptr) {
             return;
         }
-        if (action == RowActionType::Remove && on_remove_ != nullptr) {
-            on_remove_(*row);
-        } else if ((action == RowActionType::Add || action == RowActionType::Edit) && on_add_condition_ != nullptr) {
-            on_add_condition_(*row);
+
+        switch (display_kind_at(index)) {
+        case DisplayLineKind::WhenCondition:
+            if (action == RowActionType::Edit && on_edit_when_condition_ != nullptr) {
+                on_edit_when_condition_(*row, anchor);
+            } else if (action == RowActionType::Remove && on_clear_when_condition_ != nullptr) {
+                on_clear_when_condition_(*row);
+            }
+            return;
+        case DisplayLineKind::HitCondition:
+            if (action == RowActionType::Edit && on_edit_hit_condition_ != nullptr) {
+                on_edit_hit_condition_(*row, anchor);
+            } else if (action == RowActionType::Remove && on_clear_hit_condition_ != nullptr) {
+                on_clear_hit_condition_(*row);
+            }
+            return;
+        case DisplayLineKind::Breakpoint:
+            if (action == RowActionType::Remove && on_remove_ != nullptr) {
+                on_remove_(*row);
+            } else if (action == RowActionType::Add && on_add_condition_ != nullptr) {
+                on_add_condition_(*row, index, anchor);
+            }
+            return;
+        case DisplayLineKind::None:
+            break;
         }
     });
-    list_->set_flex(1);
     list_->set_on_activate([this](int index) {
         const BreakpointRow* row = breakpoint_at_display_index(index);
         if (row != nullptr && on_activate_ != nullptr) {
@@ -71,11 +76,16 @@ BreakpointsPanel::BreakpointsPanel(const DapUiTheme& theme, tuinator::ScrollView
         }
     });
 
-    root->add_child(std::move(list));
-    root->add_child(std::move(input));
+    auto input = std::make_unique<tuinator::TextInput>(
+        tuinator::TextInputOptions{.placeholder = "> when / hit condition"}, theme.label, theme.selection);
+    input->set_flex(0);
+    input_ = input.get();
 
-    pane_ = std::make_unique<TitledScrollPane>(title, std::move(root), theme.title_breakpoints, theme.panel_background,
-                                               std::move(scroll_options), false);
+    pane_ = std::make_unique<TitledScrollPane>(title, std::move(list), theme.title_breakpoints, theme.panel_background,
+                                               std::move(scroll_options), true, nullptr, std::move(input));
+    if (tuinator::ScrollView* scroll = pane_->scroll_view()) {
+        list_->set_scroll_parent(scroll);
+    }
 }
 
 std::unique_ptr<tuinator::Widget> BreakpointsPanel::release_widget() { return pane_->release_widget(); }
@@ -95,8 +105,10 @@ void BreakpointsPanel::set_breakpoints(std::vector<BreakpointRow> rows) {
 
     std::vector<std::string> items;
     std::vector<int> display_to_row;
+    std::vector<DisplayLineKind> display_kind;
     items.reserve(rows_.size() * 2);
     display_to_row.reserve(rows_.size() * 2);
+    display_kind.reserve(rows_.size() * 2);
 
     std::string current_path;
     for (std::size_t index = 0; index < rows_.size(); ++index) {
@@ -105,9 +117,11 @@ void BreakpointsPanel::set_breakpoints(std::vector<BreakpointRow> rows) {
             if (!items.empty()) {
                 items.push_back("");
                 display_to_row.push_back(-1);
+                display_kind.push_back(DisplayLineKind::None);
             }
             items.push_back(basename_from_path(row.path) + ":");
             display_to_row.push_back(-1);
+            display_kind.push_back(DisplayLineKind::None);
             current_path = row.path;
         }
 
@@ -120,22 +134,29 @@ void BreakpointsPanel::set_breakpoints(std::vector<BreakpointRow> rows) {
         }
         items.push_back(std::move(entry));
         display_to_row.push_back(static_cast<int>(index));
+        display_kind.push_back(DisplayLineKind::Breakpoint);
 
         if (!row.condition.empty()) {
             items.push_back("    when " + row.condition);
             display_to_row.push_back(static_cast<int>(index));
+            display_kind.push_back(DisplayLineKind::WhenCondition);
         }
 
         if (!row.hit_condition.empty()) {
             std::string hit_line = "    hit " + row.hit_condition + " (" + std::to_string(row.hit_count) + ")";
             items.push_back(std::move(hit_line));
             display_to_row.push_back(static_cast<int>(index));
+            display_kind.push_back(DisplayLineKind::HitCondition);
         }
     }
 
     display_to_row_ = std::move(display_to_row);
+    display_kind_ = std::move(display_kind);
     list_->assign_items(std::move(items));
     list_->mark_dirty();
+    if (pane_ != nullptr) {
+        pane_->refresh_scroll_content();
+    }
 }
 
 void BreakpointsPanel::set_on_activate(ActivateCallback callback) { on_activate_ = std::move(callback); }
@@ -146,6 +167,22 @@ void BreakpointsPanel::set_on_remove(RemoveCallback callback) { on_remove_ = std
 
 void BreakpointsPanel::set_on_add_condition(AddConditionCallback callback) {
     on_add_condition_ = std::move(callback);
+}
+
+void BreakpointsPanel::set_on_edit_when_condition(EditConditionCallback callback) {
+    on_edit_when_condition_ = std::move(callback);
+}
+
+void BreakpointsPanel::set_on_edit_hit_condition(EditConditionCallback callback) {
+    on_edit_hit_condition_ = std::move(callback);
+}
+
+void BreakpointsPanel::set_on_clear_when_condition(ClearConditionCallback callback) {
+    on_clear_when_condition_ = std::move(callback);
+}
+
+void BreakpointsPanel::set_on_clear_hit_condition(ClearConditionCallback callback) {
+    on_clear_hit_condition_ = std::move(callback);
 }
 
 void BreakpointsPanel::set_on_submit(SubmitCallback callback) {
@@ -176,6 +213,13 @@ void BreakpointsPanel::set_input_value(std::string value) {
     }
 }
 
+void BreakpointsPanel::set_input_placeholder(std::string placeholder) {
+    if (input_ != nullptr) {
+        input_->set_placeholder(std::move(placeholder));
+        input_->mark_dirty();
+    }
+}
+
 std::string BreakpointsPanel::input_value() const {
     return input_ != nullptr ? input_->value() : std::string{};
 }
@@ -183,10 +227,71 @@ std::string BreakpointsPanel::input_value() const {
 void BreakpointsPanel::focus_input() {
     if (input_ != nullptr) {
         input_->set_focused(true);
+        input_->mark_dirty();
         if (list_ != nullptr) {
             list_->set_focused(false);
         }
     }
+}
+
+tuinator::Point BreakpointsPanel::row_anchor(int display_index) const {
+    if (list_ == nullptr) {
+        return {};
+    }
+
+    if (tuinator::ScrollView* scroll = scroll_view()) {
+        const tuinator::Rect scroll_bounds = scroll->bounds();
+        if (scroll_bounds.width <= 0 || scroll_bounds.height <= 0) {
+            return {};
+        }
+
+        const int scroll_y = scroll->scroll_y();
+        const int viewport_row = display_index - scroll_y;
+        const int visible_row = std::clamp(viewport_row, 0, std::max(0, scroll_bounds.height - 1));
+        return {scroll_bounds.x + 2, scroll_bounds.y + visible_row};
+    }
+
+    const tuinator::Rect list_bounds = list_->bounds();
+    if (list_bounds.width <= 0 || list_bounds.height <= 0) {
+        return {};
+    }
+
+    const int visible_row = std::clamp(display_index, 0, std::max(0, list_bounds.height - 1));
+    return {list_bounds.x + 2, list_bounds.y + visible_row};
+}
+
+tuinator::Point BreakpointsPanel::row_action_anchor(int display_index, RowActionType action) const {
+    if (list_ == nullptr) {
+        return {};
+    }
+    return list_->row_action_anchor(display_index, action);
+}
+
+tuinator::Rect BreakpointsPanel::panel_bounds() const {
+    if (pane_ == nullptr || pane_->root_widget() == nullptr) {
+        return {};
+    }
+    return pane_->root_widget()->bounds();
+}
+
+int BreakpointsPanel::selected_index() const {
+    return list_ != nullptr ? list_->selected_index() : -1;
+}
+
+const BreakpointRow* BreakpointsPanel::selected_row() const {
+    return breakpoint_at_display_index(selected_index());
+}
+
+tuinator::Widget* BreakpointsPanel::panel_widget() const {
+    return pane_ != nullptr ? pane_->root_widget() : nullptr;
+}
+
+tuinator::Widget* BreakpointsPanel::list_widget() const { return list_; }
+
+tuinator::TextInput* BreakpointsPanel::input_widget() const { return input_; }
+
+tuinator::ScrollView* BreakpointsPanel::scroll_view() const {
+    return pane_ != nullptr ? pane_->scroll_view() : nullptr;
 }
 
 const BreakpointRow* BreakpointsPanel::breakpoint_at_display_index(int index) const {
@@ -200,20 +305,11 @@ const BreakpointRow* BreakpointsPanel::breakpoint_at_display_index(int index) co
     return &rows_[static_cast<std::size_t>(row_index)];
 }
 
-int BreakpointsPanel::selected_index() const {
-    return list_ != nullptr ? list_->selected_index() : -1;
-}
-
-const BreakpointRow* BreakpointsPanel::selected_row() const {
-    return breakpoint_at_display_index(selected_index());
-}
-
-tuinator::Widget* BreakpointsPanel::list_widget() const { return list_; }
-
-tuinator::TextInput* BreakpointsPanel::input_widget() const { return input_; }
-
-tuinator::ScrollView* BreakpointsPanel::scroll_view() const {
-    return pane_ != nullptr ? pane_->scroll_view() : nullptr;
+BreakpointsPanel::DisplayLineKind BreakpointsPanel::display_kind_at(int index) const {
+    if (index < 0 || index >= static_cast<int>(display_kind_.size())) {
+        return DisplayLineKind::None;
+    }
+    return display_kind_[static_cast<std::size_t>(index)];
 }
 
 }  // namespace tui_debug_ui

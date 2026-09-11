@@ -16,9 +16,10 @@ class Widget;
 }  // namespace tuinator
 
 namespace tui_debug_ui {
-class NavigableListView;
 class TitledScrollPane;
 }  // namespace tui_debug_ui
+
+#include "tui_debug_ui/navigable_list_view.hpp"
 
 namespace tui_debug_ui {
 
@@ -39,7 +40,9 @@ class BreakpointsPanel {
     using ActivateCallback = std::function<void(const BreakpointRow&)>;
     using ContextCallback = std::function<void(const BreakpointRow&, tuinator::Point anchor)>;
     using RemoveCallback = std::function<void(const BreakpointRow&)>;
-    using AddConditionCallback = std::function<void(const BreakpointRow&)>;
+    using AddConditionCallback = std::function<void(const BreakpointRow&, int display_index, tuinator::Point action_anchor)>;
+    using EditConditionCallback = std::function<void(const BreakpointRow&, tuinator::Point action_anchor)>;
+    using ClearConditionCallback = std::function<void(const BreakpointRow&)>;
     using SubmitCallback = std::function<void(const std::string& condition)>;
     using ChangeCallback = std::function<void(const std::string& condition)>;
 
@@ -52,29 +55,51 @@ class BreakpointsPanel {
     void set_on_context(ContextCallback callback);
     void set_on_remove(RemoveCallback callback);
     void set_on_add_condition(AddConditionCallback callback);
+    void set_on_edit_when_condition(EditConditionCallback callback);
+    void set_on_edit_hit_condition(EditConditionCallback callback);
+    void set_on_clear_when_condition(ClearConditionCallback callback);
+    void set_on_clear_hit_condition(ClearConditionCallback callback);
     void set_on_submit(SubmitCallback callback);
     void set_on_change(ChangeCallback callback);
     void set_input_value(std::string value);
+    void set_input_placeholder(std::string placeholder);
     [[nodiscard]] std::string input_value() const;
     void focus_input();
+    [[nodiscard]] tuinator::Point row_anchor(int display_index) const;
+    [[nodiscard]] tuinator::Point row_action_anchor(int display_index, RowActionType action) const;
+    [[nodiscard]] tuinator::Rect panel_bounds() const;
     [[nodiscard]] int selected_index() const;
     [[nodiscard]] const BreakpointRow* selected_row() const;
+    tuinator::Widget* panel_widget() const;
     tuinator::Widget* list_widget() const;
     tuinator::TextInput* input_widget() const;
     tuinator::ScrollView* scroll_view() const;
 
   private:
+    enum class DisplayLineKind {
+        None,
+        Breakpoint,
+        WhenCondition,
+        HitCondition,
+    };
+
     [[nodiscard]] const BreakpointRow* breakpoint_at_display_index(int index) const;
+    [[nodiscard]] DisplayLineKind display_kind_at(int index) const;
 
     std::unique_ptr<TitledScrollPane> pane_;
     NavigableListView* list_ = nullptr;
     tuinator::TextInput* input_ = nullptr;
     std::vector<BreakpointRow> rows_;
     std::vector<int> display_to_row_;
+    std::vector<DisplayLineKind> display_kind_;
     ActivateCallback on_activate_;
     ContextCallback on_context_;
     RemoveCallback on_remove_;
     AddConditionCallback on_add_condition_;
+    EditConditionCallback on_edit_when_condition_;
+    EditConditionCallback on_edit_hit_condition_;
+    ClearConditionCallback on_clear_when_condition_;
+    ClearConditionCallback on_clear_hit_condition_;
     SubmitCallback on_submit_;
     ChangeCallback on_change_;
 };

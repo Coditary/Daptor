@@ -99,13 +99,20 @@ class PanelTitleBar : public tuinator::Widget {
 
 TitledScrollPane::TitledScrollPane(std::string title, std::unique_ptr<tuinator::Widget> content,
                                    tuinator::Style title_style, tuinator::Style background,
-                                   tuinator::ScrollViewOptions scroll_options, bool scrollable) {
+                                   tuinator::ScrollViewOptions scroll_options, bool scrollable,
+                                   std::unique_ptr<tuinator::Widget> header,
+                                   std::unique_ptr<tuinator::Widget> footer) {
     auto column = std::make_unique<tuinator::VBox>(tuinator::BoxOptions{.gap = 0, .padding = 0});
     column->set_flex(1);
 
     auto label = std::make_unique<PanelTitleBar>(std::move(title), title_style, "", title_style, nullptr);
     title_label_ = label.get();
     column->add_child(std::move(label));
+
+    if (header != nullptr) {
+        header->set_flex(0);
+        column->add_child(std::move(header));
+    }
 
     if (scrollable) {
         content_widget_ = content.get();
@@ -117,6 +124,11 @@ TitledScrollPane::TitledScrollPane(std::string title, std::unique_ptr<tuinator::
         content_widget_ = content.get();
         content->set_flex(1);
         column->add_child(std::move(content));
+    }
+
+    if (footer != nullptr) {
+        footer->set_flex(0);
+        column->add_child(std::move(footer));
     }
 
     root_ = std::make_unique<BackgroundWidget>(std::move(column), std::move(background));

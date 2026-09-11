@@ -35,7 +35,7 @@ ScopesPanel::ScopesPanel(const DapUiTheme& theme, tuinator::ScrollViewOptions sc
     list_ = list.get();
     list_->set_paint_mode(ListPaintMode::Scopes, &theme);
     list_->set_row_action_layout(ListRowActionLayout::VariableRow);
-    list_->set_on_row_action([this](int index, RowActionType action) {
+    list_->set_on_row_action([this](int index, RowActionType action, tuinator::Point /*anchor*/) {
         if (list_ == nullptr) {
             return;
         }

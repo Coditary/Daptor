@@ -22,7 +22,7 @@ ContextMenu::ContextMenu(tuinator::Style background, tuinator::Style item_style,
       selected_style_(std::move(selected_style)),
       border_style_(std::move(border_style)) {}
 
-void ContextMenu::open(tuinator::Point anchor, tuinator::Rect clip_bounds, std::vector<Item> items) {
+void ContextMenu::open(tuinator::Point anchor, tuinator::Rect clip_bounds, std::vector<Item> items, bool open_above) {
     pending_action_ = nullptr;
     items_ = std::move(items);
     if (items_.empty()) {
@@ -31,6 +31,7 @@ void ContextMenu::open(tuinator::Point anchor, tuinator::Rect clip_bounds, std::
     }
     anchor_ = anchor;
     clip_bounds_ = clip_bounds;
+    open_above_ = open_above;
     selected_ = 0;
     open_ = true;
     clamp_selection();
@@ -42,6 +43,7 @@ void ContextMenu::close() {
         return;
     }
     open_ = false;
+    open_above_ = false;
     items_.clear();
     selected_ = 0;
     mark_dirty();
@@ -68,13 +70,16 @@ tuinator::Rect ContextMenu::menu_bounds() const {
 
     const int width = menu_width();
     const int height = menu_height();
-    int x = anchor_.x;
-    int y = anchor_.y;
+    int x = open_above_ ? anchor_.x - width / 2 : anchor_.x;
+    int y = open_above_ ? anchor_.y - height : anchor_.y;
     if (x + width > clip_bounds_.x + clip_bounds_.width) {
         x = std::max(clip_bounds_.x, clip_bounds_.x + clip_bounds_.width - width);
     }
+    if (y < clip_bounds_.y) {
+        y = clip_bounds_.y;
+    }
     if (y + height > clip_bounds_.y + clip_bounds_.height) {
-        y = std::max(clip_bounds_.y, anchor_.y - height);
+        y = std::max(clip_bounds_.y, clip_bounds_.y + clip_bounds_.height - height);
     }
     x = std::max(clip_bounds_.x, x);
     y = std::max(clip_bounds_.y, y);
@@ -206,9 +211,11 @@ bool ContextMenu::handle_event(const tuinator::Event& event) {
             return true;
         }
 
-        if (mouse->action == tuinator::MouseAction::Press || mouse->action == tuinator::MouseAction::Click) {
+        const bool pointer_pick = mouse->action == tuinator::MouseAction::Click ||
+                                  mouse->action == tuinator::MouseAction::Release;
+        if (pointer_pick) {
+            const int row = row_at_position(mouse->position);
             if (left) {
-                const int row = row_at_position(mouse->position);
                 if (row >= 0) {
                     selected_ = row;
                     activate_selected();
@@ -219,10 +226,11 @@ bool ContextMenu::handle_event(const tuinator::Event& event) {
             }
 
             if (right) {
-                const int row = row_at_position(mouse->position);
                 if (row >= 0) {
                     selected_ = row;
-                    mark_dirty();
+                    activate_selected();
+                } else {
+                    close();
                 }
                 return true;
             }
@@ -230,23 +238,14 @@ bool ContextMenu::handle_event(const tuinator::Event& event) {
             return true;
         }
 
-        if (mouse->action == tuinator::MouseAction::Release) {
-            if (right) {
-                const int row = row_at_position(mouse->position);
-                if (row >= 0) {
-                    selected_ = row;
-                    activate_selected();
-                } else {
-                    close();
-                }
-                return true;
-            }
-
-            if (left && row_at_position(mouse->position) < 0) {
+        if (mouse->action == tuinator::MouseAction::Press) {
+            const int row = row_at_position(mouse->position);
+            if (row >= 0) {
+                selected_ = row;
+                mark_dirty();
+            } else if (left) {
                 close();
-                return true;
             }
-
             return true;
         }
     }

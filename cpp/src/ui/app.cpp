@@ -413,6 +413,9 @@ class DebugChromeRoot : public tuinator::Widget {
             if (debug_app_ != nullptr && debug_app_->handle_global_key(*key)) {
                 return true;
             }
+            if (debug_app_ != nullptr && debug_app_->handle_breakpoint_input_key(event)) {
+                return true;
+            }
         }
 
         if (const auto* mouse = std::get_if<tuinator::MouseEvent>(&event)) {
@@ -919,11 +922,31 @@ void DebugApp::build_ui() {
         sync_status_bar();
     });
     breakpoints_panel_->set_on_remove([this](const BreakpointRow& row) { remove_breakpoint_at(row.path, row.line); });
-    breakpoints_panel_->set_on_add_condition([this](const BreakpointRow& row) {
+    breakpoints_panel_->set_on_add_condition([this](const BreakpointRow& row, int display_index,
+                                                    tuinator::Point action_anchor) {
+        open_breakpoint_condition_editor(row.path, row.line, action_anchor, display_index);
+    });
+    breakpoints_panel_->set_on_edit_when_condition([this](const BreakpointRow& row, tuinator::Point /*action_anchor*/) {
         begin_edit_breakpoint_condition(row.path, row.line);
     });
-    breakpoints_panel_->set_on_submit([this](const std::string& condition) { submit_breakpoint_condition(condition); });
+    breakpoints_panel_->set_on_edit_hit_condition([this](const BreakpointRow& row, tuinator::Point /*action_anchor*/) {
+        begin_edit_breakpoint_hit_condition(row.path, row.line);
+    });
+    breakpoints_panel_->set_on_clear_when_condition([this](const BreakpointRow& row) {
+        set_breakpoint_condition(row.path, row.line, "");
+    });
+    breakpoints_panel_->set_on_clear_hit_condition([this](const BreakpointRow& row) {
+        set_breakpoint_hit_condition(row.path, row.line, "");
+    });
+    breakpoints_panel_->set_on_submit([this](const std::string& condition) {
+        if (!editing_breakpoint_path_.empty() && editing_breakpoint_line_ > 0) {
+            submit_breakpoint_condition(condition);
+        }
+    });
     breakpoints_panel_->set_on_change([this](const std::string& condition) {
+        if (editing_breakpoint_path_.empty() || editing_breakpoint_line_ <= 0) {
+            return;
+        }
         breakpoint_input_draft_ = condition;
         breakpoint_input_focused_ = true;
         model_.focus = Focus::Breakpoints;
@@ -986,16 +1009,6 @@ void DebugApp::build_ui() {
     source_panel_ = source_panel.get();
     context_menu_ = std::make_unique<ContextMenu>(dap_theme_.panel_background, dap_theme_.label, dap_theme_.selection,
                                                   dap_theme_.border_focused);
-    breakpoint_prompt_input_ = std::make_unique<tuinator::TextInput>(
-        tuinator::TextInputOptions{.placeholder = "> condition (when)"}, dap_theme_.label, dap_theme_.selection);
-    breakpoint_prompt_input_->set_on_submit([this](const std::string& value) { submit_breakpoint_condition(value); });
-    breakpoint_prompt_input_->set_on_change([this](const std::string& value) {
-        breakpoint_input_draft_ = value;
-        breakpoint_input_focused_ = true;
-        if (breakpoints_panel_ != nullptr) {
-            breakpoints_panel_->set_input_value(value);
-        }
-    });
 
     source_panel_->set_on_toggle_breakpoint([this](int line) { toggle_breakpoint_at_line(line); });
     source_panel_->set_on_breakpoint_context([this](int line, int code_column, tuinator::Point anchor) {
@@ -2097,6 +2110,14 @@ void DebugApp::request_full_screen_refresh() {
     app_->present();
 }
 
+void DebugApp::request_repaint() {
+    if (!ui_built_) {
+        return;
+    }
+
+    mark_all_panels_dirty();
+}
+
 void DebugApp::on_split_drag_ended() {
     apply_focus();
     refresh_scroll_views();
@@ -2202,12 +2223,7 @@ bool DebugApp::is_watch_input_focused() const {
 }
 
 bool DebugApp::is_breakpoint_input_focused() const {
-    if (breakpoint_prompt_active() && breakpoint_prompt_input_ != nullptr &&
-        breakpoint_prompt_input_->is_focused()) {
-        return true;
-    }
-    return breakpoints_panel_ != nullptr && breakpoints_panel_->input_widget() != nullptr &&
-           breakpoints_panel_->input_widget()->is_focused();
+    return breakpoint_prompt_active();
 }
 
 bool DebugApp::is_scope_input_focused() const {
@@ -2385,12 +2401,18 @@ bool DebugApp::handle_global_key(const tuinator::KeyPress& key) {
             const int line = source_panel_->cursor_line();
             const auto file_it = breakpoints_by_path_.find(path);
             if (file_it != breakpoints_by_path_.end() && file_it->second.contains(line)) {
-                begin_edit_breakpoint_condition(path, line);
+                tuinator::Point anchor{0, 0};
+                if (source_panel_ != nullptr) {
+                    const tuinator::Rect bounds = source_panel_->bounds();
+                    anchor = {bounds.x + 2, bounds.y + 2};
+                }
+                open_breakpoint_condition_editor(path, line, anchor, std::nullopt);
                 return true;
             }
         } else if (model_.focus == Focus::Breakpoints && breakpoints_panel_ != nullptr) {
             if (const BreakpointRow* row = breakpoints_panel_->selected_row()) {
-                begin_edit_breakpoint_condition(row->path, row->line);
+                open_breakpoint_condition_editor(row->path, row->line, std::nullopt,
+                                                 breakpoints_panel_->selected_index());
                 return true;
             }
         }
@@ -2912,10 +2934,6 @@ void DebugApp::apply_focus() {
     default:
         target = source_panel_;
         break;
-    }
-
-    if (breakpoint_prompt_active() && breakpoint_prompt_input_ != nullptr) {
-        target = breakpoint_prompt_input_.get();
     }
 
     if (target != nullptr) {
@@ -3728,33 +3746,80 @@ void DebugApp::apply_breakpoint_hits_from_snapshot_json(const std::string& json)
     }
 }
 
+void DebugApp::open_breakpoint_condition_editor(const std::string& path, int line,
+                                                std::optional<tuinator::Point> action_anchor,
+                                                std::optional<int> breakpoints_display_index) {
+    const std::string normalized = normalize_source_path(path);
+    if (normalized.empty() || line <= 0 || context_menu_ == nullptr) {
+        return;
+    }
+
+    auto path_it = find_breakpoints_path(normalized);
+    if (path_it == breakpoints_by_path_.end() || !path_it->second.contains(line)) {
+        model_.status_message = "No breakpoint on this line";
+        sync_status_bar();
+        return;
+    }
+
+    const BreakpointInfo& info = path_it->second.at(line);
+    const bool has_when = !info.condition.empty();
+    const bool has_hit = !info.hit_condition.empty();
+    const std::string bp_path = path_it->first;
+
+    std::vector<ContextMenu::Item> items;
+    items.push_back(ContextMenu::Item{
+        has_when ? "Edit when condition" : "Add when condition",
+        [this, bp_path, line]() { begin_edit_breakpoint_condition(bp_path, line); },
+    });
+    items.push_back(ContextMenu::Item{
+        has_hit ? "Edit hit condition" : "Add hit condition",
+        [this, bp_path, line]() { begin_edit_breakpoint_hit_condition(bp_path, line); },
+    });
+
+    tuinator::Point menu_anchor{};
+    bool open_above = false;
+    if (breakpoints_display_index.has_value() && breakpoints_panel_ != nullptr) {
+        menu_anchor = action_anchor.has_value()
+                          ? *action_anchor
+                          : breakpoints_panel_->row_action_anchor(*breakpoints_display_index, RowActionType::Add);
+        open_above = true;
+    } else if (action_anchor.has_value()) {
+        menu_anchor = *action_anchor;
+    }
+
+    const tuinator::Rect clip_bounds =
+        breakpoints_display_index.has_value() ? breakpoints_panel_clip_bounds() : overlay_clip_bounds();
+    context_menu_->open(menu_anchor, clip_bounds, std::move(items), open_above);
+    context_menu_->layout(clip_bounds);
+    request_repaint();
+}
+
 void DebugApp::begin_edit_breakpoint_condition(const std::string& path, int line) {
     const std::string normalized = normalize_source_path(path);
     if (normalized.empty() || line <= 0) {
         return;
     }
 
-    const auto it = breakpoints_by_path_.find(normalized);
-    if (it == breakpoints_by_path_.end() || !it->second.contains(line)) {
+    auto path_it = find_breakpoints_path(normalized);
+    if (path_it == breakpoints_by_path_.end() || !path_it->second.contains(line)) {
         model_.status_message = "No breakpoint on this line";
         sync_status_bar();
         return;
     }
 
-    editing_breakpoint_path_ = normalized;
+    editing_breakpoint_path_ = path_it->first;
     editing_breakpoint_line_ = line;
     editing_breakpoint_hit_ = false;
-    breakpoint_input_draft_ = it->second.at(line).condition;
+    breakpoint_input_draft_ = path_it->second.at(line).condition;
     breakpoint_input_focused_ = true;
     model_.focus = Focus::Breakpoints;
 
-    sync_breakpoint_prompt();
+    sync_breakpoint_panel_input();
 
-    model_.status_message =
-        "Condition for " + panel_title_from_path(normalized) + ":" + std::to_string(line) + " — type below, Enter to save";
-    apply_focus();
+    model_.status_message = "When condition for " + panel_title_from_path(path_it->first) + ":" +
+                            std::to_string(line) + " — Enter to save, Esc to cancel";
     sync_status_bar();
-    request_full_screen_refresh();
+    request_repaint();
 }
 
 void DebugApp::begin_edit_breakpoint_hit_condition(const std::string& path, int line) {
@@ -3763,27 +3828,57 @@ void DebugApp::begin_edit_breakpoint_hit_condition(const std::string& path, int 
         return;
     }
 
-    const auto it = breakpoints_by_path_.find(normalized);
-    if (it == breakpoints_by_path_.end() || !it->second.contains(line)) {
+    auto path_it = find_breakpoints_path(normalized);
+    if (path_it == breakpoints_by_path_.end() || !path_it->second.contains(line)) {
         model_.status_message = "No breakpoint on this line";
         sync_status_bar();
         return;
     }
 
-    editing_breakpoint_path_ = normalized;
+    editing_breakpoint_path_ = path_it->first;
     editing_breakpoint_line_ = line;
     editing_breakpoint_hit_ = true;
-    breakpoint_input_draft_ = it->second.at(line).hit_condition;
+    breakpoint_input_draft_ = path_it->second.at(line).hit_condition;
     breakpoint_input_focused_ = true;
     model_.focus = Focus::Breakpoints;
 
-    sync_breakpoint_prompt();
+    sync_breakpoint_panel_input();
 
-    model_.status_message = "Hit condition for " + panel_title_from_path(normalized) + ":" +
-                            std::to_string(line) + " — type below, Enter to save";
+    model_.status_message = "Hit condition for " + panel_title_from_path(path_it->first) + ":" +
+                            std::to_string(line) + " — Enter to save, Esc to cancel";
+    sync_status_bar();
+    request_repaint();
+}
+
+void DebugApp::sync_breakpoint_panel_input() {
+    if (breakpoints_panel_ == nullptr) {
+        return;
+    }
+
+    const std::string placeholder =
+        editing_breakpoint_hit_ ? "> hit condition" : "> when condition";
+    breakpoints_panel_->set_input_placeholder(placeholder);
+    breakpoints_panel_->set_input_value(breakpoint_input_draft_);
+    breakpoint_input_focused_ = true;
+    model_.focus = Focus::Breakpoints;
     apply_focus();
     sync_status_bar();
-    request_full_screen_refresh();
+}
+
+bool DebugApp::handle_breakpoint_input_key(const tuinator::Event& event) {
+    if (!breakpoint_prompt_active() || breakpoints_panel_ == nullptr) {
+        return false;
+    }
+
+    tuinator::TextInput* input = breakpoints_panel_->input_widget();
+    if (input == nullptr) {
+        return false;
+    }
+
+    if (!input->is_focused()) {
+        apply_focus();
+    }
+    return input->handle_event(event);
 }
 
 void DebugApp::submit_breakpoint_condition(const std::string& condition) {
@@ -3812,6 +3907,10 @@ void DebugApp::capture_breakpoint_input_state() {
 
 void DebugApp::restore_breakpoint_input_state() {
     if (breakpoints_panel_ == nullptr) {
+        return;
+    }
+    if (!editing_breakpoint_path_.empty() && editing_breakpoint_line_ > 0) {
+        sync_breakpoint_panel_input();
         return;
     }
     if (!breakpoint_input_draft_.empty()) {
@@ -3910,34 +4009,7 @@ bool DebugApp::breakpoint_prompt_active() const {
 }
 
 bool DebugApp::overlay_intercepts_events() const {
-    return context_menu_open() || breakpoint_prompt_active();
-}
-
-tuinator::Rect DebugApp::breakpoint_prompt_bounds() const {
-    constexpr int kStatusBarRows = 1;
-    constexpr int kPromptRows = 1;
-    const tuinator::Size term = app_ != nullptr ? app_->terminal_size() : tuinator::Size{80, 24};
-    const int y = std::max(0, term.height - kStatusBarRows - kPromptRows);
-    return {0, y, term.width, kPromptRows};
-}
-
-void DebugApp::layout_breakpoint_prompt() {
-    if (breakpoint_prompt_input_ == nullptr) {
-        return;
-    }
-    breakpoint_prompt_input_->layout(breakpoint_prompt_bounds());
-}
-
-void DebugApp::sync_breakpoint_prompt() {
-    if (breakpoint_prompt_input_ == nullptr) {
-        return;
-    }
-    breakpoint_prompt_input_->set_value(breakpoint_input_draft_);
-    layout_breakpoint_prompt();
-    breakpoint_prompt_input_->set_focused(true);
-    if (breakpoints_panel_ != nullptr) {
-        breakpoints_panel_->set_input_value(breakpoint_input_draft_);
-    }
+    return context_menu_open();
 }
 
 void DebugApp::blur_breakpoint_input(bool cancelled) {
@@ -3946,11 +4018,8 @@ void DebugApp::blur_breakpoint_input(bool cancelled) {
     editing_breakpoint_hit_ = false;
     breakpoint_input_draft_.clear();
     breakpoint_input_focused_ = false;
-    if (breakpoint_prompt_input_ != nullptr) {
-        breakpoint_prompt_input_->set_value("");
-        breakpoint_prompt_input_->set_focused(false);
-    }
     if (breakpoints_panel_ != nullptr) {
+        breakpoints_panel_->set_input_placeholder("> when / hit condition");
         breakpoints_panel_->set_input_value("");
         if (breakpoints_panel_->input_widget() != nullptr) {
             breakpoints_panel_->input_widget()->set_focused(false);
@@ -3964,7 +4033,7 @@ void DebugApp::blur_breakpoint_input(bool cancelled) {
         model_.status_message = "Breakpoint edit cancelled";
     }
     sync_status_bar();
-    request_full_screen_refresh();
+    request_repaint();
 }
 
 bool DebugApp::handle_overlay_event(const tuinator::Event& event) {
@@ -3976,28 +4045,12 @@ bool DebugApp::handle_overlay_event(const tuinator::Event& event) {
             pending_action();
         }
         if (handled || pending_action) {
-            request_full_screen_refresh();
+            request_repaint();
         }
         return handled || static_cast<bool>(pending_action);
     }
 
-    if (!breakpoint_prompt_active() || breakpoint_prompt_input_ == nullptr) {
-        return false;
-    }
-
-    layout_breakpoint_prompt();
-    if (const auto* key = std::get_if<tuinator::KeyPress>(&event)) {
-        if (key->key == tuinator::Key::Escape) {
-            blur_breakpoint_input();
-            return true;
-        }
-    }
-
-    const bool handled = breakpoint_prompt_input_->handle_event(event);
-    if (handled) {
-        request_full_screen_refresh();
-    }
-    return handled || breakpoint_prompt_active();
+    return false;
 }
 
 void DebugApp::paint_overlay(tuinator::PaintContext& ctx) const {
@@ -4005,27 +4058,21 @@ void DebugApp::paint_overlay(tuinator::PaintContext& ctx) const {
         context_menu_->layout(overlay_clip_bounds());
         context_menu_->paint(ctx);
     }
-
-    if (!breakpoint_prompt_active() || breakpoint_prompt_input_ == nullptr) {
-        return;
-    }
-
-    const tuinator::Rect bounds = breakpoint_prompt_bounds();
-    if (bounds.width <= 0 || bounds.height <= 0) {
-        return;
-    }
-
-    ctx.canvas.fill_rect(bounds, ' ', dap_theme_.panel_background);
-    const tuinator::Rect local{0, 0, bounds.width, bounds.height};
-    ctx.with_clip(local, [&](tuinator::PaintContext& child_ctx) {
-        breakpoint_prompt_input_->layout(local);
-        breakpoint_prompt_input_->paint(child_ctx);
-    });
 }
 
 tuinator::Rect DebugApp::overlay_clip_bounds() const {
     const tuinator::Size term = app_->terminal_size();
     return {0, 0, term.width, term.height};
+}
+
+tuinator::Rect DebugApp::breakpoints_panel_clip_bounds() const {
+    if (breakpoints_panel_ != nullptr) {
+        const tuinator::Rect panel_bounds = breakpoints_panel_->panel_bounds();
+        if (panel_bounds.width > 0 && panel_bounds.height > 0) {
+            return panel_bounds;
+        }
+    }
+    return overlay_clip_bounds();
 }
 
 tuinator::Rect DebugApp::source_context_clip_bounds() const {
@@ -4297,19 +4344,17 @@ void DebugApp::open_source_context_menu(
 
     if (has_breakpoint) {
         items.push_back(ContextMenu::Item{
-            "Edit condition",
-            [this, normalized, line]() { begin_edit_breakpoint_condition(normalized, line); },
+            "Edit conditions",
+            [this, normalized, line, menu_anchor]() {
+                open_breakpoint_condition_editor(normalized, line, menu_anchor, std::nullopt);
+            },
         });
         if (has_condition) {
             items.push_back(ContextMenu::Item{
-                "Clear condition",
+                "Clear when condition",
                 [this, normalized, line]() { set_breakpoint_condition(normalized, line, ""); },
             });
         }
-        items.push_back(ContextMenu::Item{
-            "Edit hit condition",
-            [this, normalized, line]() { begin_edit_breakpoint_hit_condition(normalized, line); },
-        });
         if (has_hit_condition) {
             items.push_back(ContextMenu::Item{
                 "Clear hit condition",
@@ -4327,9 +4372,9 @@ void DebugApp::open_source_context_menu(
         });
         items.push_back(ContextMenu::Item{
             "Add conditional breakpoint",
-            [this, ensure_breakpoint, normalized, line]() {
+            [this, ensure_breakpoint, normalized, line, menu_anchor]() {
                 ensure_breakpoint();
-                begin_edit_breakpoint_condition(normalized, line);
+                open_breakpoint_condition_editor(normalized, line, menu_anchor, std::nullopt);
             },
         });
     }
