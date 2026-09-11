@@ -47,6 +47,16 @@ class WatchesPanel;
 class TitledScrollPane;
 class StackedPane;
 class SharedWidgetHost;
+class SourceTabBar;
+
+struct SourceFileTab {
+    std::string path;
+    std::int64_t source_reference = 0;
+    std::string cache_key;
+    std::string cached_text;
+    int cursor_line = 1;
+    int scroll_y = 0;
+};
 
 struct SidebarSlot {
     PanelSlotConfig config;
@@ -225,6 +235,12 @@ class DebugApp {
     std::string normalize_source_path(const std::string& path) const;
     void normalize_breakpoint_path_keys();
     void open_source_file(const std::string& path, int line, bool pin, std::int64_t source_reference = 0);
+    void save_active_source_file_tab();
+    void activate_source_file_tab(int index, int line = 0);
+    void switch_source_file_tab(int index);
+    void close_source_file_tab(int index);
+    void sync_source_file_tab_bar();
+    [[nodiscard]] int find_source_file_tab_index(const std::string& cache_key) const;
     void maybe_follow_execution();
     void navigate_to_user_stop_frame();
     [[nodiscard]] bool both_cxx_exception_filters_enabled() const;
@@ -384,7 +400,10 @@ class DebugApp {
     std::unique_ptr<ContextMenu> context_menu_;
     std::unique_ptr<TitledScrollPane> source_section_;
     SourcePanel* source_panel_ = nullptr;
+    SourceTabBar* source_tab_bar_ = nullptr;
     tuinator::ScrollView* source_scroll_view_ = nullptr;
+    std::vector<SourceFileTab> source_file_tabs_;
+    int active_source_file_tab_ = -1;
     ConsolePanel* console_panel_ = nullptr;
     tuinator::ScrollView* console_scroll_view_ = nullptr;
     std::size_t console_synced_line_count_ = 0;
@@ -428,7 +447,6 @@ class DebugApp {
     std::int64_t cached_source_reference_ = 0;
     std::string cached_source_text_;
     std::string pending_source_fetch_key_;
-    std::string cached_source_title_;
     std::string cached_status_bar_text_;
     std::unordered_set<std::string> expanded_scope_paths_;
     std::unordered_set<std::string> pending_scope_paths_;

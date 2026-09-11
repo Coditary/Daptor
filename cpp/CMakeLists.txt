@@ -30,6 +30,7 @@ add_executable(tui-debug-ui
     src/ui/context_menu.cpp
     src/ui/watches_panel.cpp
     src/ui/source_panel.cpp
+    src/ui/source_tab_bar.cpp
     src/ui/step_in_selection.cpp
     src/ui/console_panel.cpp
     src/ui/repl_panel.cpp

@@ -12,6 +12,7 @@
 #include "tui_debug_ui/scopes_panel.hpp"
 #include "tui_debug_ui/snapshot_parser.hpp"
 #include "tui_debug_ui/source_panel.hpp"
+#include "tui_debug_ui/source_tab_bar.hpp"
 #include "tui_debug_ui/navigable_list_view.hpp"
 #include "tui_debug_ui/breakpoints_panel.hpp"
 #include "tui_debug_ui/context_menu.hpp"
@@ -1137,7 +1138,6 @@ void DebugApp::build_ui() {
         slot.cached_scope_row_meta.clear();
     }
     cached_stack_lines_.clear();
-    cached_source_title_.clear();
     cached_highlight_first_line_ = -1;
     cached_highlight_line_count_ = -1;
 
@@ -1200,9 +1200,17 @@ void DebugApp::build_ui() {
         }
     }
 
-    source_section_ = std::make_unique<TitledScrollPane>(panel_title_from_path(model_.source_path),
+    auto source_tab_bar = std::make_unique<SourceTabBar>(dap_theme_.panel_background, dap_theme_.label,
+                                                         dap_theme_.title_source, dap_theme_.row_action_muted,
+                                                         dap_theme_.breakpoint_hit_count, dap_theme_.divider);
+    source_tab_bar_ = source_tab_bar.get();
+    source_tab_bar_->set_on_select([this](int index) { switch_source_file_tab(index); });
+    source_tab_bar_->set_on_close([this](int index) { close_source_file_tab(index); });
+
+    source_section_ = std::make_unique<TitledScrollPane>(panel_type_label(SidebarPanelType::Source),
                                                          std::move(source_panel), dap_theme_.title_source,
-                                                         dap_theme_.panel_background, scroll_options, true, false);
+                                                         dap_theme_.panel_background, scroll_options, true, false,
+                                                         std::move(source_tab_bar));
     source_scroll_view_ = source_section_->scroll_view();
     if (source_panel_ != nullptr && source_scroll_view_ != nullptr) {
         source_panel_->set_scroll_parent(source_scroll_view_);
@@ -1473,7 +1481,11 @@ void DebugApp::build_ui() {
     sync_ui_from_model();
     sync_controls_bar();
     sync_breakpoints_list_panel();
-    if (!model_.source_path.empty()) {
+    if (!source_file_tabs_.empty() && active_source_file_tab_ >= 0 &&
+        active_source_file_tab_ < static_cast<int>(source_file_tabs_.size())) {
+        sync_source_file_tab_bar();
+        activate_source_file_tab(active_source_file_tab_, 0);
+    } else if (!model_.source_path.empty()) {
         const int line =
             model_.execution_line > 0 ? static_cast<int>(model_.execution_line) : 1;
         open_source_file(model_.source_path, line, false, model_.source_reference);
@@ -1483,6 +1495,8 @@ void DebugApp::build_ui() {
         if (!launch_posted_) {
             prefetch_program_source_highlight();
         }
+    } else {
+        sync_source_file_tab_bar();
     }
     refresh_scroll_views();
     restore_watch_input_state();
@@ -1834,6 +1848,10 @@ void DebugApp::handle_session_event(const SessionIoEvent& event) {
         if (event.success && event.detail == pending_source_fetch_key_) {
             cached_source_text_ = event.payload;
             pending_source_fetch_key_.clear();
+            if (active_source_file_tab_ >= 0 &&
+                active_source_file_tab_ < static_cast<int>(source_file_tabs_.size())) {
+                source_file_tabs_[static_cast<std::size_t>(active_source_file_tab_)].cached_text = event.payload;
+            }
             if (source_panel_ != nullptr) {
                 source_panel_->set_file_line_count(std::max(1, count_file_lines(cached_source_text_)));
                 const int line = source_panel_->cursor_line() > 0 ? source_panel_->cursor_line() : 1;
@@ -3203,8 +3221,7 @@ void DebugApp::move_source_panel_to_dock(PanelDock target_dock) {
         PanelSlotConfig config;
         config.type = SidebarPanelType::Source;
         config.id = next_slot_id_++;
-        config.tab_label =
-            make_panel_tab_label(config, dock_slot_configs(target_dock), panel_title_from_path(model_.source_path));
+        config.tab_label = make_panel_tab_label(config, dock_slot_configs(target_dock));
         std::vector<SidebarSlot>& target_slots = dock_slots(target_dock);
         target_slots.push_back(SidebarSlot{std::move(config)});
         SidebarSlot& moved_slot = target_slots.back();
@@ -3554,19 +3571,14 @@ void DebugApp::init_default_source_slots() {
     PanelSlotConfig config;
     config.type = SidebarPanelType::Source;
     config.id = next_slot_id_++;
-    const std::string preferred = panel_title_from_path(model_.source_path);
-    config.tab_label = make_panel_tab_label(config, dock_slot_configs(PanelDock::Main), preferred);
+    config.tab_label = make_panel_tab_label(config, dock_slot_configs(PanelDock::Main));
     SidebarSlot slot;
     slot.config = std::move(config);
     source_slots_.push_back(std::move(slot));
 }
 
 void DebugApp::sync_source_stack_title() {
-    const std::string title = panel_title_from_path(model_.source_path);
-    if (title.empty() || title == cached_source_title_) {
-        return;
-    }
-    cached_source_title_ = title;
+    const std::string title = panel_type_label(SidebarPanelType::Source);
     if (source_section_ != nullptr) {
         source_section_->set_title(title);
     }
@@ -3577,6 +3589,9 @@ void DebugApp::sync_source_stack_title() {
 
     SidebarSlot& slot = dock_slots(source_loc->first)[static_cast<std::size_t>(source_loc->second)];
     if (slot.tab_label_customized) {
+        return;
+    }
+    if (slot.config.tab_label == title) {
         return;
     }
     slot.config.tab_label = title;
@@ -4624,6 +4639,158 @@ void DebugApp::mark_all_panels_dirty() {
     refresh_scroll_views(false);
 }
 
+int DebugApp::find_source_file_tab_index(const std::string& cache_key) const {
+    for (std::size_t i = 0; i < source_file_tabs_.size(); ++i) {
+        if (source_file_tabs_[i].cache_key == cache_key) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+void DebugApp::save_active_source_file_tab() {
+    if (active_source_file_tab_ < 0 || active_source_file_tab_ >= static_cast<int>(source_file_tabs_.size())) {
+        return;
+    }
+
+    SourceFileTab& tab = source_file_tabs_[static_cast<std::size_t>(active_source_file_tab_)];
+    tab.path = model_.source_path;
+    tab.source_reference = model_.source_reference;
+    tab.cache_key = cached_source_path_;
+    tab.cached_text = cached_source_text_;
+    if (source_panel_ != nullptr) {
+        tab.cursor_line = source_panel_->cursor_line();
+    }
+    if (source_scroll_view_ != nullptr) {
+        tab.scroll_y = source_scroll_view_->scroll_y();
+    }
+}
+
+void DebugApp::sync_source_file_tab_bar() {
+    if (source_tab_bar_ == nullptr) {
+        return;
+    }
+
+    std::vector<SourceTabBar::Tab> tabs;
+    tabs.reserve(source_file_tabs_.size());
+    for (const SourceFileTab& tab : source_file_tabs_) {
+        tabs.push_back({panel_title_from_path(tab.path)});
+    }
+    const int active = source_file_tabs_.empty() ? 0 : std::clamp(active_source_file_tab_, 0,
+                                                                   static_cast<int>(source_file_tabs_.size()) - 1);
+    source_tab_bar_->set_tabs(std::move(tabs), active);
+}
+
+void DebugApp::activate_source_file_tab(int index, int line) {
+    if (index < 0 || index >= static_cast<int>(source_file_tabs_.size())) {
+        return;
+    }
+
+    if (active_source_file_tab_ >= 0 && active_source_file_tab_ < static_cast<int>(source_file_tabs_.size()) &&
+        active_source_file_tab_ != index) {
+        save_active_source_file_tab();
+    }
+
+    active_source_file_tab_ = index;
+    const SourceFileTab& tab = source_file_tabs_[static_cast<std::size_t>(index)];
+
+    model_.source_path = tab.path;
+    model_.source_reference = tab.source_reference;
+    cached_source_path_ = tab.cache_key;
+    cached_source_reference_ = tab.source_reference;
+    cached_source_text_ = tab.cached_text;
+
+    cached_highlight_first_line_ = -1;
+    cached_highlight_line_count_ = -1;
+    highlight_request_first_line_ = -1;
+    highlight_request_line_count_ = -1;
+    cached_highlight_scroll_y_ = -1;
+
+    if (source_panel_ != nullptr) {
+        source_panel_->set_file_line_count(std::max(1, count_file_lines(cached_source_text_)));
+        source_panel_->set_lines({});
+        const int target_line = line > 0 ? line : tab.cursor_line;
+        source_panel_->set_cursor_line(std::max(1, target_line));
+    }
+
+    if (cached_source_text_.empty() && tab.source_reference > 0 && session_io_ != nullptr &&
+        session_io_->is_active()) {
+        pending_source_fetch_key_ = tab.cache_key;
+        session_io_->request_source_fetch(tab.source_reference, tab.cache_key);
+    }
+
+    sync_source_stack_title();
+    sync_breakpoints_to_panel();
+
+    if (!cached_source_text_.empty() && source_panel_ != nullptr) {
+        if (uses_full_file_source()) {
+            ensure_source_plain_lines();
+        } else {
+            const int line_count = std::max(1, source_viewport_height());
+            const int first_line =
+                std::max(1, (line > 0 ? line : tab.cursor_line) - line_count / 2);
+            apply_instant_source_viewport(first_line, line_count);
+        }
+    }
+
+    if (source_scroll_view_ != nullptr) {
+        const int scroll_y = line > 0 ? std::max(0, line - source_viewport_height() / 2 - 1) : tab.scroll_y;
+        source_scroll_view_->scroll_to(0, scroll_y);
+        source_scroll_view_->refresh_content();
+        cached_highlight_scroll_y_ = scroll_y;
+        if (source_scroll_view_->bounds().height > 0) {
+            cached_source_viewport_height_ = source_scroll_view_->bounds().height;
+        }
+    } else if (line > 0) {
+        scroll_source_to_line(line);
+    }
+
+    maybe_request_source_highlight();
+    sync_source_file_tab_bar();
+    mark_source_view_dirty();
+    sync_status_bar();
+}
+
+void DebugApp::switch_source_file_tab(int index) {
+    if (index == active_source_file_tab_) {
+        return;
+    }
+    activate_source_file_tab(index, 0);
+}
+
+void DebugApp::close_source_file_tab(int index) {
+    if (index < 0 || index >= static_cast<int>(source_file_tabs_.size())) {
+        return;
+    }
+
+    source_file_tabs_.erase(source_file_tabs_.begin() + index);
+
+    if (source_file_tabs_.empty()) {
+        active_source_file_tab_ = -1;
+        model_.source_path.clear();
+        model_.source_reference = 0;
+        cached_source_path_.clear();
+        cached_source_reference_ = 0;
+        cached_source_text_.clear();
+        if (source_panel_ != nullptr) {
+            source_panel_->set_lines({});
+            source_panel_->set_file_line_count(1);
+        }
+        sync_source_file_tab_bar();
+        mark_source_view_dirty();
+        sync_status_bar();
+        return;
+    }
+
+    int next_active = active_source_file_tab_;
+    if (index < active_source_file_tab_) {
+        next_active--;
+    } else if (index == active_source_file_tab_) {
+        next_active = std::min(index, static_cast<int>(source_file_tabs_.size()) - 1);
+    }
+    activate_source_file_tab(next_active, 0);
+}
+
 void DebugApp::open_source_file(const std::string& path, int line, bool pin, std::int64_t source_reference) {
     std::string disk_path = path;
     if (!disk_path.empty() && disk_path.rfind("dap:source:", 0) != 0) {
@@ -4649,75 +4816,42 @@ void DebugApp::open_source_file(const std::string& path, int line, bool pin, std
         (disk_path.empty() && source_reference > 0) ? cache_key : (disk_path.empty() ? path : disk_path);
     const std::string normalized_display_path =
         display_path.rfind("dap:source:", 0) == 0 ? display_path : source_cache_key(display_path, 0);
-    const bool same_view =
-        viewing_same_source(model_.source_path, model_.source_reference, normalized_display_path, source_reference) &&
-        source_panel_ != nullptr && line > 0 && source_panel_->cursor_line() == line &&
-        !source_panel_->lines().empty();
-    if (same_view) {
-        if (source_panel_ != nullptr && is_session_stopped() && model_.execution_line > 0) {
-            source_panel_->set_execution_line(static_cast<int>(model_.execution_line));
+
+    const int existing_index = find_source_file_tab_index(cache_key);
+    if (existing_index >= 0) {
+        if (existing_index == active_source_file_tab_) {
+            const bool same_view = source_panel_ != nullptr && line > 0 && source_panel_->cursor_line() == line &&
+                                   !source_panel_->lines().empty();
+            if (same_view) {
+                if (is_session_stopped() && model_.execution_line > 0) {
+                    source_panel_->set_execution_line(static_cast<int>(model_.execution_line));
+                }
+                return;
+            }
+            if (line > 0) {
+                source_panel_->set_cursor_line(line);
+                scroll_source_to_line(line);
+                save_active_source_file_tab();
+                maybe_request_source_highlight();
+                mark_source_view_dirty();
+            }
+            return;
         }
+        activate_source_file_tab(existing_index, line);
         return;
     }
 
-    model_.source_path = normalized_display_path;
-    model_.source_reference = source_reference;
+    save_active_source_file_tab();
 
-    const bool cache_hit =
-        cached_source_path_ == cache_key && cached_source_reference_ == source_reference;
-    if (!cache_hit) {
-        cached_source_path_ = cache_key;
-        cached_source_reference_ = source_reference;
-        cached_source_text_ = disk_path.empty() ? std::string{} : read_file_or_empty(disk_path);
-        cached_highlight_first_line_ = -1;
-        cached_highlight_line_count_ = -1;
-        highlight_request_first_line_ = -1;
-        highlight_request_line_count_ = -1;
-        if (source_panel_ != nullptr) {
-            source_panel_->set_file_line_count(std::max(1, count_file_lines(cached_source_text_)));
-            source_panel_->set_lines({});
-        }
-        cached_highlight_scroll_y_ = -1;
-    }
-
-    if (cached_source_text_.empty() && source_reference > 0 && session_io_ != nullptr &&
-        session_io_->is_active()) {
-        pending_source_fetch_key_ = cache_key;
-        session_io_->request_source_fetch(source_reference, cache_key);
-    }
-
-    if (source_panel_ != nullptr && line > 0) {
-        source_panel_->set_cursor_line(line);
-    }
-
-    sync_source_stack_title();
-
-    sync_breakpoints_to_panel();
-
-    if (!cached_source_text_.empty() && source_panel_ != nullptr && source_panel_->lines().empty()) {
-        if (uses_full_file_source()) {
-            ensure_source_plain_lines();
-        } else {
-            const int line_count = std::max(1, source_viewport_height());
-            const int first_line = std::max(1, line - line_count / 2);
-            apply_instant_source_viewport(first_line, line_count);
-        }
-    }
-
-    if (line > 0) {
-        scroll_source_to_line(line);
-    }
-
-    cached_highlight_first_line_ = -1;
-    highlight_request_first_line_ = -1;
-    if (source_scroll_view_ != nullptr && source_scroll_view_->bounds().height > 0) {
-        cached_source_viewport_height_ = source_scroll_view_->bounds().height;
-        cached_highlight_scroll_y_ = source_scroll_view_->scroll_y();
-    }
-    maybe_request_source_highlight();
-
-    mark_source_view_dirty();
-    sync_status_bar();
+    SourceFileTab tab;
+    tab.path = normalized_display_path;
+    tab.source_reference = source_reference;
+    tab.cache_key = cache_key;
+    tab.cached_text = disk_path.empty() ? std::string{} : read_file_or_empty(disk_path);
+    tab.cursor_line = line > 0 ? line : 1;
+    tab.scroll_y = 0;
+    source_file_tabs_.push_back(std::move(tab));
+    activate_source_file_tab(static_cast<int>(source_file_tabs_.size()) - 1, line);
 }
 
 namespace {
