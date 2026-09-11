@@ -12,7 +12,7 @@ pub struct Request {
     pub arguments: Value,
 }
 
-/// Parsed inbound DAP message (response or event).
+/// Parsed inbound DAP message (response, event, or adapter→client request).
 #[derive(Debug, Clone)]
 pub enum InboundMessage {
     Response {
@@ -21,6 +21,11 @@ pub enum InboundMessage {
         command: String,
         body: Value,
         message: Option<String>,
+    },
+    Request {
+        seq: i64,
+        command: String,
+        arguments: Value,
     },
     Event {
         event: String,
@@ -63,6 +68,18 @@ impl InboundMessage {
                     .context("event missing event name")?
                     .to_string(),
                 body: value.get("body").cloned().unwrap_or(Value::Null),
+            }),
+            "request" => Ok(Self::Request {
+                seq: value
+                    .get("seq")
+                    .and_then(Value::as_i64)
+                    .context("request missing seq")?,
+                command: value
+                    .get("command")
+                    .and_then(Value::as_str)
+                    .context("request missing command")?
+                    .to_string(),
+                arguments: value.get("arguments").cloned().unwrap_or(Value::Null),
             }),
             other => anyhow::bail!("unknown DAP message type: {other}"),
         }
@@ -135,7 +152,7 @@ pub struct StoppedEventBody {
     pub hit_breakpoint_ids: Vec<i64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OutputEventBody {
     pub category: Option<String>,
     pub output: String,

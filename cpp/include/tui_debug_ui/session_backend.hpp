@@ -33,6 +33,7 @@ class SessionBackend {
     /// Returns 0 when an event was written, 1 when idle, -1 on error.
     virtual int poll_json(std::string& json_out) = 0;
     virtual std::optional<std::string> drain_console_json() = 0;
+    virtual bool terminal_write(const std::string& bytes, std::string& error_out) = 0;
 
     virtual bool send_command(const std::string& op, std::string& error_out) = 0;
     virtual bool fetch_step_in_targets(std::int64_t frame_id, std::string& json_out,

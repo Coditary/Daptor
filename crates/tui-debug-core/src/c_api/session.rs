@@ -69,8 +69,8 @@ impl CSession {
         snapshot_to_json(&snapshot)
     }
 
-    pub fn drain_console_json(&self) -> Result<String> {
-        let entries: Vec<_> = match &self.inner {
+    pub fn drain_console_json(&mut self) -> Result<String> {
+        let entries: Vec<_> = match &mut self.inner {
             SessionEngine::Dap(session) => session
                 .drain_console_output()
                 .into_iter()
@@ -84,6 +84,13 @@ impl CSession {
             SessionEngine::Rr(_) => Vec::new(),
         };
         serde_json::to_string(&entries).context("failed to serialize console output")
+    }
+
+    pub fn terminal_write(&mut self, bytes: &[u8]) -> Result<()> {
+        match &mut self.inner {
+            SessionEngine::Dap(session) => session.terminal_write_input(bytes),
+            SessionEngine::Rr(_) => Ok(()),
+        }
     }
 
     pub fn command(&mut self, cmd_json: &str) -> Result<()> {

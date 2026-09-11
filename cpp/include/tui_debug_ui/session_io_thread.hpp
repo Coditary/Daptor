@@ -70,6 +70,7 @@ class SessionIoThread {
     bool adapter_live() const;
 
     void post_command(const std::string& op);
+    void post_terminal_input(const std::string& bytes);
     void post_evaluate(const std::string& expression, std::int64_t frame_id, const std::string& context);
     void post_set_variable(std::int64_t variables_reference, const std::string& name, const std::string& value);
     void post_set_breakpoints(const std::string& path, const std::string& lines_json);
@@ -114,6 +115,7 @@ class SessionIoThread {
     void process_source_fetch();
     void process_step_in_targets_fetch();
     void process_goto_targets_fetch();
+    void process_terminal_input();
     bool process_pending_set_variable();
     void maybe_begin_launch();
     void join_launch_worker();
@@ -179,6 +181,7 @@ class SessionIoThread {
         int column = -1;
     };
     std::optional<GotoTargetsRequest> goto_targets_request_;
+    std::string pending_terminal_input_;
 
     std::mutex events_mutex_;
     std::deque<SessionIoEvent> events_;

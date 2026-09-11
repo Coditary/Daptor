@@ -145,7 +145,10 @@ impl DapTransport {
                                     .expect("pending lock poisoned")
                                     .insert(request_seq, response);
                             }
-                            Ok(event) => {
+                            Ok(
+                                event @ (InboundMessage::Event { .. }
+                                | InboundMessage::Request { .. }),
+                            ) => {
                                 if inbound_tx.send(event).is_err() {
                                     break;
                                 }
@@ -218,6 +221,41 @@ impl DapTransport {
             .push_back(message);
     }
 
+    pub fn send_response(
+        &self,
+        request_seq: i64,
+        command: &str,
+        success: bool,
+        body: Value,
+    ) -> Result<()> {
+        let seq = next_seq();
+        let payload = json!({
+            "seq": seq,
+            "type": "response",
+            "request_seq": request_seq,
+            "success": success,
+            "command": command,
+            "body": body,
+        });
+        debug!(target: "dap", "send response: {}", payload);
+        let mut writer = self.writer.lock().expect("writer lock poisoned");
+        transport::write_message(&mut *writer, &payload)?;
+        Ok(())
+    }
+
+    pub fn try_take_response(&self, request_seq: i64) -> Option<Result<Value>> {
+        self.pending
+            .lock()
+            .expect("pending lock poisoned")
+            .remove(&request_seq)
+            .map(|response| match response {
+                PendingResponse::Success(body) => Ok(body),
+                PendingResponse::Failure { command, message } => {
+                    bail!("DAP {command} failed: {message}");
+                }
+            })
+    }
+
     pub fn send_request(&self, command: &'static str, arguments: Value) -> Result<i64> {
         let seq = next_seq();
         let request = Request {
@@ -235,26 +273,30 @@ impl DapTransport {
         Ok(seq)
     }
 
-    pub fn wait_response(&self, request_seq: i64, timeout: Duration) -> Result<Value> {
+    pub fn wait_response<F>(
+        &self,
+        request_seq: i64,
+        timeout: Duration,
+        mut on_adapter_request: F,
+    ) -> Result<Value>
+    where
+        F: FnMut(InboundMessage) -> Result<()>,
+    {
         let deadline = std::time::Instant::now() + timeout;
 
         while std::time::Instant::now() < deadline {
-            if let Some(response) = self
-                .pending
-                .lock()
-                .expect("pending lock poisoned")
-                .remove(&request_seq)
-            {
-                return match response {
-                    PendingResponse::Success(body) => Ok(body),
-                    PendingResponse::Failure { command, message } => {
-                        bail!("DAP {command} failed: {message}");
-                    }
-                };
+            if let Some(response) = self.try_take_response(request_seq) {
+                return response;
             }
 
-            // Do not drain inbound events here — they must survive until the
-            // session loop handles stopped/terminated/exited.
+            if let Some(message) = self.try_recv_event() {
+                if matches!(message, InboundMessage::Request { .. }) {
+                    on_adapter_request(message)?;
+                    continue;
+                }
+                self.enqueue_event(message);
+            }
+
             thread::sleep(Duration::from_millis(2));
         }
 

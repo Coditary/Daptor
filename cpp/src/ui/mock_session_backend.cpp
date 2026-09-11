@@ -179,6 +179,8 @@ class MockSessionBackend final : public SessionBackend {
         return json;
     }
 
+    bool terminal_write(const std::string& /*bytes*/, std::string& /*error_out*/) override { return true; }
+
     bool send_command(const std::string& op, std::string& error_out) override {
         if (!launched_) {
             error_out = "mock session not launched";

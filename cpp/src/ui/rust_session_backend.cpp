@@ -94,6 +94,19 @@ class RustSessionBackend final : public SessionBackend {
         });
     }
 
+    bool terminal_write(const std::string& bytes, std::string& error_out) override {
+        if (session_ == nullptr) {
+            error_out = "no session";
+            return false;
+        }
+        if (tui_debug_terminal_write(session_, reinterpret_cast<const unsigned char*>(bytes.data()),
+                                     bytes.size()) == 0) {
+            return true;
+        }
+        error_out = adapter_last_error();
+        return false;
+    }
+
     std::optional<std::string> fetch_variables_json(std::int64_t variables_reference,
                                                     const std::string& scope_name) override {
         return read_json_buffer([this, variables_reference, &scope_name](char* out, std::size_t cap) {

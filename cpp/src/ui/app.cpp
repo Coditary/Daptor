@@ -53,6 +53,21 @@ constexpr int kFullFileSourceLineThreshold = 500;
 constexpr int kHighlightLineMargin = 12;
 constexpr int kMaxHighlightLinesPerRequest = 128;
 
+std::string humanize_execution_command_error(const std::string& op, const std::string& detail,
+                                           const std::string& session_state) {
+    const bool is_step = op == "step_over" || op == "next" || op == "step_into" || op == "step_in" ||
+                         op == "step_out";
+    if (is_step && session_state == "running") {
+        return "Program is running — focus Console and type input (don't step again)";
+    }
+    if (is_step && (detail.find("DAP next failed") != std::string::npos ||
+                    detail.find("DAP stepIn failed") != std::string::npos ||
+                    detail.find("DAP stepOut failed") != std::string::npos)) {
+        return "Program is running — focus Console and type input";
+    }
+    return detail.empty() ? "Command failed" : detail;
+}
+
 bool is_execution_control_command(const char* op) {
     if (op == nullptr) {
         return false;
@@ -508,6 +523,7 @@ class DebugChromeRoot : public tuinator::Widget {
 
         if (debug_app_ != nullptr) {
             debug_app_->paint_overlay(ctx);
+            debug_app_->finalize_text_cursor(ctx);
         }
     }
 
@@ -1313,9 +1329,25 @@ void DebugApp::build_ui() {
     auto console_panel = std::make_unique<ConsolePanel>(dap_theme_);
     console_panel_ = console_panel.get();
 
+    console_panel_->set_line_buffered_input(adapter_ == DebugAdapter::Lldb);
+    console_panel_->set_on_activate([this]() {
+        model_.focus = Focus::Console;
+        apply_focus();
+    });
+    console_panel_->set_on_input([this](const std::string& bytes) {
+        if (session_io_ == nullptr) {
+            return;
+        }
+        session_io_->post_terminal_input(bytes);
+        if (adapter_ == DebugAdapter::Lldb && is_session_stopped() && model_.session_state != "running" &&
+            !bytes.empty() && bytes.back() == '\n') {
+            session_io_->post_command("continue");
+        }
+    });
+
     auto console_section = std::make_unique<TitledScrollPane>("Console", std::move(console_panel),
                                                               dap_theme_.title_console, dap_theme_.panel_background,
-                                                              scroll_options);
+                                                              scroll_options, false);
     console_scroll_view_ = console_section->scroll_view();
     auto console_shell = console_section->release_widget();
     console_shell->set_flex(1);
@@ -1575,12 +1607,16 @@ void DebugApp::apply_console_json_payload(const std::string& json) {
     }
 
     if (console_panel_ != nullptr && model_.console_lines.size() > before) {
-        const std::vector<ConsoleLine> new_entries(model_.console_lines.begin() + static_cast<std::ptrdiff_t>(before),
-                                                   model_.console_lines.end());
-        console_panel_->append_lines(format_console_display_lines(new_entries));
-        if (console_scroll_view_ != nullptr) {
-            console_scroll_view_->refresh_content();
-            console_scroll_view_->scroll_to(0, console_scroll_view_->max_scroll_y());
+        std::string output;
+        for (std::size_t i = before; i < model_.console_lines.size(); ++i) {
+            output += model_.console_lines[i].text;
+        }
+        console_panel_->feed_output(output);
+        console_synced_line_count_ = model_.console_lines.size();
+
+        if (!output.empty() && (output.find(": ") != std::string::npos || output.back() == ':')) {
+            model_.focus = Focus::Console;
+            apply_focus();
         }
     }
 }
@@ -1753,7 +1789,8 @@ void DebugApp::handle_session_event(const SessionIoEvent& event) {
         break;
     case SessionIoEventKind::CommandFinished:
         if (!event.success) {
-            model_.status_message = event.detail.empty() ? "Command failed" : event.detail;
+            model_.status_message =
+                humanize_execution_command_error(event.payload, event.detail, model_.session_state);
             if (is_execution_control_command(event.payload.c_str()) && model_.session_state == "running") {
                 model_.session_state = "stopped";
             }
@@ -1780,6 +1817,11 @@ void DebugApp::handle_session_event(const SessionIoEvent& event) {
             const std::string status = command_status_message(event.payload.c_str());
             apply_execution_command_started(event.payload.c_str());
             model_.status_message = status;
+            if ((event.payload == "step_over" || event.payload == "next") && model_.session_state == "running") {
+                model_.focus = Focus::Console;
+                apply_focus();
+                model_.status_message = "Running — type in Console";
+            }
         }
         break;
     case SessionIoEventKind::EvaluateFinished:
@@ -1930,6 +1972,9 @@ void DebugApp::sync_ui_from_model() {
     sync_controls_bar();
     maybe_apply_reverse_continue_hint();
     sync_status_bar();
+    if (console_panel_ != nullptr) {
+        console_panel_->set_input_active(console_input_active());
+    }
     if (scopes_panel_ != nullptr && !variable_set_in_flight_) {
         std::vector<ScopeVariableRowMeta> meta;
         std::vector<std::string> scope_rows =
@@ -2048,12 +2093,13 @@ void DebugApp::sync_ui_from_model() {
             }
         }
     }
-    if (console_panel_ != nullptr && console_panel_->lines().empty() && !model_.console_lines.empty()) {
-        console_panel_->append_lines(format_console_display_lines(model_.console_lines));
-        if (console_scroll_view_ != nullptr) {
-            console_scroll_view_->refresh_content();
-            console_scroll_view_->scroll_to(0, console_scroll_view_->max_scroll_y());
+    if (console_panel_ != nullptr && model_.console_lines.size() > console_synced_line_count_) {
+        std::string output;
+        for (std::size_t i = console_synced_line_count_; i < model_.console_lines.size(); ++i) {
+            output += model_.console_lines[i].text;
         }
+        console_panel_->feed_output(std::move(output));
+        console_synced_line_count_ = model_.console_lines.size();
     }
 }
 
@@ -2402,6 +2448,25 @@ bool DebugApp::is_session_stopped() const {
            model_.session_state.find("stopped") != std::string::npos;
 }
 
+bool DebugApp::console_input_active() const {
+    if (!has_active_session()) {
+        return false;
+    }
+    if (model_.session_state == "exited" || model_.session_state == "Exited" ||
+        model_.session_state == "disconnected") {
+        return false;
+    }
+    return model_.session_state == "running" || is_session_stopped();
+}
+
+void DebugApp::finalize_text_cursor(tuinator::PaintContext& ctx) const {
+    if (console_panel_ == nullptr) {
+        ctx.canvas.set_text_cursor(std::nullopt);
+        return;
+    }
+    console_panel_->paint_text_cursor(ctx);
+}
+
 void DebugApp::maybe_apply_reverse_continue_hint() {
     if (reverse_continue_hint_shown_ || mode_ == SessionMode::Mock || adapter_ != DebugAdapter::Lldb ||
         model_.supports_step_back || !is_session_stopped()) {
@@ -2625,6 +2690,9 @@ bool DebugApp::should_block_app_quit_key(const tuinator::KeyPress& key) const {
     if (is_watch_input_focused() || is_breakpoint_input_focused() || is_scope_input_focused()) {
         return true;
     }
+    if (model_.focus == Focus::Console) {
+        return key.character == 'q' || key.character == 'Q' || key.key == tuinator::Key::Escape;
+    }
     if (model_.focus == Focus::Watches) {
         return key.character == 'q' || key.character == 'Q' || key.key == tuinator::Key::Escape;
     }
@@ -2677,6 +2745,10 @@ void DebugApp::blur_scope_input() {
 bool DebugApp::handle_global_key(const tuinator::KeyPress& key) {
     if (handle_step_in_selection_key(key)) {
         return true;
+    }
+
+    if (model_.focus == Focus::Console) {
+        return false;
     }
 
     if (key.ctrl && key.character == 'c') {
@@ -3350,7 +3422,7 @@ void DebugApp::sync_focus_from_ui() {
 
     model_.focus = detected;
     cached_status_bar_text_.clear();
-    mark_all_panels_dirty();
+    apply_focus();
     sync_ui_from_model();
 }
 

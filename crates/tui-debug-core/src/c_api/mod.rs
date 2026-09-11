@@ -380,6 +380,41 @@ pub extern "C" fn tui_debug_drain_console(
     }
 }
 
+/// Write raw bytes to the debuggee stdin (integrated terminal PTY).
+///
+/// Returns `0` on success and `-1` on error.
+#[no_mangle]
+pub extern "C" fn tui_debug_terminal_write(
+    session: *mut c_void,
+    bytes: *const u8,
+    len: usize,
+) -> c_int {
+    clear_last_error();
+
+    let Some(session) = session_from_ptr(session) else {
+        return -1;
+    };
+
+    if bytes.is_null() && len > 0 {
+        set_last_error("bytes must not be null when len > 0");
+        return -1;
+    }
+
+    let payload = if len == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(bytes, len) }
+    };
+
+    match session.terminal_write(payload) {
+        Ok(()) => 0,
+        Err(err) => {
+            set_last_error(err.to_string());
+            -1
+        }
+    }
+}
+
 /// Evaluate an expression in the given stack frame.
 ///
 /// `context` is typically `"repl"` or `"watch"`. Result is written to `result_out`.

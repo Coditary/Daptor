@@ -73,10 +73,12 @@ class DebugApp {
     [[nodiscard]] bool overlay_intercepts_events() const;
     bool handle_overlay_event(const tuinator::Event& event);
     void paint_overlay(tuinator::PaintContext& ctx) const;
+    void finalize_text_cursor(tuinator::PaintContext& ctx) const;
 
     [[nodiscard]] bool is_watch_input_focused() const;
     [[nodiscard]] bool is_breakpoint_input_focused() const;
     [[nodiscard]] bool is_scope_input_focused() const;
+    [[nodiscard]] bool console_input_active() const;
     [[nodiscard]] bool should_block_app_quit_key(const tuinator::KeyPress& key) const;
     void blur_watch_input();
     void blur_breakpoint_input(bool cancelled = true);
@@ -281,6 +283,7 @@ class DebugApp {
     tuinator::ScrollView* source_scroll_view_ = nullptr;
     ConsolePanel* console_panel_ = nullptr;
     tuinator::ScrollView* console_scroll_view_ = nullptr;
+    std::size_t console_synced_line_count_ = 0;
     ResizableSplitPane* sidebar_split_ = nullptr;
     ResizableSplitPane* main_row_split_ = nullptr;
     ResizableSplitPane* bottom_tray_split_ = nullptr;

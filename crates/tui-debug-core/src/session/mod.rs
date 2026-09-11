@@ -10,6 +10,8 @@ use tracing::{info, warn};
 use crate::dap::protocol::{
     InboundMessage, OutputEventBody, Scope, StackFrame, StoppedEventBody, Thread, Variable,
 };
+use crate::terminal::{DebuggeeIo, DebuggeeTerminal, LldbStdioChannels, parse_run_in_terminal};
+use std::sync::{Arc, Mutex};
 pub use crate::dap::protocol::{GotoTarget, StepInTarget};
 use crate::dap::{DapTransport, spawn_debugpy_adapter, spawn_lldb_dap_adapter};
 
@@ -301,6 +303,7 @@ pub struct DebugSession {
     breakpoint_hit_counts: HashMap<(String, u32), u32>,
     breakpoint_ids: HashMap<i64, (String, u32)>,
     last_breakpoint_requests: HashMap<String, Vec<SourceBreakpoint>>,
+    debuggee_io: Arc<Mutex<Option<DebuggeeIo>>>,
 }
 
 impl DebugSession {
@@ -338,6 +341,7 @@ impl DebugSession {
             breakpoint_hit_counts: HashMap::new(),
             breakpoint_ids: HashMap::new(),
             last_breakpoint_requests: HashMap::new(),
+            debuggee_io: Arc::new(Mutex::new(None)),
         };
 
         session.initialize_and_launch()?;
@@ -378,6 +382,7 @@ impl DebugSession {
             breakpoint_hit_counts: HashMap::new(),
             breakpoint_ids: HashMap::new(),
             last_breakpoint_requests: HashMap::new(),
+            debuggee_io: Arc::new(Mutex::new(None)),
         };
 
         session.initialize_and_launch()?;
@@ -393,6 +398,35 @@ impl DebugSession {
             let _ = tx.send(Self::launch_python(program));
         });
         rx
+    }
+
+    fn wait_dap_response(&self, request_seq: i64, timeout: Duration) -> Result<Value> {
+        let debuggee_io = Arc::clone(&self.debuggee_io);
+        let transport = &self.transport;
+        self.transport.wait_response(request_seq, timeout, |message| {
+            handle_adapter_request(message, &debuggee_io, transport)
+        })
+    }
+
+    pub fn terminal_write_input(&self, bytes: &[u8]) -> Result<()> {
+        let mut guard = self
+            .debuggee_io
+            .lock()
+            .expect("debuggee io lock poisoned");
+        if let Some(io) = guard.as_mut() {
+            io.write_input(bytes)?;
+        }
+        Ok(())
+    }
+
+    pub fn terminal_resize(&self, rows: u16, cols: u16) {
+        let guard = self
+            .debuggee_io
+            .lock()
+            .expect("debuggee io lock poisoned");
+        if let Some(io) = guard.as_ref() {
+            io.resize(rows, cols);
+        }
     }
 
     fn initialize_and_launch(&mut self) -> Result<()> {
@@ -413,10 +447,10 @@ impl DebugSession {
                 "supportsVariableType": true,
                 "supportsVariablePaging": false,
                 "supportsSetVariable": true,
-                "supportsRunInTerminalRequest": false,
+                "supportsRunInTerminalRequest": true,
             }),
         )?;
-        let init_body = self.transport.wait_response(init_seq, REQUEST_TIMEOUT)?;
+        let init_body = self.wait_dap_response(init_seq, REQUEST_TIMEOUT)?;
         self.merge_capabilities_from_value(&init_body);
         if self.adapter == DebugAdapterKind::Lldb && !self.supports_function_breakpoints {
             // lldb-dap supports setFunctionBreakpoints even when initialize omits the flag.
@@ -448,8 +482,8 @@ impl DebugSession {
 
         match self.adapter {
             DebugAdapterKind::Debugpy => {
-                launch_args["console"] = json!("internalConsole");
-                launch_args["redirectOutput"] = json!(true);
+                launch_args["console"] = json!("integratedTerminal");
+                launch_args["redirectOutput"] = json!(false);
                 if let Some(extras) = adapter_launch_extras().as_object() {
                     launch_args
                         .as_object_mut()
@@ -458,6 +492,17 @@ impl DebugSession {
                 }
             }
             DebugAdapterKind::Lldb => {
+                let channels = LldbStdioChannels::open()?;
+                let stdin = channels.stdin_path();
+                {
+                    let mut guard = self
+                        .debuggee_io
+                        .lock()
+                        .expect("debuggee io lock poisoned");
+                    *guard = Some(DebuggeeIo::LldbStdio(channels));
+                }
+                // Redirect only stdin; null keeps stdout/stderr on lldb's DAP output channel.
+                launch_args["stdio"] = json!([stdin, Value::Null, Value::Null]);
                 launch_args["initCommands"] = json!(lldb_init_breakpoint_commands(&self.program));
                 if let Some(parent) = self.program.parent() {
                     launch_args["cwd"] = json!(parent);
@@ -466,10 +511,9 @@ impl DebugSession {
         }
 
         let launch_seq = self.transport.send_request("launch", launch_args)?;
-
         let cfg_seq = self.transport.send_request("configurationDone", json!({}))?;
-        self.transport.wait_response(cfg_seq, REQUEST_TIMEOUT)?;
-        self.transport.wait_response(launch_seq, REQUEST_TIMEOUT)?;
+        self.wait_dap_response(cfg_seq, REQUEST_TIMEOUT)?;
+        self.wait_dap_response(launch_seq, REQUEST_TIMEOUT)?;
 
         info!("launched {}, waiting for initial stop", self.program.display());
 
@@ -953,14 +997,14 @@ impl DebugSession {
         let seq = self
             .transport
             .send_request("continue", json!({ "threadId": thread_id }))?;
-        self.transport.wait_response(seq, REQUEST_TIMEOUT)?;
+        self.wait_dap_response(seq, REQUEST_TIMEOUT)?;
         self.state = SessionState::Running;
         Ok(())
     }
 
     pub fn dispatch_pause(&mut self) -> Result<()> {
         let seq = self.transport.send_request("pause", json!({}))?;
-        self.transport.wait_response(seq, REQUEST_TIMEOUT)?;
+        self.wait_dap_response(seq, REQUEST_TIMEOUT)?;
         Ok(())
     }
 
@@ -975,7 +1019,7 @@ impl DebugSession {
         let seq = self
             .transport
             .send_request(command, json!({ "threadId": thread_id }))?;
-        self.transport.wait_response(seq, REQUEST_TIMEOUT)?;
+        self.wait_dap_response(seq, REQUEST_TIMEOUT)?;
         self.state = SessionState::Running;
         Ok(())
     }
@@ -989,7 +1033,7 @@ impl DebugSession {
             args["targetId"] = json!(target_id);
         }
         let seq = self.transport.send_request("stepIn", args)?;
-        self.transport.wait_response(seq, REQUEST_TIMEOUT)?;
+        self.wait_dap_response(seq, REQUEST_TIMEOUT)?;
         self.state = SessionState::Running;
         Ok(())
     }
@@ -1010,7 +1054,7 @@ impl DebugSession {
         let seq = self
             .transport
             .send_request("stepInTargets", json!({ "frameId": frame_id }))?;
-        let body = self.transport.wait_response(seq, REQUEST_TIMEOUT)?;
+        let body = self.wait_dap_response(seq, REQUEST_TIMEOUT)?;
 
         #[derive(Deserialize)]
         struct StepInTargetsBody {
@@ -1048,7 +1092,7 @@ impl DebugSession {
         }
 
         let seq = self.transport.send_request("gotoTargets", args)?;
-        let body = self.transport.wait_response(seq, REQUEST_TIMEOUT)?;
+        let body = self.wait_dap_response(seq, REQUEST_TIMEOUT)?;
 
         #[derive(Deserialize)]
         struct GotoTargetsBody {
@@ -1069,7 +1113,7 @@ impl DebugSession {
             "goto",
             json!({ "threadId": thread_id, "targetId": target_id }),
         )?;
-        self.transport.wait_response(seq, REQUEST_TIMEOUT)?;
+        self.wait_dap_response(seq, REQUEST_TIMEOUT)?;
         self.state = SessionState::Running;
         Ok(())
     }
@@ -1113,7 +1157,7 @@ impl DebugSession {
             let seq = self
                 .transport
                 .send_request(command, json!({ "threadId": thread_id }))?;
-            self.transport.wait_response(seq, REQUEST_TIMEOUT)?;
+            self.wait_dap_response(seq, REQUEST_TIMEOUT)?;
             self.state = SessionState::Running;
         }
         self.poll_until_stopped()?
@@ -1122,7 +1166,7 @@ impl DebugSession {
 
     fn threads(&self) -> Result<Vec<Thread>> {
         let seq = self.transport.send_request("threads", json!({}))?;
-        let body = self.transport.wait_response(seq, REQUEST_TIMEOUT)?;
+        let body = self.wait_dap_response(seq, REQUEST_TIMEOUT)?;
 
         #[derive(Deserialize)]
         struct ThreadsBody {
@@ -1142,7 +1186,7 @@ impl DebugSession {
                 "levels": 50,
             }),
         )?;
-        let body = self.transport.wait_response(seq, REQUEST_TIMEOUT)?;
+        let body = self.wait_dap_response(seq, REQUEST_TIMEOUT)?;
 
         #[derive(Deserialize)]
         struct StackTraceBody {
@@ -1158,7 +1202,7 @@ impl DebugSession {
         let seq = self
             .transport
             .send_request("scopes", json!({ "frameId": frame_id }))?;
-        let body = self.transport.wait_response(seq, REQUEST_TIMEOUT)?;
+        let body = self.wait_dap_response(seq, REQUEST_TIMEOUT)?;
 
         #[derive(Deserialize)]
         struct ScopesBody {
@@ -1176,7 +1220,7 @@ impl DebugSession {
                 "variablesReference": variables_reference,
             }),
         )?;
-        let body = self.transport.wait_response(seq, REQUEST_TIMEOUT)?;
+        let body = self.wait_dap_response(seq, REQUEST_TIMEOUT)?;
 
         #[derive(Deserialize)]
         struct VariablesBody {
@@ -1258,7 +1302,7 @@ impl DebugSession {
                 "value": value,
             }),
         )?;
-        let body = self.transport.wait_response(seq, REQUEST_TIMEOUT)?;
+        let body = self.wait_dap_response(seq, REQUEST_TIMEOUT)?;
 
         #[derive(Deserialize)]
         struct SetVariableBody {
@@ -1285,7 +1329,7 @@ impl DebugSession {
             "source",
             json!({ "sourceReference": source_reference }),
         )?;
-        let body = self.transport.wait_response(seq, REQUEST_TIMEOUT)?;
+        let body = self.wait_dap_response(seq, REQUEST_TIMEOUT)?;
 
         #[derive(Deserialize)]
         struct SourceBody {
@@ -1332,7 +1376,7 @@ impl DebugSession {
                 "breakpoints": breakpoints,
             }),
         )?;
-        let body = self.transport.wait_response(seq, REQUEST_TIMEOUT)?;
+        let body = self.wait_dap_response(seq, REQUEST_TIMEOUT)?;
 
         #[derive(Deserialize)]
         struct BpResponse {
@@ -1382,7 +1426,7 @@ impl DebugSession {
         }
 
         let seq = self.transport.send_request("dataBreakpointInfo", args)?;
-        let body = self.transport.wait_response(seq, REQUEST_TIMEOUT)?;
+        let body = self.wait_dap_response(seq, REQUEST_TIMEOUT)?;
 
         #[derive(Deserialize)]
         struct InfoBody {
@@ -1431,7 +1475,7 @@ impl DebugSession {
         let seq = self
             .transport
             .send_request("setDataBreakpoints", json!({ "breakpoints": payload }))?;
-        let body = self.transport.wait_response(seq, REQUEST_TIMEOUT)?;
+        let body = self.wait_dap_response(seq, REQUEST_TIMEOUT)?;
 
         #[derive(Deserialize)]
         struct BpResponse {
@@ -1502,7 +1546,7 @@ impl DebugSession {
         let seq = self
             .transport
             .send_request("setExceptionBreakpoints", payload)?;
-        self.transport.wait_response(seq, REQUEST_TIMEOUT)?;
+        self.wait_dap_response(seq, REQUEST_TIMEOUT)?;
         Ok(())
     }
 
@@ -1536,7 +1580,7 @@ impl DebugSession {
         let seq = self
             .transport
             .send_request("setFunctionBreakpoints", json!({ "breakpoints": payload }))?;
-        let body = self.transport.wait_response(seq, REQUEST_TIMEOUT)?;
+        let body = self.wait_dap_response(seq, REQUEST_TIMEOUT)?;
 
         #[derive(Deserialize)]
         struct BpResponse {
@@ -1630,7 +1674,7 @@ impl DebugSession {
         } else {
             REQUEST_TIMEOUT
         };
-        let body = self.transport.wait_response(seq, timeout)?;
+        let body = self.wait_dap_response(seq, timeout)?;
 
         #[derive(Deserialize)]
         struct EvalBody {
@@ -1650,7 +1694,7 @@ impl DebugSession {
         }
 
         let seq = self.transport.send_request("terminate", json!({}))?;
-        self.transport.wait_response(seq, REQUEST_TIMEOUT)?;
+        self.wait_dap_response(seq, REQUEST_TIMEOUT)?;
         self.state = SessionState::Exited;
         self.active_thread = None;
         self.active_frame = None;
@@ -1664,9 +1708,17 @@ impl DebugSession {
         self.shutdown()
     }
 
-    /// Buffered program stdout/stderr from DAP output events.
+    /// Buffered program stdout/stderr from DAP output events and the debuggee PTY.
     pub fn drain_console_output(&self) -> Vec<OutputEventBody> {
-        self.transport.take_output()
+        let mut output = self.transport.take_output();
+        let guard = self
+            .debuggee_io
+            .lock()
+            .expect("debuggee io lock poisoned");
+        if let Some(io) = guard.as_ref() {
+            output.extend(io.take_output());
+        }
+        output
     }
 
     pub fn restart(&mut self) -> Result<()> {
@@ -1692,7 +1744,7 @@ impl DebugSession {
                 }
             }),
         )?;
-        self.transport.wait_response(seq, REQUEST_TIMEOUT)?;
+        self.wait_dap_response(seq, REQUEST_TIMEOUT)?;
         self.state = SessionState::Running;
         Ok(())
     }
@@ -1708,7 +1760,7 @@ impl DebugSession {
             "stepBack",
             json!({ "threadId": thread_id }),
         )?;
-        self.transport.wait_response(seq, REQUEST_TIMEOUT)?;
+        self.wait_dap_response(seq, REQUEST_TIMEOUT)?;
         self.state = SessionState::Running;
         self.poll_until_stopped()?
             .context("program exited during step back")
@@ -1726,7 +1778,7 @@ impl DebugSession {
             "reverseContinue",
             json!({ "threadId": thread_id }),
         )?;
-        self.transport.wait_response(seq, REQUEST_TIMEOUT)?;
+        self.wait_dap_response(seq, REQUEST_TIMEOUT)?;
         self.state = SessionState::Running;
         Ok(())
     }
@@ -1788,6 +1840,31 @@ pub fn print_snapshot(snapshot: &SessionSnapshot) {
             type_name
         );
     }
+}
+
+fn handle_adapter_request(
+    message: InboundMessage,
+    debuggee_io: &Arc<Mutex<Option<DebuggeeIo>>>,
+    transport: &DapTransport,
+) -> Result<()> {
+    let InboundMessage::Request { seq, command, arguments } = message else {
+        return Ok(());
+    };
+
+    if command == "runInTerminal" {
+        let (args, cwd, env) = parse_run_in_terminal(&arguments)?;
+        info!("runInTerminal: args={:?} cwd={:?}", args, cwd);
+        let spawned = DebuggeeTerminal::spawn(&args, cwd.as_deref(), &env)
+            .with_context(|| format!("failed to spawn runInTerminal: {:?}", args))?;
+        let mut guard = debuggee_io.lock().expect("debuggee io lock poisoned");
+        *guard = Some(DebuggeeIo::Terminal(spawned));
+        transport.send_response(seq, &command, true, json!({}))?;
+        return Ok(());
+    }
+
+    warn!("unhandled DAP adapter request: {command}");
+    transport.send_response(seq, &command, false, json!({}))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2061,6 +2138,59 @@ mod lldb_launch_tests {
             "unexpected error: {err:#}"
         );
         session.shutdown().expect("shutdown");
+    }
+
+    #[test]
+    fn launch_native_interactive_demo_accepts_fifo_stdin() {
+        let program = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/interactive_demo")
+            .canonicalize()
+            .expect("interactive_demo fixture");
+
+        let mut session = DebugSession::launch_native(&program).expect("lldb launch");
+        session.dispatch_continue().expect("continue from main");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut saw_prompt = false;
+        while std::time::Instant::now() < deadline {
+            let _ = session.poll_events();
+            for line in session.drain_console_output() {
+                if line.output.contains("Your name:") {
+                    saw_prompt = true;
+                    break;
+                }
+            }
+            if saw_prompt {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(saw_prompt, "expected program prompt on console output");
+
+        session
+            .terminal_write_input(b"Alice\n")
+            .expect("write stdin fifo");
+
+        let mut saw_followup = false;
+        while std::time::Instant::now() < deadline {
+            let _ = session.poll_events();
+            for line in session.drain_console_output() {
+                if line.output.contains("How many greetings") {
+                    saw_followup = true;
+                    break;
+                }
+            }
+            if saw_followup {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        session.shutdown().expect("shutdown");
+        assert!(
+            saw_followup,
+            "expected fgets to accept fifo stdin and continue to next prompt"
+        );
     }
 }
 

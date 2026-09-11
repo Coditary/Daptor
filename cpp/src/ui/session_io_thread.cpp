@@ -106,6 +106,17 @@ bool SessionIoThread::adapter_live() const {
     return adapter_live_.load(std::memory_order_acquire);
 }
 
+void SessionIoThread::post_terminal_input(const std::string& bytes) {
+    if (bytes.empty()) {
+        return;
+    }
+    {
+        std::lock_guard lock(mutex_);
+        pending_terminal_input_ += bytes;
+    }
+    cv_.notify_all();
+}
+
 void SessionIoThread::post_command(const std::string& op) {
     {
         std::lock_guard lock(mutex_);
@@ -831,6 +842,27 @@ void SessionIoThread::process_pending_command() {
     push_event(std::move(event));
 }
 
+void SessionIoThread::process_terminal_input() {
+    std::string bytes;
+    {
+        std::lock_guard lock(mutex_);
+        if (pending_terminal_input_.empty()) {
+            return;
+        }
+        bytes = std::move(pending_terminal_input_);
+        pending_terminal_input_.clear();
+    }
+
+    if (!adapter_live_.load(std::memory_order_acquire)) {
+        return;
+    }
+
+    std::string error;
+    if (!backend_->terminal_write(bytes, error)) {
+        push_event(SessionIoEvent{SessionIoEventKind::CommandFinished, false, "terminal_input", error});
+    }
+}
+
 void SessionIoThread::run_poll_cycle() {
     if (!adapter_live_.load(std::memory_order_acquire)) {
         return;
@@ -860,6 +892,7 @@ void SessionIoThread::thread_main() {
             }
 
             if (backend_active_.load(std::memory_order_acquire)) {
+                process_terminal_input();
                 process_preempting_commands();
                 run_poll_cycle();
                 process_preempting_commands();
