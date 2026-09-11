@@ -12,6 +12,7 @@
 #include "tui_debug_ui/repl_panel.hpp"
 #include "tui_debug_ui/session_io_thread.hpp"
 #include "tui_debug_ui/stacks_panel.hpp"
+#include "tui_debug_ui/panel_slot.hpp"
 #include "tui_debug_ui/step_in_selection.hpp"
 
 #include <tuinator/core/event.hpp>
@@ -45,6 +46,29 @@ class BreakpointsPanel;
 class WatchesPanel;
 class TitledScrollPane;
 class StackedPane;
+class SharedWidgetHost;
+
+struct SidebarSlot {
+    PanelSlotConfig config;
+    std::unique_ptr<ScopesPanel> scopes;
+    std::unique_ptr<WatchesPanel> watches;
+    std::unique_ptr<SharedWidgetHost> shared_host;
+    std::vector<std::string> cached_scope_rows;
+    std::vector<ScopeVariableRowMeta> cached_scope_row_meta;
+    std::vector<WatchEntry> watches_data;
+};
+
+struct BottomSlot {
+    BottomPanelType type = BottomPanelType::Repl;
+    std::string tab_label;
+    std::unique_ptr<SharedWidgetHost> shared_host;
+};
+
+struct SourceSlot {
+    SourcePanelType type = SourcePanelType::Source;
+    std::string tab_label;
+    std::unique_ptr<SharedWidgetHost> shared_host;
+};
 
 /// Tuinator application wrapper for the tui-debug shell.
 class DebugApp {
@@ -116,7 +140,7 @@ class DebugApp {
                                          const std::string& json, bool success);
     void refresh_scope_rows();
     void restore_expanded_scope_children();
-    void toggle_scope_row_expand(int row_index);
+    void toggle_scope_row_expand(std::uint64_t slot_id, int row_index);
     void maybe_start_launch();
     void handle_launch_complete();
     bool update_connecting_spinner();
@@ -230,9 +254,36 @@ class DebugApp {
     void cycle_sidebar_stack(int delta);
     void cycle_bottom_stack(int delta);
     void sync_stack_panes_to_focus();
+    void init_default_sidebar_slots();
+    void ensure_sidebar_slot_panels(SidebarSlot& slot, const tuinator::ScrollViewOptions& scroll_options);
+    std::unique_ptr<tuinator::Widget> release_sidebar_slot_widget(SidebarSlot& slot);
+    void update_active_sidebar_panels();
+    [[nodiscard]] SidebarSlot* sidebar_slot_at(int index);
+    [[nodiscard]] SidebarSlot* active_sidebar_slot();
+    [[nodiscard]] SidebarSlot* sidebar_slot_by_id(std::uint64_t slot_id);
+    void refresh_all_scope_slots();
+    void sync_scope_slot(SidebarSlot& slot);
+    [[nodiscard]] std::vector<WatchEntry>& active_watch_list();
+    void show_add_sidebar_panel_menu(tuinator::Point anchor);
+    void show_add_sidebar_scope_menu(SidebarPanelType type, tuinator::Point anchor);
+    void add_sidebar_panel(SidebarPanelType type, std::optional<std::string> scope_filter);
+    void init_default_bottom_slots();
+    void init_default_source_slots();
+    void ensure_bottom_slot_widget(BottomSlot& slot);
+    void ensure_source_slot_widget(SourceSlot& slot);
+    std::unique_ptr<tuinator::Widget> release_bottom_slot_widget(BottomSlot& slot);
+    std::unique_ptr<tuinator::Widget> release_source_slot_widget(SourceSlot& slot);
+    void show_add_bottom_panel_menu(tuinator::Point anchor);
+    void show_add_source_panel_menu(tuinator::Point anchor);
+    void add_bottom_panel(BottomPanelType type);
+    void add_source_panel();
+    void sync_source_stack_title();
+    void wire_scopes_panel(ScopesPanel& panel, SidebarSlot& slot);
+    void wire_watches_panel(WatchesPanel& panel, SidebarSlot& slot);
+    [[nodiscard]] std::vector<PanelSlotConfig> sidebar_slot_configs() const;
     [[nodiscard]] static bool is_sidebar_focus(Focus focus);
-    [[nodiscard]] static Focus focus_for_sidebar_index(int index);
-    [[nodiscard]] static int sidebar_index_for_focus(Focus focus);
+    [[nodiscard]] Focus focus_for_sidebar_index(int index);
+    [[nodiscard]] int sidebar_index_for_focus(Focus focus);
     std::string format_status_bar_text() const;
     std::string command_status_message(const char* op) const;
     void persist_split_size_as_pct(ResizableSplitPane* split, std::uint16_t& pct_out, bool horizontal,
@@ -302,10 +353,20 @@ class DebugApp {
 
     ControlsBar* controls_bar_ = nullptr;
     tuinator::StatusBar* status_bar_ = nullptr;
-    std::unique_ptr<ScopesPanel> scopes_panel_;
+    ScopesPanel* scopes_panel_ = nullptr;
     std::unique_ptr<StacksPanel> stacks_panel_;
     std::unique_ptr<BreakpointsPanel> breakpoints_panel_;
-    std::unique_ptr<WatchesPanel> watches_panel_;
+    WatchesPanel* watches_panel_ = nullptr;
+    std::vector<SidebarSlot> sidebar_slots_;
+    std::vector<BottomSlot> bottom_slots_;
+    std::vector<SourceSlot> source_slots_;
+    std::uint64_t next_slot_id_ = 1;
+    std::unique_ptr<tuinator::Widget> stacks_shell_;
+    std::unique_ptr<tuinator::Widget> breakpoints_shell_;
+    std::unique_ptr<tuinator::Widget> repl_shell_;
+    std::unique_ptr<tuinator::Widget> console_shell_;
+    std::unique_ptr<tuinator::Widget> source_content_shell_;
+    int source_stack_index_ = 0;
     std::unique_ptr<ContextMenu> context_menu_;
     std::unique_ptr<TitledScrollPane> source_section_;
     SourcePanel* source_panel_ = nullptr;
@@ -315,6 +376,7 @@ class DebugApp {
     std::size_t console_synced_line_count_ = 0;
     std::unique_ptr<ReplPanel> repl_panel_;
     StackedPane* sidebar_stack_ = nullptr;
+    StackedPane* source_stack_ = nullptr;
     StackedPane* bottom_stack_ = nullptr;
     int sidebar_stack_index_ = 0;
     int bottom_stack_index_ = 0;
@@ -354,8 +416,6 @@ class DebugApp {
     std::string pending_source_fetch_key_;
     std::string cached_source_title_;
     std::string cached_status_bar_text_;
-    std::vector<std::string> cached_scope_rows_;
-    std::vector<ScopeVariableRowMeta> cached_scope_row_meta_;
     std::unordered_set<std::string> expanded_scope_paths_;
     std::unordered_set<std::string> pending_scope_paths_;
     std::vector<std::string> cached_stack_lines_;

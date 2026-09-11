@@ -47,11 +47,6 @@ WatchesPanel::WatchesPanel(const DapUiTheme& theme, tuinator::ScrollViewOptions 
     if (tuinator::ScrollView* scroll = pane_->scroll_view()) {
         list_->set_scroll_parent(scroll);
     }
-    pane_->set_title_action("+", theme.breakpoint_line_number, [this]() {
-        if (on_add_ != nullptr) {
-            on_add_();
-        }
-    });
 }
 
 std::unique_ptr<tuinator::Widget> WatchesPanel::release_widget() { return pane_->release_widget(); }

@@ -113,9 +113,7 @@ TitledScrollPane::TitledScrollPane(std::string title, std::unique_ptr<tuinator::
         title_label_ = label.get();
         column->add_child(std::move(label));
     } else {
-        auto label = std::make_unique<PanelTitleBar>("", title_style, "", title_style, nullptr);
-        title_label_ = label.get();
-        column->add_child(std::move(label));
+        title_label_ = nullptr;
     }
 
     if (header != nullptr) {
