@@ -98,6 +98,7 @@ class SessionIoThread {
     void process_source_fetch();
     void process_step_in_targets_fetch();
     void process_goto_targets_fetch();
+    bool process_pending_set_variable();
     void maybe_begin_launch();
     void join_launch_worker();
     void sync_initial_state();

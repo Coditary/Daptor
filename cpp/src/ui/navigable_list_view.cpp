@@ -176,6 +176,179 @@ void NavigableListView::set_on_row_action(RowActionCallback callback) {
     on_row_action_ = std::move(callback);
 }
 
+void NavigableListView::set_inline_row_edit(int row, std::string prefix, std::string value) {
+    inline_row_edit_.row = row;
+    inline_row_edit_.prefix = std::move(prefix);
+    inline_row_edit_.label.clear();
+    inline_row_edit_.value = std::move(value);
+    inline_row_edit_.cursor = inline_row_edit_.value.size();
+    mark_dirty();
+}
+
+void NavigableListView::set_inline_variable_row_edit(int row, std::string name, std::string value) {
+    inline_row_edit_.row = row;
+    inline_row_edit_.prefix.clear();
+    inline_row_edit_.label = std::move(name);
+    inline_row_edit_.value = std::move(value);
+    inline_row_edit_.cursor = inline_row_edit_.value.size();
+    mark_dirty();
+}
+
+void NavigableListView::clear_inline_row_edit() {
+    inline_row_edit_ = {};
+    mark_dirty();
+}
+
+bool NavigableListView::has_inline_row_edit() const { return inline_row_edit_.row >= 0; }
+
+const std::string& NavigableListView::inline_row_edit_value() const { return inline_row_edit_.value; }
+
+bool NavigableListView::inline_row_edit_active_row(int row) const {
+    return inline_row_edit_.row >= 0 && inline_row_edit_.row == row;
+}
+
+bool NavigableListView::is_inline_when_edit_row(const std::string& item) { return item == kInlineWhenEditRow; }
+
+bool NavigableListView::is_inline_hit_edit_row(const std::string& item) { return item == kInlineHitEditRow; }
+
+bool NavigableListView::is_inline_variable_edit_row(const std::string& item) {
+    return item == kInlineVariableEditRow;
+}
+
+void NavigableListView::set_on_inline_edit_change(InlineEditChangeCallback callback) {
+    on_inline_edit_change_ = std::move(callback);
+}
+
+void NavigableListView::set_on_inline_edit_submit(InlineEditSubmitCallback callback) {
+    on_inline_edit_submit_ = std::move(callback);
+}
+
+void NavigableListView::set_on_inline_edit_cancel(InlineEditCancelCallback callback) {
+    on_inline_edit_cancel_ = std::move(callback);
+}
+
+void NavigableListView::paint_inline_row_edit(tuinator::Canvas& canvas, int row, const std::string& prefix,
+                                              int max_width) const {
+    if (theme_ == nullptr || max_width <= 0) {
+        return;
+    }
+
+    tuinator::Style field_style = theme_->label;
+    field_style.reverse = true;
+    const tuinator::Style& prefix_style =
+        prefix == "    hit " ? theme_->breakpoint_hit_condition : theme_->breakpoint_condition;
+
+    int column = 0;
+    draw_segment(canvas, column, row, prefix, prefix_style, max_width);
+    draw_segment(canvas, column, row, "[", field_style, max_width);
+
+    const int bracket_width = 2;
+    const int value_max_width = std::max(0, max_width - column - bracket_width);
+    const std::size_t value_bytes =
+        tuinator::text_byte_length_for_width(inline_row_edit_.value, value_max_width);
+    const std::string visible_value = inline_row_edit_.value.substr(0, value_bytes);
+    draw_segment(canvas, column, row, visible_value, field_style, max_width);
+    if (inline_row_edit_.cursor >= inline_row_edit_.value.size() &&
+        column + bracket_width <= max_width) {
+        draw_segment(canvas, column, row, "_", field_style, max_width);
+    }
+    draw_segment(canvas, column, row, "]", field_style, max_width);
+}
+
+void NavigableListView::paint_inline_variable_row_edit(tuinator::Canvas& canvas, int row, int max_width) const {
+    if (theme_ == nullptr || max_width <= 0) {
+        return;
+    }
+
+    tuinator::Style field_style = theme_->label;
+    field_style.reverse = true;
+
+    int column = 0;
+    draw_segment(canvas, column, row, "  ", item_style_, max_width);
+    draw_segment(canvas, column, row, inline_row_edit_.label, theme_->variable_name, max_width);
+    draw_segment(canvas, column, row, " = ", item_style_, max_width);
+    draw_segment(canvas, column, row, "[", field_style, max_width);
+
+    const int bracket_width = 2;
+    const int value_max_width = std::max(0, max_width - column - bracket_width);
+    const std::size_t value_bytes =
+        tuinator::text_byte_length_for_width(inline_row_edit_.value, value_max_width);
+    const std::string visible_value = inline_row_edit_.value.substr(0, value_bytes);
+    draw_segment(canvas, column, row, visible_value, field_style, max_width);
+    if (inline_row_edit_.cursor >= inline_row_edit_.value.size() && column + bracket_width <= max_width) {
+        draw_segment(canvas, column, row, "_", field_style, max_width);
+    }
+    draw_segment(canvas, column, row, "]", field_style, max_width);
+}
+
+bool NavigableListView::handle_inline_row_edit_key(const tuinator::KeyPress& key) {
+    if (inline_row_edit_.row < 0) {
+        return false;
+    }
+
+    auto notify_change = [this]() {
+        if (on_inline_edit_change_ != nullptr) {
+            on_inline_edit_change_(inline_row_edit_.value);
+        }
+        mark_dirty();
+    };
+
+    switch (key.key) {
+    case tuinator::Key::Enter: {
+        const std::string submitted = inline_row_edit_.value;
+        inline_row_edit_ = {};
+        mark_dirty();
+        if (on_inline_edit_submit_ != nullptr) {
+            on_inline_edit_submit_(submitted);
+        }
+        return true;
+    }
+    case tuinator::Key::Escape:
+        if (on_inline_edit_cancel_ != nullptr) {
+            on_inline_edit_cancel_();
+        }
+        return true;
+    case tuinator::Key::Backspace:
+        if (inline_row_edit_.cursor == 0) {
+            return true;
+        }
+        inline_row_edit_.value.erase(inline_row_edit_.cursor - 1, 1);
+        --inline_row_edit_.cursor;
+        notify_change();
+        return true;
+    case tuinator::Key::Delete:
+        if (inline_row_edit_.cursor >= inline_row_edit_.value.size()) {
+            return true;
+        }
+        inline_row_edit_.value.erase(inline_row_edit_.cursor, 1);
+        notify_change();
+        return true;
+    case tuinator::Key::Left:
+        if (inline_row_edit_.cursor > 0) {
+            --inline_row_edit_.cursor;
+            mark_dirty();
+        }
+        return true;
+    case tuinator::Key::Right:
+        if (inline_row_edit_.cursor < inline_row_edit_.value.size()) {
+            ++inline_row_edit_.cursor;
+            mark_dirty();
+        }
+        return true;
+    default:
+        break;
+    }
+
+    if (key.character >= 32 && key.character <= 126) {
+        inline_row_edit_.value.insert(inline_row_edit_.cursor, 1, key.character);
+        ++inline_row_edit_.cursor;
+        notify_change();
+        return true;
+    }
+
+    return false;
+}
+
 void NavigableListView::assign_items(std::vector<std::string> items) {
     set_items(std::move(items));
     scroll_offset_ = 0;
@@ -298,6 +471,9 @@ bool NavigableListView::row_shows_actions(int index, const std::string& item) co
 
     switch (row_action_layout_) {
     case ListRowActionLayout::BreakpointRow:
+        if (is_inline_when_edit_row(item) || is_inline_hit_edit_row(item)) {
+            return false;
+        }
         if (is_breakpoint_condition_row(item)) {
             return true;
         }
@@ -305,6 +481,9 @@ bool NavigableListView::row_shows_actions(int index, const std::string& item) co
     case ListRowActionLayout::WatchRow:
         return parse_watch_row(item).has_value();
     case ListRowActionLayout::VariableRow:
+        if (is_inline_variable_edit_row(item)) {
+            return false;
+        }
         return parse_variable_row(item).has_value();
     case ListRowActionLayout::None:
         break;
@@ -481,6 +660,11 @@ void NavigableListView::paint_themed_row(tuinator::Canvas& canvas, int row, int 
                 return;
             }
 
+            if (paint_mode_ == ListPaintMode::Scopes && is_inline_variable_edit_row(item)) {
+                paint_inline_variable_row_edit(canvas, row, max_width);
+                return;
+            }
+
             if (const auto parsed = parse_variable_row(item)) {
                 draw_segment(canvas, column, row, "  ", item_style_, content_max_width);
                 draw_segment(canvas, column, row, parsed->first, theme_->variable_name, content_max_width);
@@ -531,6 +715,16 @@ void NavigableListView::paint_themed_row(tuinator::Canvas& canvas, int row, int 
         case ListPaintMode::Breakpoints: {
             if (is_scope_header_row(item) && item.find('/') == std::string::npos) {
                 draw_truncated(canvas, {column, row}, item, theme_->breakpoint_file, content_max_width - column);
+                return;
+            }
+
+            if (is_inline_when_edit_row(item)) {
+                paint_inline_row_edit(canvas, row, "    when ", max_width);
+                return;
+            }
+
+            if (is_inline_hit_edit_row(item)) {
+                paint_inline_row_edit(canvas, row, "    hit ", max_width);
                 return;
             }
 
@@ -703,6 +897,11 @@ bool NavigableListView::handle_event(const tuinator::Event& event) {
     }
 
     if (const auto* key = std::get_if<tuinator::KeyPress>(&event)) {
+        if (has_inline_row_edit() && is_focused()) {
+            if (handle_inline_row_edit_key(*key)) {
+                return true;
+            }
+        }
         if (is_focused()) {
             if (key->key == tuinator::Key::Enter) {
                 if (on_activate_ && selected_index() >= 0 &&

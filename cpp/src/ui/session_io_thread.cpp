@@ -131,9 +131,6 @@ void SessionIoThread::post_set_variable(std::int64_t variables_reference, const 
                                         const std::string& value) {
     {
         std::lock_guard lock(mutex_);
-        if (has_pending_command_ && command_preempts_background_work(pending_command_)) {
-            return;
-        }
         pending_set_variable_ = PendingSetVariable{variables_reference, name, value};
     }
     cv_.notify_all();
@@ -514,7 +511,6 @@ void SessionIoThread::process_preempting_commands() {
         op = std::move(pending_command_);
         has_pending_command_ = false;
         pending_evaluate_.reset();
-        pending_set_variable_.reset();
         scope_fetch_pending_ = false;
         scope_fetch_signature_.clear();
         scope_fetch_scopes_.clear();
@@ -525,11 +521,41 @@ void SessionIoThread::process_preempting_commands() {
         return;
     }
 
+    process_pending_set_variable();
     dispatch_command(op);
+}
+
+bool SessionIoThread::process_pending_set_variable() {
+    std::optional<PendingSetVariable> set_variable_request;
+    {
+        std::lock_guard lock(mutex_);
+        if (!pending_set_variable_.has_value()) {
+            return false;
+        }
+        set_variable_request = std::move(pending_set_variable_);
+        pending_set_variable_.reset();
+    }
+
+    std::string result;
+    std::string error;
+    bool ok = false;
+    if (!adapter_live_.load(std::memory_order_acquire)) {
+        error = "debug session disconnected";
+    } else {
+        ok = backend_->set_variable(set_variable_request->variables_reference, set_variable_request->name,
+                                    set_variable_request->value, result, error);
+    }
+    push_event(SessionIoEvent{SessionIoEventKind::SetVariableFinished, ok,
+                             ok ? std::move(result) : std::move(error), set_variable_request->name});
+    return true;
 }
 
 void SessionIoThread::process_pending_command() {
     if (has_pending_execution_command()) {
+        return;
+    }
+
+    if (process_pending_set_variable()) {
         return;
     }
 
@@ -554,51 +580,18 @@ void SessionIoThread::process_pending_command() {
         }
     }
 
-    std::optional<PendingSetVariable> set_variable_request;
-    {
-        std::lock_guard lock(mutex_);
-        if (pending_set_variable_.has_value()) {
-            set_variable_request = std::move(pending_set_variable_);
-            pending_set_variable_.reset();
-        }
-    }
-
-    if (!evaluate_expr.has_value() && !set_variable_request.has_value()) {
+    if (!evaluate_expr.has_value()) {
         return;
     }
 
     {
         std::lock_guard lock(mutex_);
         if (has_pending_command_ && command_preempts_background_work(pending_command_)) {
-            if (evaluate_expr.has_value()) {
-                pending_evaluate_ = std::move(evaluate_expr);
-                pending_evaluate_frame_ = evaluate_frame;
-                pending_evaluate_context_ = std::move(evaluate_context);
-            }
-            if (set_variable_request.has_value()) {
-                pending_set_variable_ = std::move(set_variable_request);
-            }
+            pending_evaluate_ = std::move(evaluate_expr);
+            pending_evaluate_frame_ = evaluate_frame;
+            pending_evaluate_context_ = std::move(evaluate_context);
             return;
         }
-    }
-
-    if (set_variable_request.has_value()) {
-        std::string result;
-        std::string error;
-        bool ok = false;
-        if (!adapter_live_.load(std::memory_order_acquire)) {
-            error = "debug session disconnected";
-        } else {
-            ok = backend_->set_variable(set_variable_request->variables_reference, set_variable_request->name,
-                                        set_variable_request->value, result, error);
-        }
-        SessionIoEvent event{SessionIoEventKind::SetVariableFinished, ok,
-                             ok ? std::move(result) : std::move(error), set_variable_request->name};
-        push_event(std::move(event));
-    }
-
-    if (!evaluate_expr.has_value()) {
-        return;
     }
 
     std::string result;

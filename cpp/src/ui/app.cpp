@@ -147,6 +147,26 @@ std::optional<std::string> try_resolve_watch_from_model(const tui_debug_ui::Debu
     return std::nullopt;
 }
 
+std::optional<std::string> variable_name_from_scope_row(const std::string& line) {
+    if (line.size() < 5 || line[0] != ' ' || line[1] != ' ') {
+        return std::nullopt;
+    }
+    const std::size_t equals = line.find(" = ", 2);
+    if (equals == std::string::npos) {
+        return std::nullopt;
+    }
+    return line.substr(2, equals - 2);
+}
+
+void patch_scope_row_value(std::vector<std::string>& rows, const std::string& name, const std::string& value) {
+    for (std::string& row : rows) {
+        const std::optional<std::string> row_name = variable_name_from_scope_row(row);
+        if (row_name.has_value() && *row_name == name) {
+            row = "  " + name + " = " + value;
+        }
+    }
+}
+
 std::optional<std::string> try_resolve_watch_from_scope_rows(const std::vector<std::string>& rows,
                                                              const std::string& expression) {
     const std::string key = normalize_watch_expression(expression);
@@ -414,6 +434,9 @@ class DebugChromeRoot : public tuinator::Widget {
                 return true;
             }
             if (debug_app_ != nullptr && debug_app_->handle_breakpoint_input_key(event)) {
+                return true;
+            }
+            if (debug_app_ != nullptr && debug_app_->handle_scope_input_key(event)) {
                 return true;
             }
         }
@@ -895,9 +918,7 @@ void DebugApp::build_ui() {
         scope_input_focused_ = true;
         model_.focus = Focus::Scopes;
     });
-    if (!scope_input_draft_.empty()) {
-        scopes_panel_->set_input_value(scope_input_draft_);
-    }
+    scopes_panel_->set_on_inline_edit_cancel([this]() { blur_scope_input(); });
     stacks_panel_ = std::make_unique<StacksPanel>(dap_theme_, scroll_options);
     breakpoints_panel_ = std::make_unique<BreakpointsPanel>(dap_theme_, scroll_options);
     const auto jump_to_stack_frame = [this](const StackFrameRow& frame) {
@@ -951,9 +972,7 @@ void DebugApp::build_ui() {
         breakpoint_input_focused_ = true;
         model_.focus = Focus::Breakpoints;
     });
-    if (!breakpoint_input_draft_.empty()) {
-        breakpoints_panel_->set_input_value(breakpoint_input_draft_);
-    }
+    breakpoints_panel_->set_on_inline_edit_cancel([this]() { blur_breakpoint_input(true); });
 
     watches_panel_ = std::make_unique<WatchesPanel>(dap_theme_, scroll_options);
     watches_panel_->set_on_submit([this](const std::string& expression) { submit_watch_expression(expression); });
@@ -1298,6 +1317,7 @@ void DebugApp::apply_snapshot_json_payload(const std::string& json) {
                 model_.scope_variables[scope.variables_reference] = model_.variables;
             }
         }
+        apply_scope_value_overrides();
     }
     if (!model_.execution_path.empty() && model_.execution_path.rfind("dap:source:", 0) != 0) {
         const std::string resolved = resolve_debugger_source_path(model_.execution_path, program_path_);
@@ -1362,8 +1382,17 @@ void DebugApp::apply_scope_variables_payload(const std::string& signature, const
     scope_variables_signature_ = signature;
     scope_variables_fetch_signature_ = signature;
     scope_variables_fetch_pending_ = false;
-    sync_ui_from_model();
+    if (variable_set_in_flight_) {
+        apply_scope_value_overrides();
+        return;
+    }
+    apply_scope_value_overrides();
+    cached_scope_rows_ = build_scope_rows(model_);
+    if (scopes_panel_ != nullptr) {
+        scopes_panel_->set_scope_names(cached_scope_rows_);
+    }
     resolve_watches_from_locals();
+    request_repaint();
 }
 
 void DebugApp::handle_session_event(const SessionIoEvent& event) {
@@ -1471,11 +1500,16 @@ void DebugApp::handle_session_event(const SessionIoEvent& event) {
         }
         break;
     case SessionIoEventKind::SetVariableFinished:
+        variable_set_in_flight_ = false;
         if (event.success) {
-            if (!event.detail.empty() && !pending_variable_value_.empty()) {
-                patch_local_variable_value(event.detail, pending_variable_value_);
+            std::string updated_value = pending_variable_value_;
+            if (const std::optional<std::string> parsed = parse_set_variable_result_value(event.payload)) {
+                updated_value = *parsed;
             }
-            request_scope_variables_refresh();
+            if (!event.detail.empty() && !updated_value.empty()) {
+                scope_value_overrides_[event.detail] = updated_value;
+                patch_local_variable_value(event.detail, updated_value);
+            }
             resolve_watches_from_locals();
             model_.status_message = event.detail.empty() ? "Variable updated" : "Updated " + event.detail;
         } else {
@@ -1488,10 +1522,8 @@ void DebugApp::handle_session_event(const SessionIoEvent& event) {
         scope_input_draft_.clear();
         scope_input_focused_ = false;
         if (scopes_panel_ != nullptr) {
-            if (scopes_panel_->input_widget() != nullptr) {
-                scopes_panel_->input_widget()->set_value("");
-                scopes_panel_->input_widget()->set_focused(false);
-            }
+            scopes_panel_->clear_inline_edit();
+            sync_scopes_list_panel();
             if (scopes_panel_->list_widget() != nullptr) {
                 scopes_panel_->list_widget()->set_focused(true);
             }
@@ -1499,6 +1531,7 @@ void DebugApp::handle_session_event(const SessionIoEvent& event) {
         model_.focus = Focus::Scopes;
         apply_focus();
         sync_status_bar();
+        request_repaint();
         break;
     case SessionIoEventKind::BreakpointsFinished:
         model_.status_message =
@@ -1560,7 +1593,7 @@ void DebugApp::poll_session() {
         return;
     }
 
-    if (model_.connection_state == ConnectionState::Connected) {
+    if (model_.connection_state == ConnectionState::Connected && !variable_set_in_flight_) {
         maybe_request_scope_variables();
     }
 
@@ -1574,7 +1607,8 @@ void DebugApp::sync_ui_from_model() {
     sync_controls_bar();
     maybe_apply_reverse_continue_hint();
     sync_status_bar();
-    if (scopes_panel_ != nullptr) {
+    if (scopes_panel_ != nullptr && !variable_set_in_flight_) {
+        apply_scope_value_overrides();
         std::vector<std::string> scope_rows = build_scope_rows(model_);
         const bool next_has_values = scope_rows_include_variables(scope_rows);
         const bool cached_has_values = scope_rows_include_variables(cached_scope_rows_);
@@ -1764,12 +1798,41 @@ void DebugApp::patch_local_variable_value(const std::string& name, const std::st
             }
         }
     }
+    for (VariableInfo& variable : model_.variables) {
+        if (variable.name == name) {
+            variable.value = value;
+        }
+    }
 
-    cached_scope_rows_ = build_scope_rows(model_);
+    patch_scope_row_value(cached_scope_rows_, name, value);
     if (scopes_panel_ != nullptr) {
         scopes_panel_->set_scope_names(cached_scope_rows_);
     }
 }
+
+void DebugApp::apply_scope_value_overrides() {
+    if (scope_value_overrides_.empty()) {
+        return;
+    }
+
+    for (auto& [_, variables] : model_.scope_variables) {
+        for (VariableInfo& variable : variables) {
+            if (const auto it = scope_value_overrides_.find(variable.name); it != scope_value_overrides_.end()) {
+                variable.value = it->second;
+            }
+        }
+    }
+    for (VariableInfo& variable : model_.variables) {
+        if (const auto it = scope_value_overrides_.find(variable.name); it != scope_value_overrides_.end()) {
+            variable.value = it->second;
+        }
+    }
+    for (const auto& [name, value] : scope_value_overrides_) {
+        patch_scope_row_value(cached_scope_rows_, name, value);
+    }
+}
+
+void DebugApp::clear_scope_value_overrides() { scope_value_overrides_.clear(); }
 
 std::string DebugApp::build_scope_variables_signature() const {
     std::string signature = std::to_string(snapshot_generation_);
@@ -2227,8 +2290,7 @@ bool DebugApp::is_breakpoint_input_focused() const {
 }
 
 bool DebugApp::is_scope_input_focused() const {
-    return scopes_panel_ != nullptr && scopes_panel_->input_widget() != nullptr &&
-           scopes_panel_->input_widget()->is_focused();
+    return (scopes_panel_ != nullptr && scopes_panel_->has_active_inline_edit()) || scope_prompt_active();
 }
 
 bool DebugApp::should_block_app_quit_key(const tuinator::KeyPress& key) const {
@@ -2269,6 +2331,10 @@ void DebugApp::finish_watch_input() {
 }
 
 void DebugApp::blur_scope_input() {
+    if (!editing_variable_name_.empty()) {
+        scope_value_overrides_.erase(editing_variable_name_);
+    }
+    variable_set_in_flight_ = false;
     editing_variable_name_.clear();
     editing_variables_reference_ = 0;
     scope_input_draft_.clear();
@@ -2276,14 +2342,14 @@ void DebugApp::blur_scope_input() {
     if (scopes_panel_ == nullptr) {
         return;
     }
-    if (scopes_panel_->input_widget() != nullptr) {
-        scopes_panel_->input_widget()->set_value("");
-        scopes_panel_->input_widget()->set_focused(false);
-    }
+    scopes_panel_->clear_inline_edit();
+    sync_scopes_list_panel();
     if (scopes_panel_->list_widget() != nullptr) {
         scopes_panel_->list_widget()->set_focused(true);
     }
     model_.focus = Focus::Scopes;
+    apply_focus();
+    request_repaint();
 }
 
 bool DebugApp::handle_global_key(const tuinator::KeyPress& key) {
@@ -2480,6 +2546,7 @@ void DebugApp::apply_execution_command_started(const char* op) {
             model_.session_state = "running";
             model_.stop_reason.clear();
             last_counted_breakpoint_stop_.reset();
+            clear_scope_value_overrides();
         } else if (std::strcmp(op, "play_pause") == 0) {
             model_.status_message = "Pausing…";
         }
@@ -2502,6 +2569,7 @@ void DebugApp::apply_execution_command_started(const char* op) {
         std::strcmp(op, "goto") == 0) {
         model_.session_state = "running";
         model_.stop_reason.clear();
+        clear_scope_value_overrides();
         return;
     }
 
@@ -2863,24 +2931,14 @@ void DebugApp::apply_focus() {
     if (source_panel_ != nullptr) {
         widgets.push_back(source_panel_);
     }
-    if (scopes_panel_ != nullptr) {
-        if (scopes_panel_->list_widget() != nullptr) {
-            widgets.push_back(scopes_panel_->list_widget());
-        }
-        if (scopes_panel_->input_widget() != nullptr) {
-            widgets.push_back(scopes_panel_->input_widget());
-        }
+    if (scopes_panel_ != nullptr && scopes_panel_->list_widget() != nullptr) {
+        widgets.push_back(scopes_panel_->list_widget());
     }
     if (stacks_panel_ != nullptr && stacks_panel_->list_widget() != nullptr) {
         widgets.push_back(stacks_panel_->list_widget());
     }
-    if (breakpoints_panel_ != nullptr) {
-        if (breakpoints_panel_->list_widget() != nullptr) {
-            widgets.push_back(breakpoints_panel_->list_widget());
-        }
-        if (breakpoints_panel_->input_widget() != nullptr) {
-            widgets.push_back(breakpoints_panel_->input_widget());
-        }
+    if (breakpoints_panel_ != nullptr && breakpoints_panel_->list_widget() != nullptr) {
+        widgets.push_back(breakpoints_panel_->list_widget());
     }
     if (watches_panel_ != nullptr) {
         if (watches_panel_->list_widget() != nullptr) {
@@ -2904,22 +2962,13 @@ void DebugApp::apply_focus() {
         target = source_panel_;
         break;
     case Focus::Scopes:
-        if (scope_input_focused_ && scopes_panel_ != nullptr && scopes_panel_->input_widget() != nullptr) {
-            target = scopes_panel_->input_widget();
-        } else {
-            target = scopes_panel_ != nullptr ? scopes_panel_->list_widget() : nullptr;
-        }
+        target = scopes_panel_ != nullptr ? scopes_panel_->list_widget() : nullptr;
         break;
     case Focus::Stacks:
         target = stacks_panel_ != nullptr ? stacks_panel_->list_widget() : nullptr;
         break;
     case Focus::Breakpoints:
-        if (breakpoint_input_focused_ && breakpoints_panel_ != nullptr &&
-            breakpoints_panel_->input_widget() != nullptr) {
-            target = breakpoints_panel_->input_widget();
-        } else {
-            target = breakpoints_panel_ != nullptr ? breakpoints_panel_->list_widget() : nullptr;
-        }
+        target = breakpoints_panel_ != nullptr ? breakpoints_panel_->list_widget() : nullptr;
         break;
     case Focus::Watches:
         if (watch_input_focused_ && watches_panel_ != nullptr && watches_panel_->input_widget() != nullptr) {
@@ -2945,14 +2994,10 @@ void DebugApp::apply_focus() {
 void DebugApp::sync_focus_from_ui() {
     Focus detected = model_.focus;
 
-    if (breakpoints_panel_ != nullptr && breakpoints_panel_->input_widget() != nullptr &&
-        breakpoints_panel_->input_widget()->is_focused()) {
+    if (breakpoints_panel_ != nullptr && breakpoints_panel_->list_widget() != nullptr &&
+        breakpoints_panel_->list_widget()->is_focused()) {
         detected = Focus::Breakpoints;
-        breakpoint_input_focused_ = true;
-    } else if (breakpoints_panel_ != nullptr && breakpoints_panel_->list_widget() != nullptr &&
-               breakpoints_panel_->list_widget()->is_focused()) {
-        detected = Focus::Breakpoints;
-        breakpoint_input_focused_ = false;
+        breakpoint_input_focused_ = breakpoints_panel_->has_inline_edit();
     } else if (watches_panel_ != nullptr && watches_panel_->input_widget() != nullptr &&
         watches_panel_->input_widget()->is_focused()) {
         detected = Focus::Watches;
@@ -2961,14 +3006,10 @@ void DebugApp::sync_focus_from_ui() {
                watches_panel_->list_widget()->is_focused()) {
         detected = Focus::Watches;
         watch_input_focused_ = false;
-    } else if (scopes_panel_ != nullptr && scopes_panel_->input_widget() != nullptr &&
-               scopes_panel_->input_widget()->is_focused()) {
-        detected = Focus::Scopes;
-        scope_input_focused_ = true;
     } else if (scopes_panel_ != nullptr && scopes_panel_->list_widget() != nullptr &&
                scopes_panel_->list_widget()->is_focused()) {
         detected = Focus::Scopes;
-        scope_input_focused_ = false;
+        scope_input_focused_ = scopes_panel_->has_inline_edit();
     } else if (stacks_panel_ != nullptr && stacks_panel_->list_widget() != nullptr &&
                stacks_panel_->list_widget()->is_focused()) {
         detected = Focus::Stacks;
@@ -2996,25 +3037,15 @@ void DebugApp::mark_all_panels_dirty() {
         source_scroll_view_->refresh_content();
         source_scroll_view_->mark_dirty();
     }
-    if (scopes_panel_ != nullptr) {
-        if (scopes_panel_->list_widget() != nullptr) {
-            scopes_panel_->list_widget()->mark_dirty();
-        }
-        if (scopes_panel_->input_widget() != nullptr) {
-            scopes_panel_->input_widget()->mark_dirty();
-        }
+    if (scopes_panel_ != nullptr && scopes_panel_->list_widget() != nullptr) {
+        scopes_panel_->list_widget()->mark_dirty();
     }
     refresh_scroll_views();
     if (stacks_panel_ != nullptr && stacks_panel_->list_widget() != nullptr) {
         stacks_panel_->list_widget()->mark_dirty();
     }
-    if (breakpoints_panel_ != nullptr) {
-        if (breakpoints_panel_->list_widget() != nullptr) {
-            breakpoints_panel_->list_widget()->mark_dirty();
-        }
-        if (breakpoints_panel_->input_widget() != nullptr) {
-            breakpoints_panel_->input_widget()->mark_dirty();
-        }
+    if (breakpoints_panel_ != nullptr && breakpoints_panel_->list_widget() != nullptr) {
+        breakpoints_panel_->list_widget()->mark_dirty();
     }
     if (watches_panel_ != nullptr) {
         if (watches_panel_->list_widget() != nullptr) {
@@ -3814,7 +3845,12 @@ void DebugApp::begin_edit_breakpoint_condition(const std::string& path, int line
     breakpoint_input_focused_ = true;
     model_.focus = Focus::Breakpoints;
 
-    sync_breakpoint_panel_input();
+    if (breakpoints_panel_ != nullptr) {
+        breakpoints_panel_->set_inline_edit(path_it->first, line, false, breakpoint_input_draft_);
+        sync_breakpoints_list_panel();
+        breakpoints_panel_->focus_inline_edit();
+    }
+    apply_focus();
 
     model_.status_message = "When condition for " + panel_title_from_path(path_it->first) + ":" +
                             std::to_string(line) + " — Enter to save, Esc to cancel";
@@ -3842,7 +3878,12 @@ void DebugApp::begin_edit_breakpoint_hit_condition(const std::string& path, int 
     breakpoint_input_focused_ = true;
     model_.focus = Focus::Breakpoints;
 
-    sync_breakpoint_panel_input();
+    if (breakpoints_panel_ != nullptr) {
+        breakpoints_panel_->set_inline_edit(path_it->first, line, true, breakpoint_input_draft_);
+        sync_breakpoints_list_panel();
+        breakpoints_panel_->focus_inline_edit();
+    }
+    apply_focus();
 
     model_.status_message = "Hit condition for " + panel_title_from_path(path_it->first) + ":" +
                             std::to_string(line) + " — Enter to save, Esc to cancel";
@@ -3851,16 +3892,16 @@ void DebugApp::begin_edit_breakpoint_hit_condition(const std::string& path, int 
 }
 
 void DebugApp::sync_breakpoint_panel_input() {
-    if (breakpoints_panel_ == nullptr) {
+    if (breakpoints_panel_ == nullptr || editing_breakpoint_path_.empty() || editing_breakpoint_line_ <= 0) {
         return;
     }
 
-    const std::string placeholder =
-        editing_breakpoint_hit_ ? "> hit condition" : "> when condition";
-    breakpoints_panel_->set_input_placeholder(placeholder);
-    breakpoints_panel_->set_input_value(breakpoint_input_draft_);
+    breakpoints_panel_->set_inline_edit(editing_breakpoint_path_, editing_breakpoint_line_, editing_breakpoint_hit_,
+                                        breakpoint_input_draft_);
+    sync_breakpoints_list_panel();
     breakpoint_input_focused_ = true;
     model_.focus = Focus::Breakpoints;
+    breakpoints_panel_->focus_inline_edit();
     apply_focus();
     sync_status_bar();
 }
@@ -3870,15 +3911,11 @@ bool DebugApp::handle_breakpoint_input_key(const tuinator::Event& event) {
         return false;
     }
 
-    tuinator::TextInput* input = breakpoints_panel_->input_widget();
-    if (input == nullptr) {
+    if (!breakpoints_panel_->has_inline_edit()) {
+        apply_focus();
         return false;
     }
-
-    if (!input->is_focused()) {
-        apply_focus();
-    }
-    return input->handle_event(event);
+    return breakpoints_panel_->handle_inline_edit_key(event);
 }
 
 void DebugApp::submit_breakpoint_condition(const std::string& condition) {
@@ -3898,8 +3935,8 @@ void DebugApp::capture_breakpoint_input_state() {
     if (breakpoints_panel_ == nullptr) {
         return;
     }
-    breakpoint_input_draft_ = breakpoints_panel_->input_value();
-    if (breakpoints_panel_->input_widget() != nullptr && breakpoints_panel_->input_widget()->is_focused()) {
+    if (breakpoints_panel_->has_inline_edit()) {
+        breakpoint_input_draft_ = breakpoints_panel_->inline_edit_value();
         breakpoint_input_focused_ = true;
         model_.focus = Focus::Breakpoints;
     }
@@ -3912,9 +3949,6 @@ void DebugApp::restore_breakpoint_input_state() {
     if (!editing_breakpoint_path_.empty() && editing_breakpoint_line_ > 0) {
         sync_breakpoint_panel_input();
         return;
-    }
-    if (!breakpoint_input_draft_.empty()) {
-        breakpoints_panel_->set_input_value(breakpoint_input_draft_);
     }
     if (!breakpoint_input_focused_) {
         return;
@@ -3944,21 +3978,24 @@ void DebugApp::begin_edit_variable(const std::string& variable_name) {
     model_.focus = Focus::Scopes;
 
     if (scopes_panel_ != nullptr) {
-        scopes_panel_->set_input_value(scope_input_draft_);
-        scopes_panel_->focus_input();
+        scopes_panel_->set_inline_edit(variable_name, scope_input_draft_);
+        sync_scopes_list_panel();
+        scopes_panel_->focus_inline_edit();
     }
 
-    model_.status_message = "Edit " + variable_name;
+    model_.status_message = "Edit " + variable_name + " — Enter to save, Esc to cancel";
     apply_focus();
     sync_status_bar();
+    request_repaint();
 }
 
 void DebugApp::submit_variable_value(const std::string& value) {
     if (editing_variable_name_.empty() || editing_variables_reference_ <= 0) {
         scope_input_draft_.clear();
         scope_input_focused_ = false;
-        if (scopes_panel_ != nullptr && scopes_panel_->input_widget() != nullptr) {
-            scopes_panel_->input_widget()->set_value("");
+        if (scopes_panel_ != nullptr) {
+            scopes_panel_->clear_inline_edit();
+            sync_scopes_list_panel();
         }
         return;
     }
@@ -3969,18 +4006,34 @@ void DebugApp::submit_variable_value(const std::string& value) {
         return;
     }
 
+    const std::string variable_name = editing_variable_name_;
+    const std::int64_t variables_reference = editing_variables_reference_;
+
     pending_variable_value_ = value;
-    session_io_->post_set_variable(editing_variables_reference_, editing_variable_name_, value);
+    scope_input_draft_ = value;
+    scope_value_overrides_[variable_name] = value;
+    variable_set_in_flight_ = true;
+    scope_input_focused_ = false;
+    if (scopes_panel_ != nullptr) {
+        scopes_panel_->clear_inline_edit();
+    }
+    patch_local_variable_value(variable_name, value);
+    if (scopes_panel_ != nullptr && scopes_panel_->list_widget() != nullptr) {
+        scopes_panel_->list_widget()->set_focused(true);
+    }
+
+    session_io_->post_set_variable(variables_reference, variable_name, value);
     model_.status_message = "Setting " + editing_variable_name_ + "…";
     sync_status_bar();
+    request_repaint();
 }
 
 void DebugApp::capture_scope_input_state() {
     if (scopes_panel_ == nullptr) {
         return;
     }
-    scope_input_draft_ = scopes_panel_->input_value();
-    if (scopes_panel_->input_widget() != nullptr && scopes_panel_->input_widget()->is_focused()) {
+    if (scopes_panel_->has_inline_edit()) {
+        scope_input_draft_ = scopes_panel_->inline_edit_value();
         scope_input_focused_ = true;
         model_.focus = Focus::Scopes;
     }
@@ -3990,14 +4043,37 @@ void DebugApp::restore_scope_input_state() {
     if (scopes_panel_ == nullptr) {
         return;
     }
-    if (!scope_input_draft_.empty()) {
-        scopes_panel_->set_input_value(scope_input_draft_);
+    if (!editing_variable_name_.empty() && scope_input_focused_) {
+        scopes_panel_->set_inline_edit(editing_variable_name_, scope_input_draft_);
+        sync_scopes_list_panel();
+        scopes_panel_->focus_inline_edit();
+        model_.focus = Focus::Scopes;
+        apply_focus();
+        return;
     }
     if (!scope_input_focused_) {
         return;
     }
     model_.focus = Focus::Scopes;
     scopes_panel_->focus_input();
+}
+
+void DebugApp::sync_scopes_list_panel() {
+    if (scopes_panel_ == nullptr) {
+        return;
+    }
+    scopes_panel_->set_scope_names(cached_scope_rows_);
+}
+
+bool DebugApp::scope_prompt_active() const {
+    return scope_input_focused_ && !editing_variable_name_.empty();
+}
+
+bool DebugApp::handle_scope_input_key(const tuinator::Event& event) {
+    if (scopes_panel_ == nullptr || !scopes_panel_->has_active_inline_edit()) {
+        return false;
+    }
+    return scopes_panel_->handle_inline_edit_key(event);
 }
 
 bool DebugApp::context_menu_open() const {
@@ -4019,11 +4095,8 @@ void DebugApp::blur_breakpoint_input(bool cancelled) {
     breakpoint_input_draft_.clear();
     breakpoint_input_focused_ = false;
     if (breakpoints_panel_ != nullptr) {
-        breakpoints_panel_->set_input_placeholder("> when / hit condition");
-        breakpoints_panel_->set_input_value("");
-        if (breakpoints_panel_->input_widget() != nullptr) {
-            breakpoints_panel_->input_widget()->set_focused(false);
-        }
+        breakpoints_panel_->clear_inline_edit();
+        sync_breakpoints_list_panel();
         if (breakpoints_panel_->list_widget() != nullptr) {
             breakpoints_panel_->list_widget()->set_focused(true);
         }

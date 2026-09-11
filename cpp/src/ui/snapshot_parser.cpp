@@ -510,6 +510,21 @@ std::vector<VariableInfo> parse_variables_json(const std::string& json) {
 #endif
 }
 
+std::optional<std::string> parse_set_variable_result_value(const std::string& json) {
+#ifdef TUI_DEBUG_UI_HAS_NLOHMANN_JSON
+    try {
+        const Json root = Json::parse(json);
+        if (root.contains("value") && root.at("value").is_string()) {
+            return root.at("value").get<std::string>();
+        }
+    } catch (const Json::exception&) {
+    }
+#else
+    (void)json;
+#endif
+    return std::nullopt;
+}
+
 bool apply_scope_variables_batch(DebugUiModel& model, const std::string& signature, const std::string& json) {
 #ifdef TUI_DEBUG_UI_HAS_NLOHMANN_JSON
     try {

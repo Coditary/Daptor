@@ -77,6 +77,7 @@ class DebugApp {
     void blur_breakpoint_input(bool cancelled = true);
     void blur_scope_input();
     bool handle_breakpoint_input_key(const tuinator::Event& event);
+    bool handle_scope_input_key(const tuinator::Event& event);
 
   private:
     void ensure_ui_built();
@@ -103,6 +104,8 @@ class DebugApp {
     void invalidate_scope_variables();
     void request_scope_variables_refresh();
     void patch_local_variable_value(const std::string& name, const std::string& value);
+    void apply_scope_value_overrides();
+    void clear_scope_value_overrides();
     std::string build_scope_variables_signature() const;
     void apply_console_json_payload(const std::string& json);
     void apply_snapshot_json_payload(const std::string& json);
@@ -127,6 +130,8 @@ class DebugApp {
     void submit_variable_value(const std::string& value);
     void capture_scope_input_state();
     void restore_scope_input_state();
+    void sync_scopes_list_panel();
+    [[nodiscard]] bool scope_prompt_active() const;
     void begin_watch_expression(const std::string& seed);
     void show_breakpoint_context_menu(const std::string& path, int line, tuinator::Point anchor,
                                       const std::optional<std::string>& seed_identifier);
@@ -246,6 +251,8 @@ class DebugApp {
     std::string editing_variable_name_;
     std::int64_t editing_variables_reference_ = 0;
     std::string pending_variable_value_;
+    std::unordered_map<std::string, std::string> scope_value_overrides_;
+    bool variable_set_in_flight_ = false;
     std::string cached_source_path_;
     std::int64_t cached_source_reference_ = 0;
     std::string cached_source_text_;

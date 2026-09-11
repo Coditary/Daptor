@@ -3,6 +3,7 @@
 #include "tui_debug_ui/debug_ui_model.hpp"
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -26,6 +27,9 @@ bool apply_console_json(DebugUiModel& model, const std::string& json);
 
 /// Parse a DAP variables array: `[{"name":"x","value":"1","variablesReference":0}]`.
 std::vector<VariableInfo> parse_variables_json(const std::string& json);
+
+/// Parse the `value` field from a setVariable response object.
+std::optional<std::string> parse_set_variable_result_value(const std::string& json);
 
 /// Apply scope-variable batch JSON from the session worker:
 /// `{"signature":"...","variables":{"3":[...],"4":[...]}}`.

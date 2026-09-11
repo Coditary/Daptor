@@ -11,7 +11,6 @@
 #include <vector>
 
 namespace tuinator {
-class TextInput;
 class Widget;
 }  // namespace tuinator
 
@@ -61,8 +60,13 @@ class BreakpointsPanel {
     void set_on_clear_hit_condition(ClearConditionCallback callback);
     void set_on_submit(SubmitCallback callback);
     void set_on_change(ChangeCallback callback);
-    void set_input_value(std::string value);
-    void set_input_placeholder(std::string placeholder);
+    void set_on_inline_edit_cancel(std::function<void()> callback);
+    void set_inline_edit(const std::string& path, int line, bool hit, std::string value);
+    void clear_inline_edit();
+    [[nodiscard]] bool has_inline_edit() const;
+    [[nodiscard]] std::string inline_edit_value() const;
+    void focus_inline_edit();
+    bool handle_inline_edit_key(const tuinator::Event& event);
     [[nodiscard]] std::string input_value() const;
     void focus_input();
     [[nodiscard]] tuinator::Point row_anchor(int display_index) const;
@@ -72,7 +76,6 @@ class BreakpointsPanel {
     [[nodiscard]] const BreakpointRow* selected_row() const;
     tuinator::Widget* panel_widget() const;
     tuinator::Widget* list_widget() const;
-    tuinator::TextInput* input_widget() const;
     tuinator::ScrollView* scroll_view() const;
 
   private:
@@ -81,14 +84,28 @@ class BreakpointsPanel {
         Breakpoint,
         WhenCondition,
         HitCondition,
+        WhenConditionEditing,
+        HitConditionEditing,
     };
 
     [[nodiscard]] const BreakpointRow* breakpoint_at_display_index(int index) const;
     [[nodiscard]] DisplayLineKind display_kind_at(int index) const;
 
+    struct InlineEditTarget {
+        std::string path;
+        int line = 0;
+        bool hit = false;
+        std::string value;
+        bool active = false;
+    };
+
+    void sync_inline_edit_to_list();
+    [[nodiscard]] static bool paths_match(const std::string& left, const std::string& right);
+
     std::unique_ptr<TitledScrollPane> pane_;
     NavigableListView* list_ = nullptr;
-    tuinator::TextInput* input_ = nullptr;
+    InlineEditTarget inline_edit_;
+    int inline_edit_display_index_ = -1;
     std::vector<BreakpointRow> rows_;
     std::vector<int> display_to_row_;
     std::vector<DisplayLineKind> display_kind_;
@@ -102,6 +119,7 @@ class BreakpointsPanel {
     ClearConditionCallback on_clear_hit_condition_;
     SubmitCallback on_submit_;
     ChangeCallback on_change_;
+    std::function<void()> on_inline_edit_cancel_;
 };
 
 }  // namespace tui_debug_ui

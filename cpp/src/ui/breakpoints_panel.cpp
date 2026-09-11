@@ -5,7 +5,6 @@
 #include "tui_debug_ui/titled_scroll_pane.hpp"
 
 #include <tuinator/layout/box.hpp>
-#include <tuinator/widgets/controls/text_input.hpp>
 
 #include <algorithm>
 #include <string>
@@ -60,6 +59,8 @@ BreakpointsPanel::BreakpointsPanel(const DapUiTheme& theme, tuinator::ScrollView
             }
             return;
         case DisplayLineKind::None:
+        case DisplayLineKind::WhenConditionEditing:
+        case DisplayLineKind::HitConditionEditing:
             break;
         }
     });
@@ -75,20 +76,37 @@ BreakpointsPanel::BreakpointsPanel(const DapUiTheme& theme, tuinator::ScrollView
             on_context_(*row, anchor);
         }
     });
-
-    auto input = std::make_unique<tuinator::TextInput>(
-        tuinator::TextInputOptions{.placeholder = "> when / hit condition"}, theme.label, theme.selection);
-    input->set_flex(0);
-    input_ = input.get();
+    list_->set_on_inline_edit_change([this](const std::string& value) {
+        if (inline_edit_.active) {
+            inline_edit_.value = value;
+        }
+        if (on_change_ != nullptr) {
+            on_change_(value);
+        }
+    });
+    list_->set_on_inline_edit_submit([this](const std::string& value) {
+        if (on_submit_ != nullptr) {
+            on_submit_(value);
+        }
+    });
+    list_->set_on_inline_edit_cancel([this]() {
+        if (on_inline_edit_cancel_ != nullptr) {
+            on_inline_edit_cancel_();
+        }
+    });
 
     pane_ = std::make_unique<TitledScrollPane>(title, std::move(list), theme.title_breakpoints, theme.panel_background,
-                                               std::move(scroll_options), true, nullptr, std::move(input));
+                                               std::move(scroll_options), true);
     if (tuinator::ScrollView* scroll = pane_->scroll_view()) {
         list_->set_scroll_parent(scroll);
     }
 }
 
 std::unique_ptr<tuinator::Widget> BreakpointsPanel::release_widget() { return pane_->release_widget(); }
+
+bool BreakpointsPanel::paths_match(const std::string& left, const std::string& right) {
+    return left == right;
+}
 
 void BreakpointsPanel::set_breakpoints(std::vector<BreakpointRow> rows) {
     rows_ = std::move(rows);
@@ -109,6 +127,7 @@ void BreakpointsPanel::set_breakpoints(std::vector<BreakpointRow> rows) {
     items.reserve(rows_.size() * 2);
     display_to_row.reserve(rows_.size() * 2);
     display_kind.reserve(rows_.size() * 2);
+    inline_edit_display_index_ = -1;
 
     std::string current_path;
     for (std::size_t index = 0; index < rows_.size(); ++index) {
@@ -125,6 +144,11 @@ void BreakpointsPanel::set_breakpoints(std::vector<BreakpointRow> rows) {
             current_path = row.path;
         }
 
+        const bool editing_when = inline_edit_.active && !inline_edit_.hit &&
+                                  paths_match(row.path, inline_edit_.path) && row.line == inline_edit_.line;
+        const bool editing_hit = inline_edit_.active && inline_edit_.hit &&
+                                 paths_match(row.path, inline_edit_.path) && row.line == inline_edit_.line;
+
         std::string entry = "  " + std::to_string(row.line);
         if (!row.source_text.empty()) {
             entry += " " + row.source_text;
@@ -136,13 +160,23 @@ void BreakpointsPanel::set_breakpoints(std::vector<BreakpointRow> rows) {
         display_to_row.push_back(static_cast<int>(index));
         display_kind.push_back(DisplayLineKind::Breakpoint);
 
-        if (!row.condition.empty()) {
+        if (editing_when) {
+            items.push_back(kInlineWhenEditRow);
+            display_to_row.push_back(static_cast<int>(index));
+            display_kind.push_back(DisplayLineKind::WhenConditionEditing);
+            inline_edit_display_index_ = static_cast<int>(items.size()) - 1;
+        } else if (!row.condition.empty()) {
             items.push_back("    when " + row.condition);
             display_to_row.push_back(static_cast<int>(index));
             display_kind.push_back(DisplayLineKind::WhenCondition);
         }
 
-        if (!row.hit_condition.empty()) {
+        if (editing_hit) {
+            items.push_back(kInlineHitEditRow);
+            display_to_row.push_back(static_cast<int>(index));
+            display_kind.push_back(DisplayLineKind::HitConditionEditing);
+            inline_edit_display_index_ = static_cast<int>(items.size()) - 1;
+        } else if (!row.hit_condition.empty()) {
             std::string hit_line = "    hit " + row.hit_condition + " (" + std::to_string(row.hit_count) + ")";
             items.push_back(std::move(hit_line));
             display_to_row.push_back(static_cast<int>(index));
@@ -153,10 +187,78 @@ void BreakpointsPanel::set_breakpoints(std::vector<BreakpointRow> rows) {
     display_to_row_ = std::move(display_to_row);
     display_kind_ = std::move(display_kind);
     list_->assign_items(std::move(items));
+    sync_inline_edit_to_list();
     list_->mark_dirty();
     if (pane_ != nullptr) {
         pane_->refresh_scroll_content();
     }
+}
+
+void BreakpointsPanel::sync_inline_edit_to_list() {
+    if (list_ == nullptr || !inline_edit_.active || inline_edit_display_index_ < 0) {
+        if (list_ != nullptr) {
+            list_->clear_inline_row_edit();
+        }
+        return;
+    }
+
+    const std::string prefix = inline_edit_.hit ? "    hit " : "    when ";
+    list_->set_inline_row_edit(inline_edit_display_index_, prefix, inline_edit_.value);
+    list_->set_selected_index(inline_edit_display_index_);
+    list_->set_focused(true);
+
+    if (tuinator::ScrollView* scroll = scroll_view()) {
+        const int scroll_y = std::max(0, inline_edit_display_index_ - 1);
+        scroll->scroll_to(0, scroll_y);
+    }
+}
+
+void BreakpointsPanel::set_inline_edit(const std::string& path, int line, bool hit, std::string value) {
+    inline_edit_.path = path;
+    inline_edit_.line = line;
+    inline_edit_.hit = hit;
+    inline_edit_.value = std::move(value);
+    inline_edit_.active = true;
+}
+
+void BreakpointsPanel::clear_inline_edit() {
+    inline_edit_ = {};
+    inline_edit_display_index_ = -1;
+    if (list_ != nullptr) {
+        list_->clear_inline_row_edit();
+        list_->mark_dirty();
+    }
+}
+
+bool BreakpointsPanel::has_inline_edit() const { return inline_edit_.active; }
+
+std::string BreakpointsPanel::inline_edit_value() const {
+    if (list_ != nullptr && list_->has_inline_row_edit()) {
+        return list_->inline_row_edit_value();
+    }
+    return inline_edit_.active ? inline_edit_.value : std::string{};
+}
+
+void BreakpointsPanel::focus_inline_edit() {
+    if (list_ == nullptr) {
+        return;
+    }
+    sync_inline_edit_to_list();
+    list_->set_focused(true);
+    list_->mark_dirty();
+}
+
+bool BreakpointsPanel::handle_inline_edit_key(const tuinator::Event& event) {
+    if (list_ == nullptr || !list_->has_inline_row_edit()) {
+        return false;
+    }
+    if (const auto* key = std::get_if<tuinator::KeyPress>(&event)) {
+        if (!list_->is_focused()) {
+            list_->set_focused(true);
+        }
+        return list_->handle_inline_row_edit_key(*key);
+    }
+    return false;
 }
 
 void BreakpointsPanel::set_on_activate(ActivateCallback callback) { on_activate_ = std::move(callback); }
@@ -185,54 +287,17 @@ void BreakpointsPanel::set_on_clear_hit_condition(ClearConditionCallback callbac
     on_clear_hit_condition_ = std::move(callback);
 }
 
-void BreakpointsPanel::set_on_submit(SubmitCallback callback) {
-    on_submit_ = std::move(callback);
-    if (input_ != nullptr) {
-        input_->set_on_submit([this](const std::string& value) {
-            if (on_submit_ != nullptr) {
-                on_submit_(value);
-            }
-        });
-    }
+void BreakpointsPanel::set_on_submit(SubmitCallback callback) { on_submit_ = std::move(callback); }
+
+void BreakpointsPanel::set_on_change(ChangeCallback callback) { on_change_ = std::move(callback); }
+
+void BreakpointsPanel::set_on_inline_edit_cancel(std::function<void()> callback) {
+    on_inline_edit_cancel_ = std::move(callback);
 }
 
-void BreakpointsPanel::set_on_change(ChangeCallback callback) {
-    on_change_ = std::move(callback);
-    if (input_ != nullptr) {
-        input_->set_on_change([this](const std::string& value) {
-            if (on_change_ != nullptr) {
-                on_change_(value);
-            }
-        });
-    }
-}
+std::string BreakpointsPanel::input_value() const { return inline_edit_value(); }
 
-void BreakpointsPanel::set_input_value(std::string value) {
-    if (input_ != nullptr) {
-        input_->set_value(std::move(value));
-    }
-}
-
-void BreakpointsPanel::set_input_placeholder(std::string placeholder) {
-    if (input_ != nullptr) {
-        input_->set_placeholder(std::move(placeholder));
-        input_->mark_dirty();
-    }
-}
-
-std::string BreakpointsPanel::input_value() const {
-    return input_ != nullptr ? input_->value() : std::string{};
-}
-
-void BreakpointsPanel::focus_input() {
-    if (input_ != nullptr) {
-        input_->set_focused(true);
-        input_->mark_dirty();
-        if (list_ != nullptr) {
-            list_->set_focused(false);
-        }
-    }
-}
+void BreakpointsPanel::focus_input() { focus_inline_edit(); }
 
 tuinator::Point BreakpointsPanel::row_anchor(int display_index) const {
     if (list_ == nullptr) {
@@ -287,8 +352,6 @@ tuinator::Widget* BreakpointsPanel::panel_widget() const {
 }
 
 tuinator::Widget* BreakpointsPanel::list_widget() const { return list_; }
-
-tuinator::TextInput* BreakpointsPanel::input_widget() const { return input_; }
 
 tuinator::ScrollView* BreakpointsPanel::scroll_view() const {
     return pane_ != nullptr ? pane_->scroll_view() : nullptr;
