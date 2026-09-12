@@ -93,7 +93,7 @@ int StackedPane::add_action_width() const {
 }
 
 int StackedPane::rename_action_width() const {
-    if (!rename_action_) {
+    if (!rename_action_ && !pane_menu_action_) {
         return 0;
     }
     return kClusterGap + edit_glyph_width();
@@ -107,7 +107,7 @@ int StackedPane::far_right_add_x() const {
 }
 
 int StackedPane::far_right_edit_x() const {
-    if (!rename_action_ || bounds_.width <= 0) {
+    if ((!rename_action_ && !pane_menu_action_) || bounds_.width <= 0) {
         return -1;
     }
     int x = bounds_.width;
@@ -374,7 +374,17 @@ void StackedPane::set_rename_action(std::function<void(int index, const std::str
     rename_action_ = std::move(callback);
 }
 
+void StackedPane::set_pane_menu_action(std::function<void(tuinator::Point anchor)> callback) {
+    pane_menu_action_ = std::move(callback);
+}
+
+void StackedPane::begin_rename_active_tab() { begin_rename(active_index_); }
+
 void StackedPane::append_entry(std::string label, std::unique_ptr<tuinator::Widget> widget) {
+    if (entries_.size() == 1 && entries_[0].widget == nullptr && entries_[0].label.empty()) {
+        entries_.clear();
+        active_index_ = 0;
+    }
     if (on_dirty_ && widget != nullptr) {
         widget->set_on_dirty(on_dirty_);
     }
@@ -659,7 +669,11 @@ bool StackedPane::handle_chrome_click(tuinator::Point position) {
     }
 
     if (chrome.edit_x >= 0 && local.x >= chrome.edit_x && local.x < chrome.edit_x + edit_glyph_width()) {
-        begin_rename(active_index_);
+        if (pane_menu_action_) {
+            pane_menu_action_({bounds_.x + chrome.edit_x, bounds_.y + local.y});
+        } else {
+            begin_rename(active_index_);
+        }
         return true;
     }
 

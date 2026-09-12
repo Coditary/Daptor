@@ -3,6 +3,7 @@
 #include <tuinator/widgets/containers/split_pane.hpp>
 #include <tuinator/widgets/widget.hpp>
 
+#include <cstdint>
 #include <functional>
 #include <memory>
 
@@ -20,6 +21,7 @@ class ResizableSplitPane : public tuinator::Widget {
 
     int first_size() const { return options_.first_size; }
     void set_first_size(int size);
+    void set_proportional_first_size(std::uint16_t pct);
     void set_on_first_size_changed(SizeChangedCallback callback);
     void set_on_drag_state_changed(DragStateCallback callback);
     void set_on_screen_refresh(ScreenRefreshCallback callback);
@@ -51,6 +53,8 @@ class ResizableSplitPane : public tuinator::Widget {
     DragStateCallback on_drag_state_changed_;
     ScreenRefreshCallback on_screen_refresh_;
     bool dragging_divider_ = false;
+    bool proportional_first_size_ = false;
+    std::uint16_t first_size_pct_ = 50;
 
     void request_full_redraw();
 };

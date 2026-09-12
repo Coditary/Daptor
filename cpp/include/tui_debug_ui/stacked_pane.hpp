@@ -38,6 +38,8 @@ class StackedPane : public tuinator::Widget {
     void set_on_active_changed(ActiveChangedCallback callback);
     void set_add_action(std::function<void()> callback);
     void set_rename_action(std::function<void(int index, const std::string& label)> callback);
+    void set_pane_menu_action(std::function<void(tuinator::Point anchor)> callback);
+    void begin_rename_active_tab();
     void append_entry(std::string label, std::unique_ptr<tuinator::Widget> widget);
     void remove_entry(int index);
     void set_entry_label(int index, std::string label);
@@ -145,6 +147,7 @@ class StackedPane : public tuinator::Widget {
     ActiveChangedCallback on_active_changed_;
     std::function<void()> add_action_;
     std::function<void(int index, const std::string& label)> rename_action_;
+    std::function<void(tuinator::Point)> pane_menu_action_;
 };
 
 }  // namespace tui_debug_ui

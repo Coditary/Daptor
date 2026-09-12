@@ -41,7 +41,14 @@ ResizableSplitPane::ResizableSplitPane(std::unique_ptr<tuinator::Widget> first,
       background_(std::move(background)) {}
 
 void ResizableSplitPane::set_first_size(int size) {
+    proportional_first_size_ = false;
     options_.first_size = std::max(0, size);
+    mark_dirty();
+}
+
+void ResizableSplitPane::set_proportional_first_size(std::uint16_t pct) {
+    proportional_first_size_ = true;
+    first_size_pct_ = static_cast<std::uint16_t>(std::clamp(static_cast<int>(pct), 1, 99));
     mark_dirty();
 }
 
@@ -128,6 +135,7 @@ void ResizableSplitPane::apply_drag_position(tuinator::Point position) {
         return;
     }
 
+    proportional_first_size_ = false;
     options_.first_size = new_first;
     layout(bounds_);
     request_full_redraw();
@@ -138,6 +146,21 @@ void ResizableSplitPane::apply_drag_position(tuinator::Point position) {
 
 void ResizableSplitPane::layout(tuinator::Rect bounds) {
     bounds_ = bounds;
+
+    if (proportional_first_size_) {
+        const int total = (options_.orientation == tuinator::SplitOrientation::Horizontal ? bounds.width
+                                                                                        : bounds.height) -
+                          kDividerThickness;
+        if (total > 0) {
+            int computed = total * static_cast<int>(first_size_pct_) / 100;
+            if (total < kMinPaneSize * 2) {
+                computed = std::max(1, total / 2);
+            } else {
+                computed = std::clamp(computed, kMinPaneSize, std::max(kMinPaneSize, total - kMinPaneSize));
+            }
+            options_.first_size = computed;
+        }
+    }
 
     if (options_.orientation == tuinator::SplitOrientation::Horizontal) {
         const int first_width =

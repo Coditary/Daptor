@@ -20,8 +20,7 @@ void SharedWidgetHost::paint(tuinator::PaintContext& ctx) const {
         return;
     }
 
-    const tuinator::Rect local{target_->bounds().x - bounds_.x, target_->bounds().y - bounds_.y,
-                               target_->bounds().width, target_->bounds().height};
+    const tuinator::Rect local{0, 0, bounds_.width, bounds_.height};
     ctx.with_clip(local, [&](tuinator::PaintContext& child_ctx) { target_->paint(child_ctx); });
 }
 

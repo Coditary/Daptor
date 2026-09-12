@@ -42,6 +42,8 @@ add_executable(tui-debug-ui
     src/ui/resizable_split_pane.cpp
     src/ui/divider_paint.cpp
     src/ui/stacked_pane.cpp
+    src/ui/layout_tree.cpp
+    src/ui/sidebar_slot.cpp
     src/ui/panel_slot.cpp
     src/ui/shared_widget_host.cpp
     src/ui/background_widget.cpp

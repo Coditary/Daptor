@@ -12,7 +12,9 @@
 #include "tui_debug_ui/repl_panel.hpp"
 #include "tui_debug_ui/session_io_thread.hpp"
 #include "tui_debug_ui/stacks_panel.hpp"
+#include "tui_debug_ui/layout_tree.hpp"
 #include "tui_debug_ui/panel_slot.hpp"
+#include "tui_debug_ui/sidebar_slot.hpp"
 #include "tui_debug_ui/step_in_selection.hpp"
 
 #include <tuinator/core/event.hpp>
@@ -56,19 +58,6 @@ struct SourceFileTab {
     std::string cached_text;
     int cursor_line = 1;
     int scroll_y = 0;
-};
-
-struct SidebarSlot {
-    PanelSlotConfig config;
-    std::unique_ptr<ScopesPanel> scopes;
-    std::unique_ptr<WatchesPanel> watches;
-    std::unique_ptr<StacksPanel> stacks;
-    std::unique_ptr<BreakpointsPanel> breakpoints;
-    std::unique_ptr<SharedWidgetHost> shared_host;
-    std::vector<std::string> cached_scope_rows;
-    std::vector<ScopeVariableRowMeta> cached_scope_row_meta;
-    std::vector<WatchEntry> watches_data;
-    bool tab_label_customized = false;
 };
 
 /// Tuinator application wrapper for the tui-debug shell.
@@ -262,7 +251,22 @@ class DebugApp {
     void cycle_sidebar_stack(int delta);
     void cycle_bottom_stack(int delta);
     void sync_stack_panes_to_focus();
-    void init_default_sidebar_slots();
+    void ensure_layout_tree_initialized();
+    void ensure_default_leaf_slots(LayoutNodeId leaf_id);
+    std::unique_ptr<tuinator::Widget> build_layout_widget(LayoutNodeId node_id);
+    std::unique_ptr<StackedPane> build_stacked_pane_for_leaf(LayoutNodeId leaf_id);
+    void rebuild_layout_ui();
+    void reset_layout_slot_widgets();
+    std::unique_ptr<tuinator::Widget> build_layout_content_widget();
+    void show_pane_layout_menu(LayoutNodeId leaf_id, tuinator::Point anchor);
+    void show_pane_add_menu(LayoutNodeId leaf_id, tuinator::Point anchor);
+    void split_layout_pane(LayoutNodeId leaf_id, PaneSplitDirection direction);
+    void delete_layout_pane(LayoutNodeId leaf_id);
+    [[nodiscard]] LayoutNodeId dock_leaf_id(PanelDock dock) const;
+    [[nodiscard]] std::vector<SidebarSlot>& leaf_slots(LayoutNodeId leaf_id);
+    [[nodiscard]] StackedPane* layout_stack(LayoutNodeId leaf_id);
+    [[nodiscard]] int& leaf_stack_index(LayoutNodeId leaf_id);
+    void init_default_sidebar_slots(std::vector<SidebarSlot>& slots);
     void ensure_sidebar_slot_panels(SidebarSlot& slot, const tuinator::ScrollViewOptions& scroll_options);
     std::unique_ptr<tuinator::Widget> release_sidebar_slot_widget(SidebarSlot& slot);
     void update_active_panel_pointers();
@@ -282,8 +286,9 @@ class DebugApp {
     [[nodiscard]] int dock_index_for_focus(PanelDock dock, Focus focus) const;
     void sync_dock_stack_to_focus(PanelDock dock);
     [[nodiscard]] SidebarSlot* active_slot_for_focus();
-    [[nodiscard]] std::optional<std::pair<PanelDock, int>> find_source_panel_slot() const;
+    [[nodiscard]] std::optional<std::pair<LayoutNodeId, int>> find_source_panel_slot() const;
     [[nodiscard]] bool has_source_panel() const;
+    void move_source_panel_to_leaf(LayoutNodeId target_leaf);
     void move_source_panel_to_dock(PanelDock dock);
     void refresh_all_scope_slots();
     void sync_scope_slot(SidebarSlot& slot);
@@ -293,19 +298,28 @@ class DebugApp {
     [[nodiscard]] std::vector<BreakpointRow> build_breakpoint_rows() const;
     [[nodiscard]] std::vector<ThreadStackContent> build_thread_stack_contents() const;
     [[nodiscard]] std::vector<WatchEntry>& active_watch_list();
-    void show_add_panel_menu(tuinator::Point anchor, PanelDock dock);
-    void show_add_scope_menu(PanelDock dock, SidebarPanelType type, tuinator::Point anchor);
-    void show_add_breakpoint_menu(PanelDock dock, tuinator::Point anchor);
-    void show_add_thread_menu(PanelDock dock, tuinator::Point anchor);
+    void show_add_panel_menu(tuinator::Point anchor, LayoutNodeId leaf_id);
+    void show_add_scope_menu(LayoutNodeId leaf_id, SidebarPanelType type, tuinator::Point anchor);
+    void show_add_breakpoint_menu(LayoutNodeId leaf_id, tuinator::Point anchor);
+    void show_add_thread_menu(LayoutNodeId leaf_id, tuinator::Point anchor);
+    void add_panel_to_leaf(LayoutNodeId leaf_id, SidebarPanelType type,
+                           std::optional<std::string> scope_filter = std::nullopt,
+                           std::optional<BreakpointRowKind> breakpoint_filter = std::nullopt,
+                           std::optional<ThreadPanelFilter> thread_filter = std::nullopt,
+                           std::optional<std::int64_t> thread_id_filter = std::nullopt,
+                           std::optional<std::string> thread_name_filter = std::nullopt);
     void add_panel_to_dock(PanelDock dock, SidebarPanelType type,
                            std::optional<std::string> scope_filter = std::nullopt,
                            std::optional<BreakpointRowKind> breakpoint_filter = std::nullopt,
                            std::optional<ThreadPanelFilter> thread_filter = std::nullopt,
                            std::optional<std::int64_t> thread_id_filter = std::nullopt,
                            std::optional<std::string> thread_name_filter = std::nullopt);
+    void rename_leaf_panel(LayoutNodeId leaf_id, int index, const std::string& label);
     void rename_dock_panel(PanelDock dock, int index, const std::string& label);
-    void init_default_bottom_slots();
-    void init_default_source_slots();
+    [[nodiscard]] SidebarSlot* leaf_slot_at(LayoutNodeId leaf_id, int index);
+    [[nodiscard]] std::vector<PanelSlotConfig> leaf_slot_configs(LayoutNodeId leaf_id) const;
+    void init_default_bottom_slots(std::vector<SidebarSlot>& slots);
+    void init_default_source_slots(std::vector<SidebarSlot>& slots);
     void sync_source_stack_title();
     void wire_scopes_panel(ScopesPanel& panel, SidebarSlot& slot);
     void wire_watches_panel(WatchesPanel& panel, SidebarSlot& slot);
@@ -389,14 +403,14 @@ class DebugApp {
     StacksPanel* stacks_panel_ = nullptr;
     BreakpointsPanel* breakpoints_panel_ = nullptr;
     WatchesPanel* watches_panel_ = nullptr;
-    std::vector<SidebarSlot> sidebar_slots_;
-    std::vector<SidebarSlot> bottom_slots_;
-    std::vector<SidebarSlot> source_slots_;
+    LayoutTree layout_tree_;
+    std::unordered_map<LayoutNodeId, StackedPane*> layout_stacks_;
+    std::unordered_map<LayoutNodeId, ResizableSplitPane*> layout_splits_;
+    LayoutNodeId focused_layout_leaf_ = 0;
     std::uint64_t next_slot_id_ = 1;
     std::unique_ptr<tuinator::Widget> repl_shell_;
     std::unique_ptr<tuinator::Widget> console_shell_;
     std::unique_ptr<tuinator::Widget> source_content_shell_;
-    int source_stack_index_ = 0;
     std::unique_ptr<ContextMenu> context_menu_;
     std::unique_ptr<TitledScrollPane> source_section_;
     SourcePanel* source_panel_ = nullptr;
@@ -408,11 +422,6 @@ class DebugApp {
     tuinator::ScrollView* console_scroll_view_ = nullptr;
     std::size_t console_synced_line_count_ = 0;
     std::unique_ptr<ReplPanel> repl_panel_;
-    StackedPane* sidebar_stack_ = nullptr;
-    StackedPane* source_stack_ = nullptr;
-    StackedPane* bottom_stack_ = nullptr;
-    int sidebar_stack_index_ = 0;
-    int bottom_stack_index_ = 0;
     ResizableSplitPane* main_row_split_ = nullptr;
     ResizableSplitPane* content_split_ = nullptr;
     std::string watch_input_draft_;
