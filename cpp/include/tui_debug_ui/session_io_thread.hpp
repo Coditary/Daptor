@@ -25,6 +25,10 @@ enum class SessionIoEventKind {
     ScopeVariablesReady,
     VariableChildrenReady,
     SourceReady,
+    MemoryReady,
+    DisassemblyReady,
+    RuntimeSourceReady,
+    WriteMemoryFinished,
     HighlightReady,
     CommandFinished,
     EvaluateFinished,
@@ -52,6 +56,9 @@ struct SessionIoEvent {
     std::string detail;
     std::int64_t scope_ref = 0;
     std::int64_t source_reference = 0;
+    std::string memory_reference;
+    std::int64_t memory_offset = 0;
+    std::uint64_t slot_id = 0;
     int highlight_first_line = 0;
     int highlight_line_count = 0;
 };
@@ -87,6 +94,13 @@ class SessionIoThread {
     void request_variable_children(std::int64_t variables_reference, const std::string& path);
     void request_highlight(const std::string& language, const std::string& source, int first_line, int line_count);
     void request_source_fetch(std::int64_t source_reference, const std::string& cache_key);
+    void request_memory_fetch(const std::string& memory_reference, std::int64_t offset, std::int64_t count,
+                              std::uint64_t slot_id);
+    void request_disassembly_fetch(const std::string& memory_reference, std::int64_t instruction_offset,
+                                   std::int64_t offset, std::int64_t instruction_count, std::uint64_t slot_id);
+    void request_runtime_source_fetch(std::int64_t source_reference, std::uint64_t slot_id);
+    void post_write_memory(const std::string& memory_reference, std::int64_t offset, const std::string& hex_data,
+                           std::uint64_t slot_id);
     void request_step_in_targets(std::int64_t frame_id);
     void request_goto_targets(const std::string& path, int line, int column);
 
@@ -116,6 +130,10 @@ class SessionIoThread {
     void process_variable_children_fetch();
     void process_highlight_request();
     void process_source_fetch();
+    void process_memory_fetch();
+    void process_disassembly_fetch();
+    void process_runtime_source_fetch();
+    void process_write_memory();
     void process_step_in_targets_fetch();
     void process_goto_targets_fetch();
     void process_terminal_input();
@@ -184,6 +202,33 @@ class SessionIoThread {
     std::optional<HighlightRequest> highlight_request_;
     std::optional<std::int64_t> source_fetch_reference_;
     std::string source_fetch_cache_key_;
+    struct MemoryFetchRequest {
+        std::string memory_reference;
+        std::int64_t offset = 0;
+        std::int64_t count = 0;
+        std::uint64_t slot_id = 0;
+    };
+    std::optional<MemoryFetchRequest> memory_fetch_request_;
+    struct DisassemblyFetchRequest {
+        std::string memory_reference;
+        std::int64_t instruction_offset = 0;
+        std::int64_t offset = 0;
+        std::int64_t instruction_count = 0;
+        std::uint64_t slot_id = 0;
+    };
+    std::optional<DisassemblyFetchRequest> disassembly_fetch_request_;
+    struct RuntimeSourceFetchRequest {
+        std::int64_t source_reference = 0;
+        std::uint64_t slot_id = 0;
+    };
+    std::optional<RuntimeSourceFetchRequest> runtime_source_fetch_request_;
+    struct WriteMemoryRequest {
+        std::string memory_reference;
+        std::int64_t offset = 0;
+        std::string hex_data;
+        std::uint64_t slot_id = 0;
+    };
+    std::optional<WriteMemoryRequest> write_memory_request_;
     std::optional<std::int64_t> step_in_targets_frame_;
     struct GotoTargetsRequest {
         std::string path;

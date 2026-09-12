@@ -15,8 +15,17 @@ enum class SidebarPanelType {
     Threads,
     Breakpoints,
     Source,
+    Memory,
+    DisassemblyAsm,
+    DisassemblyBytes,
+    RuntimeSource,
     Repl,
     Console,
+};
+
+enum class DisassemblyViewMode {
+    Asm,
+    Bytes,
 };
 
 enum class PanelDock {

@@ -42,6 +42,12 @@ std::string DebugUiModel::focus_label() const {
         return "threads";
     case Focus::Watches:
         return "watches";
+    case Focus::Memory:
+        return "memory";
+    case Focus::Disassembly:
+        return "disassembly";
+    case Focus::RuntimeSource:
+        return "runtime source";
     case Focus::Repl:
         return "repl";
     case Focus::Console:

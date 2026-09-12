@@ -44,6 +44,10 @@ add_executable(tui-debug-ui
     src/ui/stacked_pane.cpp
     src/ui/layout_tree.cpp
     src/ui/sidebar_slot.cpp
+    src/ui/memory_panel.cpp
+    src/ui/disassembly_panel.cpp
+    src/ui/runtime_source_panel.cpp
+    src/ui/dap_view_formatters.cpp
     src/ui/panel_slot.cpp
     src/ui/shared_widget_host.cpp
     src/ui/background_widget.cpp

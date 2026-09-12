@@ -20,6 +20,9 @@ enum class Focus {
     Breakpoints,
     Stacks,
     Watches,
+    Memory,
+    Disassembly,
+    RuntimeSource,
     Repl,
     Console,
 };
@@ -55,6 +58,8 @@ struct StackFrameInfo {
     std::string path;
     /// DAP `sourceReference` when the adapter serves source without a disk path.
     std::int64_t source_reference = 0;
+    /// DAP `instructionPointerReference` for disassembly / memory views.
+    std::string instruction_pointer_reference;
 };
 
 struct ThreadStackInfo {
@@ -148,6 +153,9 @@ class DebugUiModel {
     bool supports_data_breakpoints = false;
     bool supports_function_breakpoints = false;
     bool supports_completions_request = false;
+    bool supports_read_memory_request = false;
+    bool supports_write_memory_request = false;
+    bool supports_disassemble_request = false;
 
     struct ExceptionBreakpointFilterInfo {
         std::string filter;

@@ -288,6 +288,38 @@ impl CSession {
         }
     }
 
+    pub fn read_memory_json(&self, memory_reference: &str, offset: i64, count: i64) -> Result<String> {
+        let result = match &self.inner {
+            SessionEngine::Dap(session) => session.read_memory(memory_reference, offset, count)?,
+            SessionEngine::Rr(_) => anyhow::bail!("readMemory is not supported in rr sessions"),
+        };
+        serde_json::to_string(&result).context("failed to serialize readMemory result")
+    }
+
+    pub fn write_memory_json(&self, memory_reference: &str, offset: i64, data: &str) -> Result<String> {
+        let result = match &self.inner {
+            SessionEngine::Dap(session) => session.write_memory(memory_reference, offset, data)?,
+            SessionEngine::Rr(_) => anyhow::bail!("writeMemory is not supported in rr sessions"),
+        };
+        serde_json::to_string(&result).context("failed to serialize writeMemory result")
+    }
+
+    pub fn disassemble_json(
+        &self,
+        memory_reference: &str,
+        instruction_offset: i64,
+        offset: i64,
+        instruction_count: i64,
+    ) -> Result<String> {
+        let instructions = match &self.inner {
+            SessionEngine::Dap(session) => {
+                session.disassemble(memory_reference, instruction_offset, offset, instruction_count)?
+            }
+            SessionEngine::Rr(_) => anyhow::bail!("disassemble is not supported in rr sessions"),
+        };
+        serde_json::to_string(&instructions).context("failed to serialize disassemble result")
+    }
+
     pub fn fetch_step_in_targets_json(&self, frame_id: i64) -> Result<String> {
         let targets = match &self.inner {
             SessionEngine::Dap(session) => session.step_in_targets(frame_id)?,

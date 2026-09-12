@@ -121,6 +121,29 @@ class RustSessionBackend final : public SessionBackend {
         });
     }
 
+    std::optional<std::string> read_memory(const std::string& memory_reference, std::int64_t offset,
+                                           std::int64_t count) override {
+        return read_json_buffer([this, &memory_reference, offset, count](char* out, std::size_t cap) {
+            return tui_debug_read_memory(session_, memory_reference.c_str(), offset, count, out, cap);
+        });
+    }
+
+    std::optional<std::string> write_memory(const std::string& memory_reference, std::int64_t offset,
+                                            const std::string& hex_data) override {
+        return read_json_buffer([this, &memory_reference, offset, &hex_data](char* out, std::size_t cap) {
+            return tui_debug_write_memory(session_, memory_reference.c_str(), offset, hex_data.c_str(), out, cap);
+        });
+    }
+
+    std::optional<std::string> disassemble(const std::string& memory_reference, std::int64_t instruction_offset,
+                                         std::int64_t offset, std::int64_t instruction_count) override {
+        return read_json_buffer([this, &memory_reference, instruction_offset, offset, instruction_count](
+                                    char* out, std::size_t cap) {
+            return tui_debug_disassemble(session_, memory_reference.c_str(), instruction_offset, offset,
+                                         instruction_count, out, cap);
+        });
+    }
+
     bool send_command(const std::string& op, std::string& error_out) override {
         if (session_ == nullptr) {
             error_out = "no session";

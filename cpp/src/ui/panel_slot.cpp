@@ -16,6 +16,14 @@ std::string panel_type_label(SidebarPanelType type) {
         return "Breakpoints";
     case SidebarPanelType::Source:
         return "Source";
+    case SidebarPanelType::Memory:
+        return "Memory";
+    case SidebarPanelType::DisassemblyAsm:
+        return "Disassembly (ASM)";
+    case SidebarPanelType::DisassemblyBytes:
+        return "Disassembly (Hex)";
+    case SidebarPanelType::RuntimeSource:
+        return "Runtime Source";
     case SidebarPanelType::Repl:
         return "REPL";
     case SidebarPanelType::Console:

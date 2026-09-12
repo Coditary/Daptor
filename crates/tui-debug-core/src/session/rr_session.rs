@@ -13,6 +13,13 @@ use crate::session::{
 
 const LOCALS_SCOPE_REFERENCE: i64 = 1;
 
+fn rr_capabilities() -> AdapterCapabilities {
+    AdapterCapabilities {
+        supports_step_back: true,
+        ..AdapterCapabilities::default()
+    }
+}
+
 pub struct RrDebugSession {
     mi: MiClient,
     replay_child: Child,
@@ -270,6 +277,7 @@ impl RrDebugSession {
                         source_reference: None,
                     })
                 },
+                instruction_pointer_reference: None,
             })
             .collect::<Vec<_>>();
 
@@ -316,16 +324,7 @@ impl RrDebugSession {
             thread_stacks,
             scopes,
             variables: self.cached_variables.clone(),
-            capabilities: AdapterCapabilities {
-                supports_step_back: true,
-                supports_step_in_targets: false,
-                supports_goto_targets: false,
-                supports_data_breakpoints: false,
-                supports_function_breakpoints: false,
-                supports_completions_request: false,
-                supports_exception_info_request: false,
-                exception_breakpoint_filters: Vec::new(),
-            },
+            capabilities: rr_capabilities(),
             breakpoint_hits: vec![],
             exception_info: None,
         })
@@ -341,16 +340,7 @@ impl RrDebugSession {
             variables: vec![],
             breakpoint_hits: vec![],
             exception_info: None,
-            capabilities: AdapterCapabilities {
-                supports_step_back: true,
-                supports_step_in_targets: false,
-                supports_goto_targets: false,
-                supports_data_breakpoints: false,
-                supports_function_breakpoints: false,
-                supports_completions_request: false,
-                supports_exception_info_request: false,
-                exception_breakpoint_filters: Vec::new(),
-            },
+            capabilities: rr_capabilities(),
         }
     }
 }

@@ -534,6 +534,49 @@ class MockSessionBackend final : public SessionBackend {
         return "# mock adapter source\nimport json\n\ndef encode(obj):\n    return json.dumps(obj)\n";
     }
 
+    std::optional<std::string> read_memory(const std::string& memory_reference, std::int64_t offset,
+                                           std::int64_t count) override {
+        if (!launched_ || memory_reference.empty() || count <= 0) {
+            return std::nullopt;
+        }
+        std::string hex;
+        for (std::int64_t i = 0; i < count; ++i) {
+            const int value = static_cast<int>((offset + i) % 256);
+            char buffer[3];
+            std::snprintf(buffer, sizeof(buffer), "%02x", value);
+            hex += buffer;
+        }
+        return std::string(R"({"address":"0x1000","data":")") + hex + R"(","unreadableBytes":0})";
+    }
+
+    std::optional<std::string> write_memory(const std::string& memory_reference, std::int64_t offset,
+                                            const std::string& hex_data) override {
+        if (!launched_ || memory_reference.empty()) {
+            return std::nullopt;
+        }
+        const std::int64_t bytes_written = static_cast<std::int64_t>(hex_data.size() / 2);
+        return R"({"offset":)" + std::to_string(offset) + R"(,"bytesWritten":)" + std::to_string(bytes_written) + "}";
+    }
+
+    std::optional<std::string> disassemble(const std::string& memory_reference, std::int64_t instruction_offset,
+                                           std::int64_t offset, std::int64_t instruction_count) override {
+        if (!launched_ || memory_reference.empty() || instruction_count <= 0) {
+            return std::nullopt;
+        }
+        std::ostringstream json;
+        json << '[';
+        for (std::int64_t i = 0; i < instruction_count; ++i) {
+            if (i > 0) {
+                json << ',';
+            }
+            const std::int64_t address = 0x1000 + offset + instruction_offset + i * 4;
+            json << R"({"address":"0x)" << std::hex << address << std::dec
+                 << R"(","instructionBytes":"48 89 e5","instruction":"mov    %rsp, %rbp","line":1})";
+        }
+        json << ']';
+        return json.str();
+    }
+
     std::optional<std::string> fetch_variables_json(std::int64_t variables_reference,
                                                     const std::string& /*scope_name*/) override {
         if (!launched_) {

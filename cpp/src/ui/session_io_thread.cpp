@@ -266,6 +266,43 @@ void SessionIoThread::request_source_fetch(std::int64_t source_reference, const 
     cv_.notify_all();
 }
 
+void SessionIoThread::request_memory_fetch(const std::string& memory_reference, std::int64_t offset,
+                                           std::int64_t count, std::uint64_t slot_id) {
+    {
+        std::lock_guard lock(mutex_);
+        memory_fetch_request_ = MemoryFetchRequest{memory_reference, offset, count, slot_id};
+    }
+    cv_.notify_all();
+}
+
+void SessionIoThread::request_disassembly_fetch(const std::string& memory_reference, std::int64_t instruction_offset,
+                                              std::int64_t offset, std::int64_t instruction_count,
+                                              std::uint64_t slot_id) {
+    {
+        std::lock_guard lock(mutex_);
+        disassembly_fetch_request_ =
+            DisassemblyFetchRequest{memory_reference, instruction_offset, offset, instruction_count, slot_id};
+    }
+    cv_.notify_all();
+}
+
+void SessionIoThread::request_runtime_source_fetch(std::int64_t source_reference, std::uint64_t slot_id) {
+    {
+        std::lock_guard lock(mutex_);
+        runtime_source_fetch_request_ = RuntimeSourceFetchRequest{source_reference, slot_id};
+    }
+    cv_.notify_all();
+}
+
+void SessionIoThread::post_write_memory(const std::string& memory_reference, std::int64_t offset,
+                                        const std::string& hex_data, std::uint64_t slot_id) {
+    {
+        std::lock_guard lock(mutex_);
+        write_memory_request_ = WriteMemoryRequest{memory_reference, offset, hex_data, slot_id};
+    }
+    cv_.notify_all();
+}
+
 bool SessionIoThread::try_pop_event(SessionIoEvent& out) {
     std::lock_guard lock(events_mutex_);
     if (events_.empty()) {
@@ -414,6 +451,10 @@ void SessionIoThread::clear_pending_adapter_work() {
     highlight_request_.reset();
     source_fetch_reference_.reset();
     source_fetch_cache_key_.clear();
+    memory_fetch_request_.reset();
+    disassembly_fetch_request_.reset();
+    runtime_source_fetch_request_.reset();
+    write_memory_request_.reset();
 }
 
 bool SessionIoThread::has_pending_command() const {
@@ -555,6 +596,131 @@ void SessionIoThread::process_source_fetch() {
     const auto source = backend_->fetch_source(source_reference);
     push_event(SessionIoEvent{SessionIoEventKind::SourceReady, source.has_value(),
                               source.value_or(std::string{}), cache_key, source_reference});
+}
+
+void SessionIoThread::process_memory_fetch() {
+    if (has_pending_execution_command()) {
+        return;
+    }
+
+    MemoryFetchRequest request;
+    {
+        std::lock_guard lock(mutex_);
+        if (!memory_fetch_request_.has_value()) {
+            return;
+        }
+        request = *memory_fetch_request_;
+        memory_fetch_request_.reset();
+    }
+
+    if (!adapter_live_.load(std::memory_order_acquire)) {
+        SessionIoEvent event{SessionIoEventKind::MemoryReady, false, {}, request.memory_reference};
+        event.slot_id = request.slot_id;
+        event.memory_offset = request.offset;
+        push_event(std::move(event));
+        return;
+    }
+
+    const auto json = backend_->read_memory(request.memory_reference, request.offset, request.count);
+    SessionIoEvent event{SessionIoEventKind::MemoryReady, json.has_value(), json.value_or(std::string{}),
+                         request.memory_reference};
+    event.slot_id = request.slot_id;
+    event.memory_offset = request.offset;
+    push_event(std::move(event));
+}
+
+void SessionIoThread::process_disassembly_fetch() {
+    if (has_pending_execution_command()) {
+        return;
+    }
+
+    DisassemblyFetchRequest request;
+    {
+        std::lock_guard lock(mutex_);
+        if (!disassembly_fetch_request_.has_value()) {
+            return;
+        }
+        request = *disassembly_fetch_request_;
+        disassembly_fetch_request_.reset();
+    }
+
+    if (!adapter_live_.load(std::memory_order_acquire)) {
+        SessionIoEvent event{SessionIoEventKind::DisassemblyReady, false, {}, request.memory_reference};
+        event.slot_id = request.slot_id;
+        push_event(std::move(event));
+        return;
+    }
+
+    const auto json = backend_->disassemble(request.memory_reference, request.instruction_offset, request.offset,
+                                            request.instruction_count);
+    SessionIoEvent event{SessionIoEventKind::DisassemblyReady, json.has_value(), json.value_or(std::string{}),
+                         request.memory_reference};
+    event.slot_id = request.slot_id;
+    push_event(std::move(event));
+}
+
+void SessionIoThread::process_runtime_source_fetch() {
+    if (has_pending_execution_command()) {
+        return;
+    }
+
+    RuntimeSourceFetchRequest request;
+    {
+        std::lock_guard lock(mutex_);
+        if (!runtime_source_fetch_request_.has_value()) {
+            return;
+        }
+        request = *runtime_source_fetch_request_;
+        runtime_source_fetch_request_.reset();
+    }
+
+    if (!adapter_live_.load(std::memory_order_acquire)) {
+        SessionIoEvent event{SessionIoEventKind::RuntimeSourceReady, false, {}, {}, request.source_reference};
+        event.slot_id = request.slot_id;
+        push_event(std::move(event));
+        return;
+    }
+
+    const auto source = backend_->fetch_source(request.source_reference);
+    SessionIoEvent event{SessionIoEventKind::RuntimeSourceReady, source.has_value(), source.value_or(std::string{}),
+                         {}, request.source_reference};
+    event.slot_id = request.slot_id;
+    push_event(std::move(event));
+}
+
+void SessionIoThread::process_write_memory() {
+    if (has_pending_execution_command()) {
+        return;
+    }
+
+    WriteMemoryRequest request;
+    {
+        std::lock_guard lock(mutex_);
+        if (!write_memory_request_.has_value()) {
+            return;
+        }
+        request = *write_memory_request_;
+        write_memory_request_.reset();
+    }
+
+    if (!adapter_live_.load(std::memory_order_acquire)) {
+        SessionIoEvent event{SessionIoEventKind::WriteMemoryFinished, false, {}, request.memory_reference};
+        event.slot_id = request.slot_id;
+        event.memory_offset = request.offset;
+        push_event(std::move(event));
+        return;
+    }
+
+    const auto json = backend_->write_memory(request.memory_reference, request.offset, request.hex_data);
+    std::string payload = json.value_or(std::string{});
+    if (!json.has_value()) {
+        payload = backend_->last_error();
+    }
+    SessionIoEvent event{SessionIoEventKind::WriteMemoryFinished, json.has_value(), std::move(payload),
+                         request.memory_reference};
+    event.slot_id = request.slot_id;
+    event.memory_offset = request.offset;
+    push_event(std::move(event));
 }
 
 void SessionIoThread::process_highlight_request() {
@@ -937,6 +1103,10 @@ void SessionIoThread::thread_main() {
 
             if (adapter_live_.load(std::memory_order_acquire)) {
                 process_source_fetch();
+                process_memory_fetch();
+                process_disassembly_fetch();
+                process_runtime_source_fetch();
+                process_write_memory();
             }
 
             if (backend_active_.load(std::memory_order_acquire)) {
@@ -976,7 +1146,9 @@ void SessionIoThread::thread_main() {
                        (pending_breakpoints_path_.has_value() && pending_breakpoints_json_.has_value()) ||
                        scope_fetch_pending_ || !variable_children_fetch_queue_.empty() ||
                        highlight_request_.has_value() ||
-                       source_fetch_reference_.has_value() || step_in_targets_frame_.has_value() ||
+                       source_fetch_reference_.has_value() || memory_fetch_request_.has_value() ||
+                       disassembly_fetch_request_.has_value() || runtime_source_fetch_request_.has_value() ||
+                       write_memory_request_.has_value() || step_in_targets_frame_.has_value() ||
                        goto_targets_request_.has_value() ||
                        (!launch_started_.load(std::memory_order_acquire) && !program_path_.empty());
             });

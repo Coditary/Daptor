@@ -13,6 +13,9 @@ class ScopesPanel;
 class WatchesPanel;
 class StacksPanel;
 class BreakpointsPanel;
+class MemoryPanel;
+class DisassemblyPanel;
+class RuntimeSourcePanel;
 class SharedWidgetHost;
 
 struct SidebarSlot {
@@ -21,10 +24,25 @@ struct SidebarSlot {
     std::unique_ptr<WatchesPanel> watches;
     std::unique_ptr<StacksPanel> stacks;
     std::unique_ptr<BreakpointsPanel> breakpoints;
+    std::unique_ptr<MemoryPanel> memory;
+    std::unique_ptr<DisassemblyPanel> disassembly;
+    std::unique_ptr<RuntimeSourcePanel> runtime_source;
     std::unique_ptr<SharedWidgetHost> shared_host;
     std::vector<std::string> cached_scope_rows;
     std::vector<ScopeVariableRowMeta> cached_scope_row_meta;
     std::vector<WatchEntry> watches_data;
+    std::vector<std::string> cached_memory_lines;
+    std::vector<std::string> cached_disassembly_lines;
+    std::vector<std::string> cached_runtime_source_lines;
+    std::string cached_memory_reference;
+    std::string cached_memory_hex_data;
+    std::string cached_memory_response_address;
+    std::string memory_view_reference;
+    std::string memory_search_query;
+    std::vector<std::size_t> memory_search_matches;
+    int memory_search_match_index = -1;
+    std::int64_t cached_memory_read_offset = 0;
+    std::int64_t cached_runtime_source_reference = 0;
     bool tab_label_customized = false;
 
     SidebarSlot();

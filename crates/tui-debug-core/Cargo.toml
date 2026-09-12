@@ -11,6 +11,7 @@ crate-type = ["rlib", "staticlib", "cdylib"]
 
 [dependencies]
 anyhow = "1"
+base64 = "0.22"
 crossbeam-channel = "0.5"
 libc = "0.2"
 libloading = "0.8"

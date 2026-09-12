@@ -36,6 +36,36 @@ fn is_simd_register_name(name: &str) -> bool {
             && lower[2..].chars().all(|ch| ch.is_ascii_digit()))
 }
 
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{:02x}", byte);
+    }
+    out
+}
+
+fn hex_to_bytes(hex: &str) -> Result<Vec<u8>> {
+    let cleaned = hex
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>();
+    if cleaned.is_empty() {
+        return Ok(Vec::new());
+    }
+    if cleaned.len() % 2 != 0 {
+        bail!("hex input must have an even number of digits");
+    }
+    let mut out = Vec::with_capacity(cleaned.len() / 2);
+    let chars = cleaned.as_bytes();
+    for i in (0..chars.len()).step_by(2) {
+        let pair = std::str::from_utf8(&chars[i..i + 2]).context("invalid hex digit")?;
+        let byte = u8::from_str_radix(pair, 16).context("invalid hex digit")?;
+        out.push(byte);
+    }
+    Ok(out)
+}
+
 /// Which DAP adapter backs this session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DebugAdapterKind {
@@ -82,7 +112,48 @@ pub struct AdapterCapabilities {
     #[serde(default)]
     pub supports_exception_info_request: bool,
     #[serde(default)]
+    pub supports_read_memory_request: bool,
+    #[serde(default)]
+    pub supports_write_memory_request: bool,
+    #[serde(default)]
+    pub supports_disassemble_request: bool,
+    #[serde(default)]
     pub exception_breakpoint_filters: Vec<ExceptionBreakpointFilter>,
+}
+
+/// One disassembled machine instruction from DAP `disassemble`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DisassembledInstruction {
+    pub address: String,
+    #[serde(rename = "instructionBytes", default, skip_serializing_if = "Option::is_none")]
+    pub instruction_bytes: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instruction: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column: Option<i64>,
+}
+
+/// Result of DAP `readMemory` (hex-encoded bytes for the C API layer).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadMemoryResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
+    /// Raw bytes as lowercase hex (two digits per byte).
+    pub data: String,
+    #[serde(rename = "unreadableBytes", default, skip_serializing_if = "Option::is_none")]
+    pub unreadable_bytes: Option<i64>,
+}
+
+/// Result of DAP `writeMemory`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WriteMemoryResult {
+    pub offset: i64,
+    #[serde(rename = "bytesWritten")]
+    pub bytes_written: i64,
 }
 
 /// A single REPL completion candidate from the debug adapter.
@@ -321,6 +392,9 @@ pub struct DebugSession {
     supports_function_breakpoints: bool,
     supports_completions_request: bool,
     supports_exception_info_request: bool,
+    supports_read_memory_request: bool,
+    supports_write_memory_request: bool,
+    supports_disassemble_request: bool,
     exception_breakpoint_filters: Vec<ExceptionBreakpointFilter>,
     adapter: DebugAdapterKind,
     breakpoint_hit_counts: HashMap<(String, u32), u32>,
@@ -361,6 +435,9 @@ impl DebugSession {
             supports_function_breakpoints: false,
             supports_completions_request: false,
             supports_exception_info_request: false,
+            supports_read_memory_request: false,
+            supports_write_memory_request: false,
+            supports_disassemble_request: false,
             exception_breakpoint_filters: Vec::new(),
             adapter: DebugAdapterKind::Debugpy,
             breakpoint_hit_counts: HashMap::new(),
@@ -404,6 +481,9 @@ impl DebugSession {
             supports_function_breakpoints: false,
             supports_completions_request: false,
             supports_exception_info_request: false,
+            supports_read_memory_request: false,
+            supports_write_memory_request: false,
+            supports_disassemble_request: false,
             exception_breakpoint_filters: Vec::new(),
             adapter: DebugAdapterKind::Lldb,
             breakpoint_hit_counts: HashMap::new(),
@@ -475,13 +555,26 @@ impl DebugSession {
                 "supportsVariablePaging": false,
                 "supportsSetVariable": true,
                 "supportsRunInTerminalRequest": true,
+                "supportsMemoryReferences": true,
+                "supportsMemoryEvent": true,
             }),
         )?;
         let init_body = self.wait_dap_response(init_seq, REQUEST_TIMEOUT)?;
         self.merge_capabilities_from_value(&init_body);
-        if self.adapter == DebugAdapterKind::Lldb && !self.supports_function_breakpoints {
-            // lldb-dap supports setFunctionBreakpoints even when initialize omits the flag.
-            self.supports_function_breakpoints = true;
+        if self.adapter == DebugAdapterKind::Lldb {
+            if !self.supports_function_breakpoints {
+                // lldb-dap supports setFunctionBreakpoints even when initialize omits the flag.
+                self.supports_function_breakpoints = true;
+            }
+            if !self.supports_read_memory_request {
+                self.supports_read_memory_request = true;
+            }
+            if !self.supports_write_memory_request {
+                self.supports_write_memory_request = true;
+            }
+            if !self.supports_disassemble_request {
+                self.supports_disassemble_request = true;
+            }
         }
         info!(
             "DAP initialize complete (step_back={}, step_in_targets={}, goto_targets={}, function_bps={}), launching debuggee",
@@ -616,6 +709,24 @@ impl DebugSession {
         {
             self.supports_exception_info_request = enabled;
         }
+        if let Some(enabled) = value
+            .get("supportsReadMemoryRequest")
+            .and_then(|value| value.as_bool())
+        {
+            self.supports_read_memory_request = enabled;
+        }
+        if let Some(enabled) = value
+            .get("supportsWriteMemoryRequest")
+            .and_then(|value| value.as_bool())
+        {
+            self.supports_write_memory_request = enabled;
+        }
+        if let Some(enabled) = value
+            .get("supportsDisassembleRequest")
+            .and_then(|value| value.as_bool())
+        {
+            self.supports_disassemble_request = enabled;
+        }
         if let Some(filters) = value
             .get("exceptionBreakpointFilters")
             .and_then(|value| value.as_array())
@@ -668,6 +779,9 @@ impl DebugSession {
             supports_function_breakpoints: self.supports_function_breakpoints,
             supports_completions_request: self.supports_completions_request,
             supports_exception_info_request: self.supports_exception_info_request,
+            supports_read_memory_request: self.supports_read_memory_request,
+            supports_write_memory_request: self.supports_write_memory_request,
+            supports_disassemble_request: self.supports_disassemble_request,
             exception_breakpoint_filters: self.exception_breakpoint_filters.clone(),
         };
         snapshot.breakpoint_hits = self.collect_breakpoint_hits();
@@ -1385,6 +1499,109 @@ impl DebugSession {
 
         let parsed = serde_json::from_value::<SourceBody>(body).context("invalid source response")?;
         Ok(parsed.content)
+    }
+
+    /// Read raw memory via DAP `readMemory`.
+    pub fn read_memory(&self, memory_reference: &str, offset: i64, count: i64) -> Result<ReadMemoryResult> {
+        if !self.supports_read_memory_request {
+            bail!("debug adapter does not support readMemory");
+        }
+        if memory_reference.is_empty() {
+            bail!("memory reference must not be empty");
+        }
+        if count <= 0 {
+            bail!("readMemory count must be positive");
+        }
+
+        let seq = self.transport.send_request(
+            "readMemory",
+            json!({
+                "memoryReference": memory_reference,
+                "offset": offset,
+                "count": count,
+            }),
+        )?;
+        let body = self.wait_dap_response(seq, REQUEST_TIMEOUT)?;
+
+        #[derive(Deserialize)]
+        struct ReadMemoryBody {
+            address: Option<String>,
+            data: String,
+            #[serde(rename = "unreadableBytes")]
+            unreadable_bytes: Option<i64>,
+        }
+
+        let parsed = serde_json::from_value::<ReadMemoryBody>(body).context("invalid readMemory response")?;
+        let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, parsed.data.as_bytes())
+            .context("invalid base64 in readMemory response")?;
+        Ok(ReadMemoryResult {
+            address: parsed.address,
+            data: bytes_to_hex(&bytes),
+            unreadable_bytes: parsed.unreadable_bytes,
+        })
+    }
+
+    /// Write raw memory via DAP `writeMemory`. `data` is lowercase hex (two digits per byte).
+    pub fn write_memory(&self, memory_reference: &str, offset: i64, data: &str) -> Result<WriteMemoryResult> {
+        if !self.supports_write_memory_request {
+            bail!("debug adapter does not support writeMemory");
+        }
+        if memory_reference.is_empty() {
+            bail!("memory reference must not be empty");
+        }
+
+        let bytes = hex_to_bytes(data)?;
+        let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
+        let seq = self.transport.send_request(
+            "writeMemory",
+            json!({
+                "memoryReference": memory_reference,
+                "offset": offset,
+                "data": encoded,
+                "allowPartial": true,
+            }),
+        )?;
+        let body = self.wait_dap_response(seq, REQUEST_TIMEOUT)?;
+        serde_json::from_value::<WriteMemoryResult>(body).context("invalid writeMemory response")
+    }
+
+    /// Disassemble instructions via DAP `disassemble`.
+    pub fn disassemble(
+        &self,
+        memory_reference: &str,
+        instruction_offset: i64,
+        offset: i64,
+        instruction_count: i64,
+    ) -> Result<Vec<DisassembledInstruction>> {
+        if !self.supports_disassemble_request {
+            bail!("debug adapter does not support disassemble");
+        }
+        if memory_reference.is_empty() {
+            bail!("memory reference must not be empty");
+        }
+        if instruction_count <= 0 {
+            bail!("disassemble instructionCount must be positive");
+        }
+
+        let seq = self.transport.send_request(
+            "disassemble",
+            json!({
+                "memoryReference": memory_reference,
+                "instructionOffset": instruction_offset,
+                "offset": offset,
+                "instructionCount": instruction_count,
+            }),
+        )?;
+        let body = self.wait_dap_response(seq, REQUEST_TIMEOUT)?;
+
+        #[derive(Deserialize)]
+        struct DisassembleBody {
+            instructions: Vec<DisassembledInstruction>,
+        }
+
+        let parsed =
+            serde_json::from_value::<DisassembleBody>(body).context("invalid disassemble response")?;
+        Ok(parsed.instructions)
     }
 
     /// Push UI breakpoints for one source file to the debug adapter.

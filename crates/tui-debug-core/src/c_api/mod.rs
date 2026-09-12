@@ -1102,6 +1102,131 @@ pub extern "C" fn tui_debug_fetch_goto_targets(
     }
 }
 
+/// Read memory via DAP `readMemory` into `json_out` as JSON.
+#[no_mangle]
+pub extern "C" fn tui_debug_read_memory(
+    session: *mut c_void,
+    memory_reference: *const c_char,
+    offset: i64,
+    count: i64,
+    json_out: *mut c_char,
+    cap: usize,
+) -> c_int {
+    clear_last_error();
+
+    let Some(session) = session_from_ptr(session) else {
+        return -1;
+    };
+
+    let memory_reference = match c_str_to_rust(memory_reference, "memory_reference") {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err);
+            return -1;
+        }
+    };
+
+    match session.read_memory_json(memory_reference, offset, count) {
+        Ok(json) => match write_json_to_buffer(&json, json_out, cap) {
+            Ok(()) => 0,
+            Err(err) => {
+                set_last_error(err);
+                -1
+            }
+        },
+        Err(err) => {
+            set_last_error(err.to_string());
+            -1
+        }
+    }
+}
+
+/// Write memory via DAP `writeMemory`. `data` is lowercase hex (two digits per byte).
+#[no_mangle]
+pub extern "C" fn tui_debug_write_memory(
+    session: *mut c_void,
+    memory_reference: *const c_char,
+    offset: i64,
+    data: *const c_char,
+    json_out: *mut c_char,
+    cap: usize,
+) -> c_int {
+    clear_last_error();
+
+    let Some(session) = session_from_ptr(session) else {
+        return -1;
+    };
+
+    let memory_reference = match c_str_to_rust(memory_reference, "memory_reference") {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err);
+            return -1;
+        }
+    };
+    let data = match c_str_to_rust(data, "data") {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err);
+            return -1;
+        }
+    };
+
+    match session.write_memory_json(memory_reference, offset, data) {
+        Ok(json) => match write_json_to_buffer(&json, json_out, cap) {
+            Ok(()) => 0,
+            Err(err) => {
+                set_last_error(err);
+                -1
+            }
+        },
+        Err(err) => {
+            set_last_error(err.to_string());
+            -1
+        }
+    }
+}
+
+/// Disassemble instructions via DAP `disassemble` into `json_out` as a JSON array.
+#[no_mangle]
+pub extern "C" fn tui_debug_disassemble(
+    session: *mut c_void,
+    memory_reference: *const c_char,
+    instruction_offset: i64,
+    offset: i64,
+    instruction_count: i64,
+    json_out: *mut c_char,
+    cap: usize,
+) -> c_int {
+    clear_last_error();
+
+    let Some(session) = session_from_ptr(session) else {
+        return -1;
+    };
+
+    let memory_reference = match c_str_to_rust(memory_reference, "memory_reference") {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err);
+            return -1;
+        }
+    };
+
+    match session.disassemble_json(memory_reference, instruction_offset, offset, instruction_count) {
+        Ok(json) => match write_json_to_buffer(&json, json_out, cap) {
+            Ok(()) => 0,
+            Err(err) => {
+                set_last_error(err);
+                -1
+            }
+        },
+        Err(err) => {
+            set_last_error(err.to_string());
+            -1
+        }
+    }
+}
+
 #[cfg(test)]
 mod exception_breakpoint_settings_tests {
     use super::*;

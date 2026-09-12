@@ -60,6 +60,12 @@ class SessionBackend {
     virtual std::optional<std::string> fetch_variables_json(std::int64_t variables_reference,
                                                             const std::string& scope_name = {}) = 0;
     virtual std::optional<std::string> fetch_source(std::int64_t source_reference) = 0;
+    virtual std::optional<std::string> read_memory(const std::string& memory_reference, std::int64_t offset,
+                                                   std::int64_t count) = 0;
+    virtual std::optional<std::string> write_memory(const std::string& memory_reference, std::int64_t offset,
+                                                  const std::string& hex_data) = 0;
+    virtual std::optional<std::string> disassemble(const std::string& memory_reference, std::int64_t instruction_offset,
+                                                   std::int64_t offset, std::int64_t instruction_count) = 0;
     virtual std::optional<std::string> highlight_viewport(const std::string& language, const std::string& source,
                                                           int first_line, int line_count,
                                                           std::string& error_out) = 0;

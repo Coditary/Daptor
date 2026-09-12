@@ -99,6 +99,8 @@ pub struct StackFrame {
     pub line: i64,
     pub column: i64,
     pub source: Option<Source>,
+    #[serde(rename = "instructionPointerReference", default, skip_serializing_if = "Option::is_none")]
+    pub instruction_pointer_reference: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
