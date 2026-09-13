@@ -143,6 +143,11 @@ bool BreakpointsPanel::paths_match(const std::string& left, const std::string& r
     return left == right;
 }
 
+void BreakpointsPanel::set_kind_filter(std::optional<BreakpointRowKind> kind_filter) {
+    kind_filter_ = kind_filter;
+    rebuild_display();
+}
+
 void BreakpointsPanel::set_breakpoints(std::vector<BreakpointRow> rows) {
     rows_ = std::move(rows);
     const auto kind_order = [](BreakpointRowKind kind) {
@@ -273,6 +278,9 @@ void BreakpointsPanel::rebuild_display() {
     auto section_expanded = [this](const char* section_key) {
         return collapsed_group_keys_.count(std::string("section:") + section_key) == 0;
     };
+    auto should_show_kind_header = [this](BreakpointRowKind kind) {
+        return !kind_filter_.has_value() || *kind_filter_ != kind;
+    };
     auto add_group_header = [&](const std::string& title, const std::string& group_key, bool expanded) {
         if (!items.empty()) {
             items.push_back("");
@@ -297,7 +305,7 @@ void BreakpointsPanel::rebuild_display() {
     for (std::size_t index = 0; index < rows_.size(); ++index) {
         const BreakpointRow& row = rows_[index];
         if (row.kind == BreakpointRowKind::Data) {
-            if (!data_header_added) {
+            if (!data_header_added && should_show_kind_header(BreakpointRowKind::Data)) {
                 data_section_collapsed = !section_expanded("data");
                 add_group_header("Data:", "section:data", !data_section_collapsed);
                 data_header_added = true;
@@ -318,7 +326,7 @@ void BreakpointsPanel::rebuild_display() {
         }
 
         if (row.kind == BreakpointRowKind::Function) {
-            if (!function_header_added) {
+            if (!function_header_added && should_show_kind_header(BreakpointRowKind::Function)) {
                 function_section_collapsed = !section_expanded("function");
                 add_group_header("Functions:", "section:function", !function_section_collapsed);
                 function_header_added = true;
@@ -336,7 +344,7 @@ void BreakpointsPanel::rebuild_display() {
         }
 
         if (row.kind == BreakpointRowKind::Exception) {
-            if (!exception_header_added) {
+            if (!exception_header_added && should_show_kind_header(BreakpointRowKind::Exception)) {
                 exception_section_collapsed = !section_expanded("exception");
                 if (inline_edit_.active && inline_edit_.exception) {
                     exception_section_collapsed = false;

@@ -489,6 +489,7 @@ void append_scope_variables(const tui_debug_ui::DebugUiModel& model, std::int64_
 
 std::vector<std::string> build_scope_rows(const tui_debug_ui::DebugUiModel& model, const ExpandedScopePaths& expanded,
                                           const PendingScopePaths& pending,
+                                          const std::unordered_set<std::string>& collapsed_sections,
                                           std::vector<tui_debug_ui::ScopeVariableRowMeta>& meta,
                                           const std::optional<std::string>& scope_filter = std::nullopt) {
     std::vector<std::string> scope_rows;
@@ -497,11 +498,25 @@ std::vector<std::string> build_scope_rows(const tui_debug_ui::DebugUiModel& mode
         if (scope_filter.has_value() && scope.name != *scope_filter) {
             continue;
         }
-        scope_rows.push_back(scope.name + ":");
-        meta.push_back({});
+        const bool scoped_panel = scope_filter.has_value();
+        if (!scoped_panel) {
+            const bool section_expanded = collapsed_sections.count(scope.name) == 0;
+            std::string header = (section_expanded ? tui_debug_ui::kScopeExpandExpanded
+                                                   : tui_debug_ui::kScopeExpandCollapsed) +
+                                 scope.name + ":";
+            scope_rows.push_back(std::move(header));
+            tui_debug_ui::ScopeVariableRowMeta header_meta{};
+            header_meta.is_scope_section = true;
+            header_meta.scope_section_name = scope.name;
+            meta.push_back(header_meta);
+            if (!section_expanded) {
+                continue;
+            }
+        }
         if (scope.variables_reference > 0) {
             const std::string path_prefix = scope.name + std::string(1, kScopePathSeparator);
-            append_scope_variables(model, scope.variables_reference, 1, path_prefix, expanded, pending, scope_rows,
+            const int depth = scoped_panel ? 0 : 1;
+            append_scope_variables(model, scope.variables_reference, depth, path_prefix, expanded, pending, scope_rows,
                                    meta);
         }
     }
@@ -1528,6 +1543,8 @@ void DebugApp::apply_snapshot_json_payload(const std::string& json) {
     }
     step_in_targets_pending_ = false;
     model_.apply_snapshot_json(json);
+    remember_scope_names_from_model();
+    remember_threads_from_model();
     if (adapter_ == DebugAdapter::Lldb) {
         model_.supports_function_breakpoints = true;
     }
@@ -1652,6 +1669,16 @@ void DebugApp::toggle_scope_row_expand(std::uint64_t slot_id, int row_index) {
     }
 
     const ScopeVariableRowMeta& row_meta = slot->cached_scope_row_meta[static_cast<std::size_t>(row_index)];
+    if (row_meta.is_scope_section) {
+        if (collapsed_scope_sections_.count(row_meta.scope_section_name) > 0) {
+            collapsed_scope_sections_.erase(row_meta.scope_section_name);
+        } else {
+            collapsed_scope_sections_.insert(row_meta.scope_section_name);
+        }
+        refresh_scope_rows();
+        request_repaint();
+        return;
+    }
     if (row_meta.expand_path.empty() || row_meta.expand_reference <= 0) {
         return;
     }
@@ -2068,7 +2095,8 @@ void DebugApp::sync_ui_from_model() {
             }
             std::vector<ScopeVariableRowMeta> meta;
             std::vector<std::string> scope_rows =
-                build_scope_rows(model_, expanded_scope_paths_, pending_scope_paths_, meta, slot.config.scope_filter);
+                build_scope_rows(model_, expanded_scope_paths_, pending_scope_paths_, collapsed_scope_sections_, meta,
+                                 slot.config.scope_filter);
             const bool next_has_values = scope_rows_include_variables(scope_rows);
             const bool cached_has_values = scope_rows_include_variables(slot.cached_scope_rows);
             const bool keep_stale_values = cached_has_values && !next_has_values &&
@@ -2185,7 +2213,92 @@ void DebugApp::invalidate_scope_variables() {
         slot.cached_scope_row_meta.clear();
     });
     expanded_scope_paths_.clear();
+    collapsed_scope_sections_.clear();
+    known_scope_names_.clear();
+    known_threads_.clear();
     pending_scope_paths_.clear();
+}
+
+void DebugApp::remember_threads_from_model() {
+    for (const ThreadInfo& thread : model_.threads) {
+        const auto existing = std::find_if(known_threads_.begin(), known_threads_.end(),
+                                           [&](const ThreadInfo& known) { return known.id == thread.id; });
+        if (existing == known_threads_.end()) {
+            known_threads_.push_back(thread);
+        } else if (!thread.name.empty()) {
+            existing->name = thread.name;
+        }
+    }
+}
+
+std::vector<ThreadInfo> DebugApp::available_thread_menu_threads() const {
+    std::vector<ThreadInfo> threads;
+    std::unordered_set<std::int64_t> seen;
+    auto add_thread = [&](const ThreadInfo& thread) {
+        if (thread.id <= 0 || seen.count(thread.id) > 0) {
+            return;
+        }
+        seen.insert(thread.id);
+        threads.push_back(thread);
+    };
+
+    for (const ThreadInfo& thread : model_.threads) {
+        add_thread(thread);
+    }
+    for (const ThreadInfo& thread : known_threads_) {
+        add_thread(thread);
+    }
+    for (const ThreadStackContent& thread : cached_thread_stack_contents_) {
+        ThreadInfo info{};
+        info.id = thread.id;
+        info.name = thread.name;
+        add_thread(info);
+    }
+    return threads;
+}
+
+void DebugApp::remember_scope_names_from_model() {
+    for (const ScopeInfo& scope : model_.scopes) {
+        if (scope.name.empty()) {
+            continue;
+        }
+        if (std::find(known_scope_names_.begin(), known_scope_names_.end(), scope.name) == known_scope_names_.end()) {
+            known_scope_names_.push_back(scope.name);
+        }
+    }
+}
+
+std::vector<std::string> DebugApp::available_scope_names() const {
+    std::vector<std::string> names;
+    std::unordered_set<std::string> seen;
+    auto add_name = [&](const std::string& name) {
+        if (name.empty() || seen.count(name) > 0) {
+            return;
+        }
+        seen.insert(name);
+        names.push_back(name);
+    };
+
+    for (const ScopeInfo& scope : model_.scopes) {
+        add_name(scope.name);
+    }
+    for (const std::string& name : known_scope_names_) {
+        add_name(name);
+    }
+    for (const std::string& path : expanded_scope_paths_) {
+        const std::size_t separator = path.find(kScopePathSeparator);
+        add_name(separator == std::string::npos ? path : path.substr(0, separator));
+    }
+    for (LayoutNodeId leaf_id : layout_tree_.leaf_ids()) {
+        for (const SidebarSlot& slot : layout_tree_.node(leaf_id).leaf.slots) {
+            for (const ScopeVariableRowMeta& row : slot.cached_scope_row_meta) {
+                if (row.is_scope_section) {
+                    add_name(row.scope_section_name);
+                }
+            }
+        }
+    }
+    return names;
 }
 
 void DebugApp::request_scope_variables_refresh() {
@@ -5396,7 +5509,8 @@ void DebugApp::refresh_all_scope_slots() {
         }
         std::vector<ScopeVariableRowMeta> meta;
         slot.cached_scope_rows =
-            build_scope_rows(model_, expanded_scope_paths_, pending_scope_paths_, meta, slot.config.scope_filter);
+            build_scope_rows(model_, expanded_scope_paths_, pending_scope_paths_, collapsed_scope_sections_, meta,
+                             slot.config.scope_filter);
         slot.cached_scope_row_meta = std::move(meta);
         sync_scope_slot(slot);
     });
@@ -5422,10 +5536,6 @@ void DebugApp::sync_thread_slot(SidebarSlot& slot, const std::vector<ThreadStack
     if (slot.stacks == nullptr || slot.config.type != SidebarPanelType::Threads) {
         return;
     }
-    if (!slot.config.thread_filter.has_value() && !slot.config.thread_id_filter.has_value()) {
-        slot.stacks->set_thread_stacks(threads);
-        return;
-    }
 
     std::vector<ThreadStackContent> filtered;
     filtered.reserve(threads.size());
@@ -5441,6 +5551,15 @@ void DebugApp::sync_thread_slot(SidebarSlot& slot, const std::vector<ThreadStack
         }
         filtered.push_back(thread);
     }
+
+    ThreadStackDisplayOptions options{};
+    if (slot.config.thread_id_filter.has_value()) {
+        options.hide_thread_headers = true;
+        options.collapsible_threads = false;
+    } else {
+        options.collapsible_threads = true;
+    }
+    slot.stacks->set_display_options(options);
     slot.stacks->set_thread_stacks(std::move(filtered));
 }
 
@@ -5448,6 +5567,8 @@ void DebugApp::sync_breakpoint_slot(SidebarSlot& slot, const std::vector<Breakpo
     if (slot.breakpoints == nullptr || slot.config.type != SidebarPanelType::Breakpoints) {
         return;
     }
+    slot.breakpoints->set_kind_filter(slot.config.breakpoint_filter);
+
     if (!slot.config.breakpoint_filter.has_value()) {
         slot.breakpoints->set_breakpoints(rows);
         return;
@@ -5473,10 +5594,10 @@ void DebugApp::show_add_scope_menu(LayoutNodeId leaf_id, SidebarPanelType type, 
         "All",
         [this, leaf_id, type]() { add_panel_to_leaf(leaf_id, type, std::nullopt); },
     });
-    for (const ScopeInfo& scope : model_.scopes) {
+    for (const std::string& scope_name : available_scope_names()) {
         items.push_back(ContextMenu::Item{
-            scope.name,
-            [this, leaf_id, type, name = scope.name]() { add_panel_to_leaf(leaf_id, type, name); },
+            scope_name,
+            [this, leaf_id, type, name = scope_name]() { add_panel_to_leaf(leaf_id, type, name); },
         });
     }
 
@@ -5496,8 +5617,8 @@ void DebugApp::show_add_panel_menu(tuinator::Point anchor, LayoutNodeId leaf_id)
         [this, leaf_id, anchor]() { show_add_scope_menu(leaf_id, SidebarPanelType::Variables, anchor); },
     });
     items.push_back(ContextMenu::Item{
-        "Watches ›",
-        [this, leaf_id, anchor]() { show_add_scope_menu(leaf_id, SidebarPanelType::Watches, anchor); },
+        "Watches",
+        [this, leaf_id]() { add_panel_to_leaf(leaf_id, SidebarPanelType::Watches); },
     });
     items.push_back(ContextMenu::Item{
         "Threads ›",
@@ -5596,7 +5717,7 @@ void DebugApp::show_add_thread_menu(LayoutNodeId leaf_id, tuinator::Point anchor
                               ThreadPanelFilter::Running);
         },
     });
-    for (const ThreadInfo& thread : model_.threads) {
+    for (const ThreadInfo& thread : available_thread_menu_threads()) {
         const std::string label =
             thread.name.empty() ? ("Thread " + std::to_string(thread.id)) : thread.name;
         items.push_back(ContextMenu::Item{
@@ -10141,8 +10262,8 @@ void DebugApp::resolve_watches_from_locals() {
         std::vector<std::string> scope_rows = slot.cached_scope_rows;
         if (scope_rows.empty()) {
             std::vector<ScopeVariableRowMeta> meta;
-            scope_rows = build_scope_rows(model_, expanded_scope_paths_, pending_scope_paths_, meta,
-                                          slot.config.scope_filter);
+            scope_rows = build_scope_rows(model_, expanded_scope_paths_, pending_scope_paths_,
+                                          collapsed_scope_sections_, meta, slot.config.scope_filter);
         }
         const bool locals_visible = !model_.variables.empty() || !model_.scope_variables.empty() ||
                                     scope_rows_include_variables(scope_rows);

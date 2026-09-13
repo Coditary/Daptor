@@ -85,6 +85,8 @@ struct ScopeVariableRowMeta {
     std::string expand_path;
     std::string variable_name;
     bool show_edit = false;
+    bool is_scope_section = false;
+    std::string scope_section_name;
 };
 
 struct VariableInfo {

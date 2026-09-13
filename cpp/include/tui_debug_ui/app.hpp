@@ -375,6 +375,10 @@ class DebugApp {
     [[nodiscard]] std::vector<WatchEntry>& active_watch_list();
     void show_add_panel_menu(tuinator::Point anchor, LayoutNodeId leaf_id);
     void show_add_scope_menu(LayoutNodeId leaf_id, SidebarPanelType type, tuinator::Point anchor);
+    [[nodiscard]] std::vector<std::string> available_scope_names() const;
+    void remember_scope_names_from_model();
+    [[nodiscard]] std::vector<ThreadInfo> available_thread_menu_threads() const;
+    void remember_threads_from_model();
     void show_add_breakpoint_menu(LayoutNodeId leaf_id, tuinator::Point anchor);
     void show_add_thread_menu(LayoutNodeId leaf_id, tuinator::Point anchor);
     void add_panel_to_leaf(LayoutNodeId leaf_id, SidebarPanelType type,
@@ -556,6 +560,9 @@ class DebugApp {
     std::string pending_source_fetch_key_;
     std::string cached_status_bar_text_;
     std::unordered_set<std::string> expanded_scope_paths_;
+    std::unordered_set<std::string> collapsed_scope_sections_;
+    std::vector<std::string> known_scope_names_;
+    std::vector<ThreadInfo> known_threads_;
     std::vector<ThreadStackContent> cached_thread_stack_contents_;
     std::unordered_set<std::string> pending_scope_paths_;
     std::vector<std::string> cached_stack_lines_;

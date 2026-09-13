@@ -102,6 +102,7 @@ class NavigableListView : public tuinator::ListView {
     [[nodiscard]] static bool is_inline_watch_edit_row(const std::string& item);
     [[nodiscard]] static bool is_watch_add_prompt_row(const std::string& item);
     [[nodiscard]] static bool scope_expand_arrow_hit(const std::string& item, int local_x);
+    [[nodiscard]] static bool is_scope_section_header_row(const std::string& item);
     [[nodiscard]] static std::optional<ScopeVariableRowParts> parse_scope_variable_row(std::string_view line);
     [[nodiscard]] static bool is_scope_loading_row(std::string_view line);
     using InlineEditChangeCallback = std::function<void(const std::string& value)>;

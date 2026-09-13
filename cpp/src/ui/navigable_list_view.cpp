@@ -61,7 +61,16 @@ bool is_breakpoint_exception_row_content(std::string_view content) {
     return content.size() >= 2 && (content.compare(0, 2, "\u2713 ") == 0 || content.compare(0, 2, "\u00b7 ") == 0);
 }
 
+std::string_view scope_header_text(std::string_view line) {
+    if (line.size() >= 3 &&
+        (line.compare(0, 3, kScopeExpandExpanded) == 0 || line.compare(0, 3, kScopeExpandCollapsed) == 0)) {
+        line.remove_prefix(3);
+    }
+    return line;
+}
+
 tuinator::Style scope_header_style(std::string_view line, const DapUiTheme& theme) {
+    line = scope_header_text(line);
     if (line.rfind("MainThread", 0) == 0) {
         return theme.thread_header;
     }
@@ -335,6 +344,11 @@ bool NavigableListView::is_inline_watch_edit_row(const std::string& item) {
 
 bool NavigableListView::is_watch_add_prompt_row(const std::string& item) {
     return item == kWatchAddPromptRow;
+}
+
+bool NavigableListView::is_scope_section_header_row(const std::string& item) {
+    return is_scope_header_row(item) && item.size() >= 3 &&
+           (item.compare(0, 3, kScopeExpandExpanded) == 0 || item.compare(0, 3, kScopeExpandCollapsed) == 0);
 }
 
 bool NavigableListView::scope_expand_arrow_hit(const std::string& item, int local_x) {
@@ -954,8 +968,14 @@ void NavigableListView::paint_themed_row(tuinator::Canvas& canvas, int row, int 
                 return;
             }
             if (is_scope_header_row(item)) {
-                draw_truncated(canvas, {column, row}, item, scope_header_style(item, *theme_),
-                               content_max_width - column);
+                if (is_scope_section_header_row(item)) {
+                    draw_segment(canvas, column, row, item.substr(0, 3), item_style_, content_max_width);
+                    draw_truncated(canvas, {column, row}, item.substr(3), scope_header_style(item, *theme_),
+                                   content_max_width - column);
+                } else {
+                    draw_truncated(canvas, {column, row}, item, scope_header_style(item, *theme_),
+                                   content_max_width - column);
+                }
                 return;
             }
 
@@ -1010,9 +1030,15 @@ void NavigableListView::paint_themed_row(tuinator::Canvas& canvas, int row, int 
         }
         case ListPaintMode::Stacks: {
             if (is_scope_header_row(item)) {
+                std::string_view header_text = item;
+                if (is_scope_section_header_row(item)) {
+                    draw_segment(canvas, column, row, item.substr(0, 3), item_style_, content_max_width);
+                    header_text = item.substr(3);
+                }
                 const tuinator::Style header_style =
-                    stopped_thread_headers_.contains(item) ? theme_->thread_stopped : theme_->thread_header;
-                draw_truncated(canvas, {column, row}, item, header_style, content_max_width - column);
+                    stopped_thread_headers_.contains(std::string(header_text)) ? theme_->thread_stopped
+                                                                               : theme_->thread_header;
+                draw_truncated(canvas, {column, row}, header_text, header_style, content_max_width - column);
                 return;
             }
 

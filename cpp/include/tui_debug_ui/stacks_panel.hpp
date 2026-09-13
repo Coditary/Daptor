@@ -8,6 +8,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace tuinator {
@@ -36,6 +37,11 @@ struct ThreadStackContent {
     std::vector<StackFrameRow> frames;
 };
 
+struct ThreadStackDisplayOptions {
+    bool collapsible_threads = true;
+    bool hide_thread_headers = false;
+};
+
 struct DapUiTheme;
 
 /// Threads and stack frames (nvim-dap-ui stacks element).
@@ -48,6 +54,7 @@ class StacksPanel {
     using ContextCallback = std::function<void(const StackFrameRow&, tuinator::Point anchor)>;
 
     std::unique_ptr<tuinator::Widget> release_widget();
+    void set_display_options(ThreadStackDisplayOptions options);
     void set_thread_stacks(std::vector<ThreadStackContent> threads);
     void set_lines(std::vector<std::string> lines);
     void set_on_activate(ActivateCallback callback);
@@ -58,11 +65,18 @@ class StacksPanel {
 
   private:
     [[nodiscard]] const StackFrameRow* frame_at_display_index(int index) const;
+    void rebuild_display();
+    [[nodiscard]] bool try_toggle_thread_expand(int display_index);
+    [[nodiscard]] static std::string thread_group_key(std::int64_t thread_id);
 
     std::unique_ptr<TitledScrollPane> pane_;
     NavigableListView* list_ = nullptr;
+    ThreadStackDisplayOptions display_options_{};
+    std::vector<ThreadStackContent> threads_;
+    std::unordered_set<std::string> collapsed_thread_keys_;
     std::vector<StackFrameRow> frames_;
     std::vector<int> display_to_frame_;
+    std::vector<std::string> display_thread_keys_;
     ActivateCallback on_activate_;
     ContextCallback on_context_;
     std::function<void()> on_continue_;

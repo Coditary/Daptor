@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -63,6 +64,7 @@ class BreakpointsPanel {
 
     std::unique_ptr<tuinator::Widget> release_widget();
     void set_breakpoints(std::vector<BreakpointRow> rows);
+    void set_kind_filter(std::optional<BreakpointRowKind> kind_filter);
     void set_on_activate(ActivateCallback callback);
     void set_on_context(ContextCallback callback);
     void set_on_remove(RemoveCallback callback);
@@ -131,6 +133,7 @@ class BreakpointsPanel {
     NavigableListView* list_ = nullptr;
     InlineEditTarget inline_edit_;
     int inline_edit_display_index_ = -1;
+    std::optional<BreakpointRowKind> kind_filter_;
     std::vector<BreakpointRow> rows_;
     std::vector<int> display_to_row_;
     std::vector<DisplayLineKind> display_kind_;

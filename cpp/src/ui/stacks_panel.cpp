@@ -41,12 +41,18 @@ StacksPanel::StacksPanel(const DapUiTheme& theme, tuinator::ScrollViewOptions sc
     list_ = list.get();
     list_->set_paint_mode(ListPaintMode::Stacks, &theme);
     list_->set_on_activate([this](int index) {
+        if (try_toggle_thread_expand(index)) {
+            return;
+        }
         const StackFrameRow* frame = frame_at_display_index(index);
         if (frame != nullptr && on_activate_ != nullptr) {
             on_activate_(*frame);
         }
     });
-    list_->set_on_row_click([this](int /*index*/, const std::string& item, int local_x) {
+    list_->set_on_row_click([this](int index, const std::string& item, int local_x) {
+        if (try_toggle_thread_expand(index)) {
+            return true;
+        }
         constexpr const char* kContinueMarker = "\u25b6 ";
         if (item.rfind(kContinueMarker, 0) != 0 || on_continue_ == nullptr) {
             return false;
@@ -74,12 +80,25 @@ StacksPanel::StacksPanel(const DapUiTheme& theme, tuinator::ScrollViewOptions sc
 
 std::unique_ptr<tuinator::Widget> StacksPanel::release_widget() { return pane_->release_widget(); }
 
+std::string StacksPanel::thread_group_key(std::int64_t thread_id) {
+    return "thread:" + std::to_string(thread_id);
+}
+
+void StacksPanel::set_display_options(ThreadStackDisplayOptions options) {
+    display_options_ = options;
+}
+
 void StacksPanel::set_thread_stacks(std::vector<ThreadStackContent> threads) {
+    threads_ = std::move(threads);
+    rebuild_display();
+}
+
+void StacksPanel::rebuild_display() {
     if (list_ == nullptr) {
         return;
     }
 
-    std::sort(threads.begin(), threads.end(), [](const ThreadStackContent& left, const ThreadStackContent& right) {
+    std::sort(threads_.begin(), threads_.end(), [](const ThreadStackContent& left, const ThreadStackContent& right) {
         if (left.stopped != right.stopped) {
             return left.stopped;
         }
@@ -88,44 +107,85 @@ void StacksPanel::set_thread_stacks(std::vector<ThreadStackContent> threads) {
 
     frames_.clear();
     display_to_frame_.clear();
+    display_thread_keys_.clear();
     std::vector<std::string> items;
     std::unordered_set<std::string> stopped_headers;
 
-    if (threads.empty()) {
+    if (threads_.empty()) {
         items.push_back("No threads");
         list_->set_stopped_thread_headers({});
         list_->assign_items(std::move(items));
         return;
     }
 
-    for (std::size_t thread_index = 0; thread_index < threads.size(); ++thread_index) {
-        const ThreadStackContent& thread = threads[thread_index];
-        const std::string header = thread.name + ":";
-        items.push_back(header);
-        display_to_frame_.push_back(-1);
-        if (thread.stopped) {
-            stopped_headers.insert(header);
+    for (std::size_t thread_index = 0; thread_index < threads_.size(); ++thread_index) {
+        const ThreadStackContent& thread = threads_[thread_index];
+        const std::string plain_header = thread.name + ":";
+        const std::string group_key = thread_group_key(thread.id);
+        const bool thread_collapsed =
+            display_options_.collapsible_threads && collapsed_thread_keys_.count(group_key) > 0;
+
+        if (!display_options_.hide_thread_headers) {
+            std::string header = plain_header;
+            if (display_options_.collapsible_threads) {
+                header = (thread_collapsed ? kScopeExpandCollapsed : kScopeExpandExpanded) + plain_header;
+            }
+            items.push_back(header);
+            display_to_frame_.push_back(-1);
+            display_thread_keys_.push_back(display_options_.collapsible_threads ? group_key : std::string{});
+            if (thread.stopped) {
+                stopped_headers.insert(plain_header);
+            }
         }
 
-        for (std::size_t frame_index = 0; frame_index < thread.frames.size(); ++frame_index) {
-            const StackFrameRow& frame = thread.frames[frame_index];
-            const bool current_frame = thread.stopped && frame_index == 0;
-            const std::string marker = current_frame ? "\u25b6 " : "  ";
-            items.push_back(marker + frame.name + " " + frame_location_label(frame));
-            frames_.push_back(frame);
-            display_to_frame_.push_back(static_cast<int>(frames_.size()) - 1);
+        if (!thread_collapsed) {
+            for (std::size_t frame_index = 0; frame_index < thread.frames.size(); ++frame_index) {
+                const StackFrameRow& frame = thread.frames[frame_index];
+                const bool current_frame = thread.stopped && frame_index == 0;
+                const std::string marker = current_frame ? "\u25b6 " : "  ";
+                items.push_back(marker + frame.name + " " + frame_location_label(frame));
+                frames_.push_back(frame);
+                display_to_frame_.push_back(static_cast<int>(frames_.size()) - 1);
+                display_thread_keys_.push_back({});
+            }
         }
 
-        if (thread_index + 1 < threads.size()) {
+        if (thread_index + 1 < threads_.size()) {
             items.push_back("");
             display_to_frame_.push_back(-1);
+            display_thread_keys_.push_back({});
         }
     }
 
     list_->set_stopped_thread_headers(std::move(stopped_headers));
     if (list_->items() != items) {
         list_->assign_items(std::move(items));
+    } else {
+        list_->mark_dirty();
     }
+    if (pane_ != nullptr) {
+        pane_->refresh_scroll_content();
+    }
+}
+
+bool StacksPanel::try_toggle_thread_expand(int display_index) {
+    if (!display_options_.collapsible_threads || display_index < 0 ||
+        display_index >= static_cast<int>(display_thread_keys_.size())) {
+        return false;
+    }
+
+    const std::string& key = display_thread_keys_[static_cast<std::size_t>(display_index)];
+    if (key.empty()) {
+        return false;
+    }
+
+    if (collapsed_thread_keys_.count(key) > 0) {
+        collapsed_thread_keys_.erase(key);
+    } else {
+        collapsed_thread_keys_.insert(key);
+    }
+    rebuild_display();
+    return true;
 }
 
 void StacksPanel::set_lines(std::vector<std::string> lines) {

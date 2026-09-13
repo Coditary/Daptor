@@ -57,6 +57,12 @@ ScopesPanel::ScopesPanel(const DapUiTheme& theme, tuinator::ScrollViewOptions sc
         }
     });
     list_->set_on_row_click([this](int index, const std::string& item, int local_x) {
+        if (NavigableListView::is_scope_section_header_row(item)) {
+            if (on_activate_ != nullptr) {
+                on_activate_(index);
+            }
+            return true;
+        }
         if (!NavigableListView::scope_expand_arrow_hit(item, local_x)) {
             return false;
         }
