@@ -27,6 +27,8 @@ class ContextMenu : public tuinator::Widget {
 
     void open(tuinator::Point anchor, tuinator::Rect clip_bounds, std::vector<Item> items, bool open_above = false);
     void close();
+    void set_on_selection_changed(std::function<void(int index)> callback);
+    [[nodiscard]] int selected_index() const { return selected_; }
     /// Action queued by activate_selected(); run after handle_event() returns.
     std::function<void()> take_pending_action();
 
@@ -52,6 +54,7 @@ class ContextMenu : public tuinator::Widget {
     tuinator::Point anchor_{};
     std::vector<Item> items_;
     std::function<void()> pending_action_;
+    std::function<void(int index)> on_selection_changed_;
     int selected_ = 0;
     bool open_ = false;
     bool open_above_ = false;

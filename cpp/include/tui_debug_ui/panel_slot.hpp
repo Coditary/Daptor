@@ -28,11 +28,14 @@ enum class DisassemblyViewMode {
     Bytes,
 };
 
+/// Default pane regions in the initial L-layout. User splits add untagged leaves.
 enum class PanelDock {
-    Sidebar,
-    Main,
+    Left,
+    Center,
     Bottom,
 };
+
+[[nodiscard]] std::string panel_dock_label(PanelDock dock);
 
 enum class ThreadPanelFilter {
     Stopped,

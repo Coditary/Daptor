@@ -1,8 +1,12 @@
 #pragma once
 
+#include "tui_debug_ui/layout_drag.hpp"
+
 #include <tuinator/core/event.hpp>
 #include <tuinator/render/style.hpp>
 #include <tuinator/widgets/widget.hpp>
+
+#include <optional>
 
 #include <functional>
 #include <memory>
@@ -26,8 +30,7 @@ class StackedPane : public tuinator::Widget {
     using ActiveChangedCallback = std::function<void(int index)>;
 
     StackedPane(std::vector<Entry> entries, tuinator::Style background, tuinator::Style chrome_label,
-                tuinator::Style chrome_hint, tuinator::Style chrome_divider, tuinator::Style chrome_add,
-                tuinator::Style chrome_edit);
+                tuinator::Style chrome_hint, tuinator::Style chrome_divider, tuinator::Style chrome_add);
 
     [[nodiscard]] int active_index() const { return active_index_; }
     [[nodiscard]] int count() const { return static_cast<int>(entries_.size()); }
@@ -46,6 +49,9 @@ class StackedPane : public tuinator::Widget {
     void propagate_on_dirty(std::function<void(tuinator::Rect)> callback);
     [[nodiscard]] bool is_renaming() const { return rename_index_ >= 0; }
     void finish_rename_on_click_outside(tuinator::Point global_point);
+    void handle_chrome_click(tuinator::Point global_position);
+    void set_layout_drag_press_handler(
+        std::function<void(LayoutDragSourceKind kind, int tab_index, tuinator::Point position)> handler);
 
     tuinator::Size preferred_size() const override;
     void layout(tuinator::Rect bounds) override;
@@ -86,7 +92,6 @@ class StackedPane : public tuinator::Widget {
         ArrowSegment prev_arrow;
         ArrowSegment next_arrow;
         int counter_x = -1;
-        int edit_x = -1;
         int add_x = -1;
         std::string counter;
     };
@@ -95,7 +100,6 @@ class StackedPane : public tuinator::Widget {
     tuinator::Rect content_bounds() const;
     void notify_active_changed();
     void ensure_active_tab_visible();
-    bool handle_chrome_click(tuinator::Point position);
 
     [[nodiscard]] int label_width(int index) const;
     [[nodiscard]] int width_for_tabs(int start, int num) const;
@@ -105,18 +109,19 @@ class StackedPane : public tuinator::Widget {
     [[nodiscard]] int tabs_budget() const;
     [[nodiscard]] int max_tabs_for_budget(int budget) const;
     [[nodiscard]] int max_scroll_visible_tabs(int start_index) const;
+    [[nodiscard]] int max_tab_scroll_offset() const;
     [[nodiscard]] std::string counter_text() const;
     [[nodiscard]] int counter_width() const;
     [[nodiscard]] int add_glyph_width() const;
-    [[nodiscard]] int edit_glyph_width() const;
     [[nodiscard]] int add_action_width() const;
-    [[nodiscard]] int rename_action_width() const;
     [[nodiscard]] int far_right_add_x() const;
-    [[nodiscard]] int far_right_edit_x() const;
     [[nodiscard]] int far_right_counter_x(bool show_counter) const;
     void apply_right_cluster(ChromeLayout& layout, bool show_counter) const;
     void ensure_rename_input();
+    [[nodiscard]] std::optional<std::pair<LayoutDragSourceKind, int>> chrome_drag_target(
+        tuinator::Point global_position) const;
     [[nodiscard]] bool rename_field_contains(tuinator::Point global_point) const;
+    [[nodiscard]] bool chrome_action_contains(tuinator::Point local) const;
     void begin_rename(int index);
     void cancel_rename();
     void commit_rename(const std::string& value);
@@ -124,6 +129,8 @@ class StackedPane : public tuinator::Widget {
     [[nodiscard]] int scroll_trailing_chain_width() const;
     [[nodiscard]] int right_cluster_width(bool include_counter) const;
     [[nodiscard]] ChromeLayout chrome_layout() const;
+    [[nodiscard]] int rename_field_right_limit(const ChromeLayout& chrome) const;
+    [[nodiscard]] tuinator::Rect rename_input_bounds() const;
     [[nodiscard]] tuinator::Style chrome_button_style() const;
     [[nodiscard]] tuinator::Style tab_style(int index) const;
     void paint_chrome(tuinator::Canvas& canvas) const;
@@ -139,7 +146,6 @@ class StackedPane : public tuinator::Widget {
     tuinator::Style chrome_hint_;
     tuinator::Style chrome_divider_;
     tuinator::Style chrome_add_;
-    tuinator::Style chrome_edit_;
     int active_index_ = 0;
     int tab_scroll_offset_ = 0;
     int rename_index_ = -1;
@@ -148,6 +154,7 @@ class StackedPane : public tuinator::Widget {
     std::function<void()> add_action_;
     std::function<void(int index, const std::string& label)> rename_action_;
     std::function<void(tuinator::Point)> pane_menu_action_;
+    std::function<void(LayoutDragSourceKind kind, int tab_index, tuinator::Point position)> layout_drag_press_handler_;
 };
 
 }  // namespace tui_debug_ui

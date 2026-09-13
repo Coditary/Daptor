@@ -29,6 +29,8 @@ enum class Focus {
 
 struct LayoutConfig {
     std::uint16_t sidebar_pct = 25;
+    std::uint16_t right_pct = 25;
+    std::uint16_t top_pct = 25;
     std::uint16_t bottom_pct = 35;
     std::uint16_t watches_pct = 25;
     std::uint16_t repl_pct = 30;
@@ -36,6 +38,10 @@ struct LayoutConfig {
 
     void widen_sidebar();
     void narrow_sidebar();
+    void widen_right();
+    void narrow_right();
+    void grow_top();
+    void shrink_top();
     void grow_bottom();
     void shrink_bottom();
     void widen_watches();

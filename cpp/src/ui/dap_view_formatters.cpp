@@ -284,7 +284,7 @@ std::vector<std::size_t> find_memory_search_matches(const std::string& hex_data,
 
     if (query_is_hex && !query_hex.empty()) {
         if (query_hex.size() % 2 != 0) {
-            return matches;
+            query_hex.insert(0, "0");
         }
         std::size_t pos = 0;
         while ((pos = hex_data.find(query_hex, pos)) != std::string::npos) {

@@ -43,6 +43,7 @@ add_executable(tui-debug-ui
     src/ui/divider_paint.cpp
     src/ui/stacked_pane.cpp
     src/ui/layout_tree.cpp
+    src/ui/layout_drag.cpp
     src/ui/sidebar_slot.cpp
     src/ui/memory_panel.cpp
     src/ui/disassembly_panel.cpp

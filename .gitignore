@@ -1,4 +1,5 @@
 /target
+/build
 /cpp/build
 /include/tui_debug.h
 .tmp

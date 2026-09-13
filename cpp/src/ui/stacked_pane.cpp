@@ -19,10 +19,10 @@ constexpr const char* kLeadingPad = "  ";
 constexpr const char* kPrevGlyph = "◄";
 constexpr const char* kNextGlyph = "►";
 constexpr const char* kAddGlyph = "+";
-constexpr const char* kEditGlyph = "\uF448";
 constexpr int kTabGapWidth = 3;
 constexpr int kArrowGap = 1;
 constexpr int kClusterGap = 1;
+constexpr int kActionHitPad = 1;
 
 std::string trim_label(std::string value) {
     const auto not_space = [](unsigned char ch) { return !std::isspace(ch); };
@@ -34,14 +34,12 @@ std::string trim_label(std::string value) {
 }  // namespace
 
 StackedPane::StackedPane(std::vector<Entry> entries, tuinator::Style background, tuinator::Style chrome_label,
-                         tuinator::Style chrome_hint, tuinator::Style chrome_divider, tuinator::Style chrome_add,
-                         tuinator::Style chrome_edit)
+                         tuinator::Style chrome_hint, tuinator::Style chrome_divider, tuinator::Style chrome_add)
     : background_(std::move(background)),
       chrome_label_(std::move(chrome_label)),
       chrome_hint_(std::move(chrome_hint)),
       chrome_divider_(std::move(chrome_divider)),
-      chrome_add_(std::move(chrome_add)),
-      chrome_edit_(std::move(chrome_edit)) {
+      chrome_add_(std::move(chrome_add)) {
     for (Entry& entry : entries) {
         entries_.push_back(EntryData{std::move(entry.label), std::move(entry.widget)});
     }
@@ -83,8 +81,6 @@ int StackedPane::all_tabs_width() const {
 
 int StackedPane::add_glyph_width() const { return tuinator::text_display_width(kAddGlyph); }
 
-int StackedPane::edit_glyph_width() const { return std::max(2, tuinator::text_display_width(kEditGlyph)); }
-
 int StackedPane::add_action_width() const {
     if (!add_action_) {
         return 0;
@@ -92,30 +88,11 @@ int StackedPane::add_action_width() const {
     return add_glyph_width();
 }
 
-int StackedPane::rename_action_width() const {
-    if (!rename_action_ && !pane_menu_action_) {
-        return 0;
-    }
-    return kClusterGap + edit_glyph_width();
-}
-
 int StackedPane::far_right_add_x() const {
     if (!add_action_ || bounds_.width <= 0) {
         return -1;
     }
     return bounds_.width - add_glyph_width();
-}
-
-int StackedPane::far_right_edit_x() const {
-    if ((!rename_action_ && !pane_menu_action_) || bounds_.width <= 0) {
-        return -1;
-    }
-    int x = bounds_.width;
-    if (add_action_) {
-        x -= add_glyph_width() + kClusterGap;
-    }
-    x -= edit_glyph_width();
-    return std::max(0, x);
 }
 
 int StackedPane::far_right_counter_x(bool show_counter) const {
@@ -126,21 +103,17 @@ int StackedPane::far_right_counter_x(bool show_counter) const {
     if (add_action_) {
         x -= add_glyph_width() + kClusterGap;
     }
-    if (rename_action_) {
-        x -= edit_glyph_width() + kClusterGap;
-    }
     x -= counter_width();
     return std::max(0, x);
 }
 
 void StackedPane::apply_right_cluster(ChromeLayout& layout, bool show_counter) const {
     layout.add_x = far_right_add_x();
-    layout.edit_x = far_right_edit_x();
     layout.counter_x = far_right_counter_x(show_counter);
 }
 
 int StackedPane::right_cluster_width(bool include_counter) const {
-    int width = add_action_width() + rename_action_width();
+    int width = add_action_width();
     if (include_counter) {
         width += kClusterGap + counter_width();
     }
@@ -217,6 +190,17 @@ int StackedPane::max_scroll_visible_tabs(int start_index) const {
     return std::max(visible, 1);
 }
 
+int StackedPane::max_tab_scroll_offset() const {
+    int max_start = 0;
+    for (int start = 0; start < count(); ++start) {
+        const int visible = max_scroll_visible_tabs(start);
+        if (visible > 0 && start + visible >= count()) {
+            max_start = start;
+        }
+    }
+    return max_start;
+}
+
 std::string StackedPane::counter_text() const {
     return "(" + std::to_string(active_index_ + 1) + "/" + std::to_string(count()) + ")";
 }
@@ -240,7 +224,7 @@ void StackedPane::ensure_rename_input() {
     if (rename_input_ != nullptr) {
         return;
     }
-    rename_input_ = std::make_unique<tuinator::TextInput>(tuinator::TextInputOptions{.min_width = 4}, chrome_label_,
+    rename_input_ = std::make_unique<tuinator::TextInput>(tuinator::TextInputOptions{.min_width = 12}, chrome_label_,
                                                           chrome_button_style());
     rename_input_->set_on_submit([this](const std::string& value) { commit_rename(value); });
     if (on_dirty_) {
@@ -271,12 +255,32 @@ void StackedPane::cancel_rename() {
     mark_dirty();
 }
 
+bool StackedPane::chrome_action_contains(tuinator::Point local) const {
+    const ChromeLayout chrome = chrome_layout();
+
+    if (chrome.prev_arrow.visible && local.x >= chrome.prev_arrow.x - kActionHitPad &&
+        local.x < chrome.prev_arrow.x + chrome.prev_arrow.width + kActionHitPad) {
+        return true;
+    }
+    if (chrome.next_arrow.visible && local.x >= chrome.next_arrow.x - kActionHitPad &&
+        local.x < chrome.next_arrow.x + chrome.next_arrow.width + kActionHitPad) {
+        return true;
+    }
+    if (chrome.add_x >= 0 && local.x >= chrome.add_x - kActionHitPad &&
+        local.x < chrome.add_x + add_glyph_width() + kActionHitPad) {
+        return true;
+    }
+    return false;
+}
+
 bool StackedPane::rename_field_contains(tuinator::Point global_point) const {
     if (!is_renaming() || !bounds_.contains(global_point)) {
         return false;
     }
-    const int local_y = global_point.y - bounds_.y;
-    return local_y >= 0 && local_y < kChromeLabelRows;
+    const tuinator::Rect local_bounds = rename_input_bounds();
+    const tuinator::Rect global_bounds{bounds_.x + local_bounds.x, bounds_.y + local_bounds.y, local_bounds.width,
+                                       local_bounds.height};
+    return global_bounds.contains(global_point);
 }
 
 void StackedPane::finish_rename_on_click_outside(tuinator::Point global_point) {
@@ -318,22 +322,32 @@ void StackedPane::ensure_active_tab_visible() {
         return;
     }
 
-    int max_visible = 0;
+    int max_visible_cap = 0;
     for (int start = 0; start < count(); ++start) {
-        max_visible = std::max(max_visible, max_scroll_visible_tabs(start));
+        max_visible_cap = std::max(max_visible_cap, max_scroll_visible_tabs(start));
     }
-    if (max_visible < 2) {
+    if (max_visible_cap < 2) {
         tab_scroll_offset_ = 0;
         return;
     }
 
-    const int max_start = std::max(0, count() - max_visible);
-    if (active_index_ < tab_scroll_offset_) {
-        tab_scroll_offset_ = active_index_;
-    } else if (active_index_ >= tab_scroll_offset_ + max_visible) {
-        tab_scroll_offset_ = active_index_ - max_visible + 1;
-    }
+    const int max_start = max_tab_scroll_offset();
     tab_scroll_offset_ = std::clamp(tab_scroll_offset_, 0, max_start);
+
+    for (int guard = 0; guard < count(); ++guard) {
+        const int visible = max_scroll_visible_tabs(tab_scroll_offset_);
+        if (visible <= 0) {
+            break;
+        }
+        if (active_index_ < tab_scroll_offset_) {
+            tab_scroll_offset_ = active_index_;
+        } else if (active_index_ >= tab_scroll_offset_ + visible) {
+            tab_scroll_offset_ = active_index_ - visible + 1;
+        } else {
+            break;
+        }
+        tab_scroll_offset_ = std::clamp(tab_scroll_offset_, 0, max_start);
+    }
 }
 
 void StackedPane::set_active_index(int index) {
@@ -376,6 +390,11 @@ void StackedPane::set_rename_action(std::function<void(int index, const std::str
 
 void StackedPane::set_pane_menu_action(std::function<void(tuinator::Point anchor)> callback) {
     pane_menu_action_ = std::move(callback);
+}
+
+void StackedPane::set_layout_drag_press_handler(
+    std::function<void(LayoutDragSourceKind kind, int tab_index, tuinator::Point position)> handler) {
+    layout_drag_press_handler_ = std::move(handler);
 }
 
 void StackedPane::begin_rename_active_tab() { begin_rename(active_index_); }
@@ -463,6 +482,53 @@ tuinator::Rect StackedPane::content_bounds() const {
     return {bounds_.x, y, bounds_.width, height};
 }
 
+int StackedPane::rename_field_right_limit(const ChromeLayout& chrome) const {
+    int limit = bounds_.width;
+    if (chrome.add_x >= 0) {
+        limit = std::min(limit, chrome.add_x - kClusterGap);
+    }
+    if (chrome.counter_x >= 0) {
+        limit = std::min(limit, chrome.counter_x - kClusterGap);
+    }
+    return limit;
+}
+
+tuinator::Rect StackedPane::rename_input_bounds() const {
+    if (!is_renaming() || bounds_.width <= 0) {
+        return {0, 0, 0, kChromeLabelRows};
+    }
+
+    constexpr int kMinRenameWidth = 12;
+    const int label_w = label_width(rename_index_);
+    const ChromeLayout chrome = chrome_layout();
+
+    int x = tuinator::text_display_width(kLeadingPad);
+    int right_limit = rename_field_right_limit(chrome);
+
+    if (chrome.mode == ChromeMode::Compact) {
+        if (chrome.prev_arrow.visible) {
+            x = chrome.prev_arrow.x + chrome.prev_arrow.width + kArrowGap;
+        }
+        if (chrome.next_arrow.visible) {
+            right_limit = std::min(right_limit, chrome.next_arrow.x - kClusterGap);
+        }
+    } else {
+        for (const TabSegment& tab : chrome.tabs) {
+            if (tab.index == rename_index_) {
+                x = tab.x;
+                break;
+            }
+        }
+    }
+
+    int width = std::max(0, right_limit - x);
+    width = std::max(width, kMinRenameWidth);
+    width = std::max(width, label_w + 2);
+    width = std::min(width, bounds_.width - x);
+
+    return {x, 0, width, kChromeLabelRows};
+}
+
 StackedPane::ChromeLayout StackedPane::chrome_layout() const {
     ChromeLayout layout;
     layout.counter = counter_text();
@@ -496,7 +562,7 @@ StackedPane::ChromeLayout StackedPane::chrome_layout() const {
 
     if (max_visible >= 2) {
         layout.mode = ChromeMode::ScrollTabs;
-        layout.first_visible_index = std::clamp(tab_scroll_offset_, 0, std::max(0, count() - max_visible));
+        layout.first_visible_index = std::clamp(tab_scroll_offset_, 0, max_tab_scroll_offset());
         const int visible_count = max_scroll_visible_tabs(layout.first_visible_index);
         const bool show_counter = scroll_needs_counter(layout.first_visible_index, visible_count);
 
@@ -551,7 +617,7 @@ void StackedPane::layout(tuinator::Rect bounds) {
 
     const tuinator::Rect content = content_bounds();
     if (is_renaming() && rename_input_ != nullptr) {
-        rename_input_->layout({0, 0, bounds_.width, kChromeLabelRows});
+        rename_input_->layout(rename_input_bounds());
     }
 
     for (std::size_t i = 0; i < entries_.size(); ++i) {
@@ -578,9 +644,6 @@ void StackedPane::paint_chrome(tuinator::Canvas& canvas) const {
         if (chrome.counter_x >= 0) {
             canvas.draw_text({chrome.counter_x, 0}, chrome.counter, chrome_label_);
         }
-        if (chrome.edit_x >= 0) {
-            canvas.draw_text({chrome.edit_x, 0}, kEditGlyph, chrome_edit_);
-        }
         if (chrome.add_x >= 0) {
             canvas.draw_text({chrome.add_x, 0}, kAddGlyph, chrome_add_);
         }
@@ -602,9 +665,6 @@ void StackedPane::paint_chrome(tuinator::Canvas& canvas) const {
     if (chrome.counter_x >= 0) {
         canvas.draw_text({chrome.counter_x, 0}, chrome.counter, chrome_label_);
     }
-    if (chrome.edit_x >= 0) {
-        canvas.draw_text({chrome.edit_x, 0}, kEditGlyph, chrome_edit_);
-    }
     if (chrome.add_x >= 0) {
         canvas.draw_text({chrome.add_x, 0}, kAddGlyph, chrome_add_);
     }
@@ -619,11 +679,10 @@ void StackedPane::paint(tuinator::PaintContext& ctx) const {
     canvas.fill_rect({{0, 0}, bounds_.size()}, ' ', background_);
 
     if (bounds_.height >= kChromeLabelRows) {
+        paint_chrome(canvas);
         if (is_renaming() && rename_input_ != nullptr) {
-            ctx.with_clip({{0, 0}, {bounds_.width, kChromeLabelRows}},
-                          [&](tuinator::PaintContext& child_ctx) { rename_input_->paint(child_ctx); });
-        } else {
-            paint_chrome(canvas);
+            const tuinator::Rect rename_bounds = rename_input_bounds();
+            ctx.with_clip(rename_bounds, [&](tuinator::PaintContext& child_ctx) { rename_input_->paint(child_ctx); });
         }
     }
     if (bounds_.height >= kChromeHeight) {
@@ -640,9 +699,41 @@ void StackedPane::paint(tuinator::PaintContext& ctx) const {
     ctx.with_clip(local, [&](tuinator::PaintContext& child_ctx) { active.widget->paint(child_ctx); });
 }
 
-bool StackedPane::handle_chrome_click(tuinator::Point position) {
+std::optional<std::pair<LayoutDragSourceKind, int>> StackedPane::chrome_drag_target(
+    tuinator::Point position) const {
+    if (!chrome_bounds().contains(position) || is_renaming()) {
+        return std::nullopt;
+    }
+
+    const tuinator::Point local{position.x - bounds_.x, position.y - bounds_.y};
+    const ChromeLayout chrome = chrome_layout();
+
+    if (chrome.prev_arrow.visible && local.x >= chrome.prev_arrow.x &&
+        local.x < chrome.prev_arrow.x + chrome.prev_arrow.width) {
+        return std::nullopt;
+    }
+    if (chrome.next_arrow.visible && local.x >= chrome.next_arrow.x &&
+        local.x < chrome.next_arrow.x + chrome.next_arrow.width) {
+        return std::nullopt;
+    }
+    if (chrome.add_x >= 0 && local.x >= chrome.add_x && local.x < chrome.add_x + add_glyph_width()) {
+        return std::nullopt;
+    }
+
+    if (chrome.mode == ChromeMode::ScrollTabs || chrome.mode == ChromeMode::AllTabs) {
+        for (const TabSegment& tab : chrome.tabs) {
+            if (local.x >= tab.x && local.x < tab.x + tab.width) {
+                return std::make_pair(LayoutDragSourceKind::Tab, tab.index);
+            }
+        }
+    }
+
+    return std::make_pair(LayoutDragSourceKind::Pane, active_index_);
+}
+
+void StackedPane::handle_chrome_click(tuinator::Point position) {
     if (!chrome_bounds().contains(position)) {
-        return false;
+        return;
     }
 
     const tuinator::Point local{position.x - bounds_.x, position.y - bounds_.y};
@@ -651,38 +742,26 @@ bool StackedPane::handle_chrome_click(tuinator::Point position) {
     if (chrome.prev_arrow.visible && local.x >= chrome.prev_arrow.x &&
         local.x < chrome.prev_arrow.x + chrome.prev_arrow.width) {
         cycle(-1);
-        return true;
+        return;
     }
     if (chrome.next_arrow.visible && local.x >= chrome.next_arrow.x &&
         local.x < chrome.next_arrow.x + chrome.next_arrow.width) {
         cycle(1);
-        return true;
+        return;
     }
 
     if (chrome.mode == ChromeMode::ScrollTabs || chrome.mode == ChromeMode::AllTabs) {
         for (const TabSegment& tab : chrome.tabs) {
             if (local.x >= tab.x && local.x < tab.x + tab.width) {
                 set_active_index(tab.index);
-                return true;
+                return;
             }
         }
     }
 
-    if (chrome.edit_x >= 0 && local.x >= chrome.edit_x && local.x < chrome.edit_x + edit_glyph_width()) {
-        if (pane_menu_action_) {
-            pane_menu_action_({bounds_.x + chrome.edit_x, bounds_.y + local.y});
-        } else {
-            begin_rename(active_index_);
-        }
-        return true;
-    }
-
     if (chrome.add_x >= 0 && local.x >= chrome.add_x && local.x < chrome.add_x + add_glyph_width()) {
         add_action_();
-        return true;
     }
-
-    return true;
 }
 
 bool StackedPane::handle_event(const tuinator::Event& event) {
@@ -716,10 +795,34 @@ bool StackedPane::handle_event(const tuinator::Event& event) {
     }
 
     if (const auto* mouse = std::get_if<tuinator::MouseEvent>(&event)) {
-        if (mouse->action == tuinator::MouseAction::Click || mouse->action == tuinator::MouseAction::Release) {
-            if (handle_chrome_click(mouse->position)) {
+        const tuinator::Point local{mouse->position.x - bounds_.x, mouse->position.y - bounds_.y};
+        const bool in_chrome = chrome_bounds().contains(mouse->position);
+
+        if (mouse->action == tuinator::MouseAction::Press && mouse->button == tuinator::MouseButton::Left) {
+            if (in_chrome && chrome_action_contains(local)) {
                 return true;
             }
+            if (const auto drag_target = chrome_drag_target(mouse->position); drag_target.has_value()) {
+                if (layout_drag_press_handler_) {
+                    layout_drag_press_handler_(drag_target->first, drag_target->second, mouse->position);
+                }
+                return true;
+            }
+        }
+
+        const bool pick =
+            mouse->action == tuinator::MouseAction::Click || mouse->action == tuinator::MouseAction::Release;
+        if (pick && in_chrome && mouse->button == tuinator::MouseButton::Right) {
+            if (pane_menu_action_) {
+                pane_menu_action_(mouse->position);
+            } else if (rename_action_) {
+                begin_rename(active_index_);
+            }
+            return true;
+        }
+        if (pick && in_chrome && chrome_action_contains(local)) {
+            handle_chrome_click(mouse->position);
+            return true;
         }
     }
 

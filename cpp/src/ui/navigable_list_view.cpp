@@ -590,6 +590,13 @@ void NavigableListView::paint_plain_interactive(tuinator::PaintContext& ctx) con
         const tuinator::Style& style = selected ? selected_style_ : item_style_;
         const std::string& item = items()[static_cast<std::size_t>(index)];
 
+        if (inline_row_edit_active_row(index)) {
+            canvas.draw_text({0, index}, prefix, style);
+            paint_inline_row_edit(canvas, index, inline_row_edit_.prefix, max_width);
+            paint_row_actions(canvas, index, index, item, max_width);
+            continue;
+        }
+
         const int prefix_width = static_cast<int>(prefix.size());
         const int content_width = std::max(0, max_width - prefix_width - action_reserve);
         const std::size_t bytes = tuinator::text_byte_length_for_width(item, content_width);

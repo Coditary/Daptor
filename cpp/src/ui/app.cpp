@@ -42,6 +42,7 @@
 #include <fstream>
 #include <memory>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 #include <unordered_set>
@@ -710,6 +711,10 @@ class DebugChromeRoot : public tuinator::Widget {
                 return false;
             }
 
+            if (debug_app_ != nullptr && debug_app_->handle_layout_drag_mouse(*mouse)) {
+                return true;
+            }
+
             const bool pointer_pick = mouse->action == tuinator::MouseAction::Click ||
                                       mouse->action == tuinator::MouseAction::Release ||
                                       mouse->action == tuinator::MouseAction::Press;
@@ -1255,10 +1260,9 @@ void DebugApp::build_ui() {
     source_tab_bar_->set_on_select([this](int index) { switch_source_file_tab(index); });
     source_tab_bar_->set_on_close([this](int index) { close_source_file_tab(index); });
 
-    source_section_ = std::make_unique<TitledScrollPane>(panel_type_label(SidebarPanelType::Source),
-                                                         std::move(source_panel), dap_theme_.title_source,
-                                                         dap_theme_.panel_background, scroll_options, true, false,
-                                                         std::move(source_tab_bar));
+    source_section_ = std::make_unique<TitledScrollPane>(
+        panel_type_label(SidebarPanelType::Source), std::move(source_panel), dap_theme_.title_source,
+        dap_theme_.panel_background, scroll_options, true, false, std::move(source_tab_bar));
     source_scroll_view_ = source_section_->scroll_view();
     if (source_panel_ != nullptr && source_scroll_view_ != nullptr) {
         source_panel_->set_scroll_parent(source_scroll_view_);
@@ -2048,11 +2052,10 @@ void DebugApp::sync_ui_from_model() {
         console_panel_->set_input_active(console_input_active());
     }
     if (!variable_set_in_flight_) {
-        for (PanelDock dock : {PanelDock::Sidebar, PanelDock::Main, PanelDock::Bottom}) {
-            for (SidebarSlot& slot : dock_slots(dock)) {
-                if (slot.config.type != SidebarPanelType::Variables) {
-                    continue;
-                }
+        for_each_sidebar_slot([&](SidebarSlot& slot) {
+            if (slot.config.type != SidebarPanelType::Variables) {
+                return;
+            }
             std::vector<ScopeVariableRowMeta> meta;
             std::vector<std::string> scope_rows =
                 build_scope_rows(model_, expanded_scope_paths_, pending_scope_paths_, meta, slot.config.scope_filter);
@@ -2066,9 +2069,8 @@ void DebugApp::sync_ui_from_model() {
                 slot.cached_scope_rows = std::move(scope_rows);
                 slot.cached_scope_row_meta = std::move(meta);
             }
-                sync_scope_slot(slot);
-            }
-        }
+            sync_scope_slot(slot);
+        });
         apply_scope_value_overrides();
     }
     sync_threads_list_panel();
@@ -2168,12 +2170,10 @@ void DebugApp::invalidate_scope_variables() {
     scope_variables_fetch_signature_.clear();
     scope_variables_fetch_pending_ = false;
     model_.scope_variables.clear();
-    for (PanelDock dock : {PanelDock::Sidebar, PanelDock::Main, PanelDock::Bottom}) {
-        for (SidebarSlot& slot : dock_slots(dock)) {
-            slot.cached_scope_rows.clear();
-            slot.cached_scope_row_meta.clear();
-        }
-    }
+    for_each_sidebar_slot([&](SidebarSlot& slot) {
+        slot.cached_scope_rows.clear();
+        slot.cached_scope_row_meta.clear();
+    });
     expanded_scope_paths_.clear();
     pending_scope_paths_.clear();
 }
@@ -2200,13 +2200,11 @@ void DebugApp::patch_local_variable_value(const std::string& name, const std::st
         }
     }
 
-    for (PanelDock dock : {PanelDock::Sidebar, PanelDock::Main, PanelDock::Bottom}) {
-        for (SidebarSlot& slot : dock_slots(dock)) {
-            if (slot.config.type == SidebarPanelType::Variables) {
-                patch_scope_row_value(slot.cached_scope_rows, name, value);
-            }
+    for_each_sidebar_slot([&](SidebarSlot& slot) {
+        if (slot.config.type == SidebarPanelType::Variables) {
+            patch_scope_row_value(slot.cached_scope_rows, name, value);
         }
-    }
+    });
     refresh_all_scope_slots();
 }
 
@@ -2227,16 +2225,14 @@ void DebugApp::apply_scope_value_overrides() {
             variable.value = it->second;
         }
     }
-    for (PanelDock dock : {PanelDock::Sidebar, PanelDock::Main, PanelDock::Bottom}) {
-        for (SidebarSlot& slot : dock_slots(dock)) {
-            if (slot.config.type != SidebarPanelType::Variables) {
-                continue;
-            }
-            for (const auto& [name, value] : scope_value_overrides_) {
-                patch_scope_row_value(slot.cached_scope_rows, name, value);
-            }
+    for_each_sidebar_slot([&](SidebarSlot& slot) {
+        if (slot.config.type != SidebarPanelType::Variables) {
+            return;
         }
-    }
+        for (const auto& [name, value] : scope_value_overrides_) {
+            patch_scope_row_value(slot.cached_scope_rows, name, value);
+        }
+    });
 }
 
 void DebugApp::clear_scope_value_overrides() { scope_value_overrides_.clear(); }
@@ -2330,34 +2326,32 @@ void DebugApp::maybe_request_dap_panel_data() {
             ? frame->source_reference
             : (model_.execution_source_reference > 0 ? model_.execution_source_reference : 0);
 
-    for (PanelDock dock : {PanelDock::Sidebar, PanelDock::Main, PanelDock::Bottom}) {
-        for (SidebarSlot& slot : dock_slots(dock)) {
-            switch (slot.config.type) {
-            case SidebarPanelType::Memory:
-                if (model_.supports_read_memory_request) {
-                    const std::string& view_reference =
-                        !slot.memory_view_reference.empty() ? slot.memory_view_reference : memory_reference;
-                    if (!view_reference.empty()) {
-                        request_memory_fetch_for_slot(slot, view_reference, slot.cached_memory_read_offset);
-                    }
+    for_each_sidebar_slot([&](SidebarSlot& slot) {
+        switch (slot.config.type) {
+        case SidebarPanelType::Memory:
+            if (model_.supports_read_memory_request) {
+                const std::string& view_reference =
+                    !slot.memory_view_reference.empty() ? slot.memory_view_reference : memory_reference;
+                if (!view_reference.empty()) {
+                    request_memory_fetch_for_slot(slot, view_reference, slot.cached_memory_read_offset);
                 }
-                break;
-            case SidebarPanelType::DisassemblyAsm:
-            case SidebarPanelType::DisassemblyBytes:
-                if (model_.supports_disassemble_request && !memory_reference.empty()) {
-                    session_io_->request_disassembly_fetch(memory_reference, 0, 0, 64, slot.config.id);
-                }
-                break;
-            case SidebarPanelType::RuntimeSource:
-                if (source_reference > 0) {
-                    session_io_->request_runtime_source_fetch(source_reference, slot.config.id);
-                }
-                break;
-            default:
-                break;
             }
+            break;
+        case SidebarPanelType::DisassemblyAsm:
+        case SidebarPanelType::DisassemblyBytes:
+            if (model_.supports_disassemble_request && !memory_reference.empty()) {
+                session_io_->request_disassembly_fetch(memory_reference, 0, 0, 64, slot.config.id);
+            }
+            break;
+        case SidebarPanelType::RuntimeSource:
+            if (source_reference > 0) {
+                session_io_->request_runtime_source_fetch(source_reference, slot.config.id);
+            }
+            break;
+        default:
+            break;
         }
-    }
+    });
 }
 
 void DebugApp::sync_memory_slot(SidebarSlot& slot) {
@@ -2437,24 +2431,22 @@ void DebugApp::sync_runtime_source_slot(SidebarSlot& slot) {
 }
 
 void DebugApp::refresh_all_dap_panel_slots() {
-    for (PanelDock dock : {PanelDock::Sidebar, PanelDock::Main, PanelDock::Bottom}) {
-        for (SidebarSlot& slot : dock_slots(dock)) {
-            switch (slot.config.type) {
-            case SidebarPanelType::Memory:
-                sync_memory_slot(slot);
-                break;
-            case SidebarPanelType::DisassemblyAsm:
-            case SidebarPanelType::DisassemblyBytes:
-                sync_disassembly_slot(slot);
-                break;
-            case SidebarPanelType::RuntimeSource:
-                sync_runtime_source_slot(slot);
-                break;
-            default:
-                break;
-            }
+    for_each_sidebar_slot([&](SidebarSlot& slot) {
+        switch (slot.config.type) {
+        case SidebarPanelType::Memory:
+            sync_memory_slot(slot);
+            break;
+        case SidebarPanelType::DisassemblyAsm:
+        case SidebarPanelType::DisassemblyBytes:
+            sync_disassembly_slot(slot);
+            break;
+        case SidebarPanelType::RuntimeSource:
+            sync_runtime_source_slot(slot);
+            break;
+        default:
+            break;
         }
-    }
+    });
 }
 
 void DebugApp::request_memory_fetch_for_slot(SidebarSlot& slot, const std::string& reference, std::int64_t offset) {
@@ -2517,18 +2509,26 @@ void DebugApp::submit_memory_address(std::uint64_t slot_id, const std::string& i
 }
 
 void DebugApp::submit_memory_search(std::uint64_t slot_id, const std::string& query, bool forward) {
-    memory_toolbar_focused_ = false;
     SidebarSlot* slot = slot_by_id(slot_id);
-    if (slot == nullptr || slot->memory == nullptr || query.empty()) {
+    if (slot == nullptr || slot->memory == nullptr) {
         return;
     }
 
-    slot->memory_search_query = query;
-    slot->memory_search_matches = find_memory_search_matches(slot->cached_memory_hex_data, query);
+    const std::string trimmed = trim_whitespace(query);
+    if (trimmed.empty()) {
+        return;
+    }
+
+    if (trimmed != slot->memory_search_query) {
+        slot->memory_search_match_index = -1;
+    }
+    slot->memory_search_query = trimmed;
+    slot->memory_search_matches = find_memory_search_matches(slot->cached_memory_hex_data, trimmed);
     if (slot->memory_search_matches.empty()) {
         slot->memory_search_match_index = -1;
-        model_.status_message = "No matches for \"" + query + "\" in loaded memory";
+        model_.status_message = "No matches for \"" + trimmed + "\" in loaded memory";
         sync_status_bar();
+        request_repaint();
         return;
     }
 
@@ -2545,6 +2545,12 @@ void DebugApp::submit_memory_search(std::uint64_t slot_id, const std::string& qu
     const std::size_t byte_offset =
         slot->memory_search_matches[static_cast<std::size_t>(slot->memory_search_match_index)];
     const int row = static_cast<int>(byte_offset / 16);
+
+    memory_focus_slot_id_ = slot_id;
+    memory_toolbar_focused_ = false;
+    slot->memory->blur_toolbar_inputs();
+    model_.focus = Focus::Memory;
+    apply_focus();
     slot->memory->set_selected_row(row);
     model_.status_message = "Match " + std::to_string(slot->memory_search_match_index + 1) + "/" +
                             std::to_string(slot->memory_search_matches.size()) + " at byte " +
@@ -2582,6 +2588,7 @@ void DebugApp::wire_memory_panel(MemoryPanel& panel, SidebarSlot& slot) {
         model_.status_message = "Memory edit cancelled";
         sync_status_bar();
     });
+    panel.set_on_toolbar_interact([this, slot_id = slot.config.id]() { activate_memory_toolbar(slot_id); });
 }
 
 void DebugApp::begin_memory_row_edit(std::uint64_t slot_id, int row_index) {
@@ -2611,6 +2618,7 @@ void DebugApp::begin_memory_row_edit(std::uint64_t slot_id, int row_index) {
         return;
     }
 
+    memory_focus_slot_id_ = slot_id;
     memory_toolbar_focused_ = false;
     memory_write_slot_id_ = slot_id;
     memory_write_row_ = row_index;
@@ -3044,6 +3052,7 @@ void DebugApp::refresh_source_highlight_if_needed() {
 
 void DebugApp::on_split_drag_ended() {
     apply_focus();
+    refresh_scroll_views();
 
     source_layout_settling_ = true;
     refresh_source_highlight_if_needed();
@@ -3064,18 +3073,19 @@ void DebugApp::on_split_drag_ended() {
 
 namespace {
 
-bool is_sidebar_main_split(const LayoutTree& tree, LayoutNodeId split_id) {
+bool is_left_center_split(const LayoutTree& tree, LayoutNodeId split_id) {
     if (tree.empty()) {
         return false;
     }
     const LayoutNode& node = tree.node(split_id);
-    if (node.kind != LayoutNode::Kind::Split) {
+    if (node.kind != LayoutNode::Kind::Container ||
+        node.container.orientation != tuinator::SplitOrientation::Horizontal) {
         return false;
     }
-    const LayoutNodeId a = node.split.first;
-    const LayoutNodeId b = node.split.second;
-    return (tree.subtree_contains_dock(a, PanelDock::Sidebar) && tree.subtree_contains_dock(b, PanelDock::Main)) ||
-           (tree.subtree_contains_dock(a, PanelDock::Main) && tree.subtree_contains_dock(b, PanelDock::Sidebar));
+    const LayoutNodeId first = node.container.first;
+    const LayoutNodeId second = node.container.second;
+    return tree.subtree_contains_dock(first, PanelDock::Left) &&
+           tree.subtree_contains_dock(second, PanelDock::Center);
 }
 
 bool is_default_bottom_root_split(const LayoutTree& tree, LayoutNodeId split_id) {
@@ -3083,20 +3093,16 @@ bool is_default_bottom_root_split(const LayoutTree& tree, LayoutNodeId split_id)
         return false;
     }
     const LayoutNode& node = tree.node(split_id);
-    if (node.kind != LayoutNode::Kind::Split ||
-        node.split.orientation != tuinator::SplitOrientation::Vertical) {
+    if (node.kind != LayoutNode::Kind::Container ||
+        node.container.orientation != tuinator::SplitOrientation::Vertical) {
         return false;
     }
-    const bool first_bottom = tree.subtree_contains_dock(node.split.first, PanelDock::Bottom);
-    const bool second_bottom = tree.subtree_contains_dock(node.split.second, PanelDock::Bottom);
-    if (!first_bottom && !second_bottom) {
-        return false;
-    }
-    const bool first_main_area = tree.subtree_contains_dock(node.split.first, PanelDock::Sidebar) ||
-                                 tree.subtree_contains_dock(node.split.first, PanelDock::Main);
-    const bool second_main_area = tree.subtree_contains_dock(node.split.second, PanelDock::Sidebar) ||
-                                 tree.subtree_contains_dock(node.split.second, PanelDock::Main);
-    return (first_bottom && second_main_area) || (second_bottom && first_main_area);
+    const LayoutNodeId first = node.container.first;
+    const LayoutNodeId second = node.container.second;
+    const bool first_main_area = (tree.subtree_contains_dock(first, PanelDock::Left) ||
+                                tree.subtree_contains_dock(first, PanelDock::Center)) &&
+                               !tree.subtree_contains_dock(first, PanelDock::Bottom);
+    return first_main_area && tree.subtree_contains_dock(second, PanelDock::Bottom);
 }
 
 }  // namespace
@@ -3120,10 +3126,10 @@ void DebugApp::ensure_default_leaf_slots(LayoutNodeId leaf_id) {
         return;
     }
     switch (*dock) {
-    case PanelDock::Sidebar:
+    case PanelDock::Left:
         init_default_sidebar_slots(slots);
         break;
-    case PanelDock::Main:
+    case PanelDock::Center:
         if (!has_source_panel()) {
             init_default_source_slots(slots);
         }
@@ -3154,6 +3160,14 @@ StackedPane* DebugApp::layout_stack(LayoutNodeId leaf_id) {
     return it->second;
 }
 
+const StackedPane* DebugApp::layout_stack(LayoutNodeId leaf_id) const {
+    const auto it = layout_stacks_.find(leaf_id);
+    if (it == layout_stacks_.end()) {
+        return nullptr;
+    }
+    return it->second;
+}
+
 int& DebugApp::leaf_stack_index(LayoutNodeId leaf_id) {
     return layout_tree_.node(leaf_id).leaf.active_index;
 }
@@ -3173,7 +3187,7 @@ std::unique_ptr<StackedPane> DebugApp::build_stacked_pane_for_leaf(LayoutNodeId 
 
     auto stack = std::make_unique<StackedPane>(std::move(entries), dap_theme_.panel_background, dap_theme_.label,
                                                dap_theme_.title_focused, dap_theme_.divider,
-                                               dap_theme_.breakpoint_line_number, dap_theme_.variable_name);
+                                               dap_theme_.breakpoint_line_number);
     StackedPane* stack_ptr = stack.get();
     layout_stacks_[leaf_id] = stack_ptr;
 
@@ -3193,12 +3207,16 @@ std::unique_ptr<StackedPane> DebugApp::build_stacked_pane_for_leaf(LayoutNodeId 
     stack_ptr->set_pane_menu_action([this, leaf_id](tuinator::Point anchor) {
         show_pane_layout_menu(leaf_id, anchor);
     });
+    stack_ptr->set_layout_drag_press_handler(
+        [this, leaf_id](LayoutDragSourceKind kind, int tab_index, tuinator::Point position) {
+            on_layout_drag_press(leaf_id, kind, tab_index, position);
+        });
     stack_ptr->set_on_active_changed([this, leaf_id](int index) {
         leaf_stack_index(leaf_id) = index;
         if (SidebarSlot* slot = leaf_slot_at(leaf_id, index)) {
             model_.focus = focus_for_panel_type(slot->config.type);
         } else if (const std::optional<PanelDock> dock = layout_tree_.node(leaf_id).leaf.dock) {
-            if (*dock == PanelDock::Main) {
+            if (*dock == PanelDock::Center) {
                 model_.focus = Focus::Source;
             } else if (*dock == PanelDock::Bottom) {
                 model_.focus = Focus::Repl;
@@ -3211,8 +3229,8 @@ std::unique_ptr<StackedPane> DebugApp::build_stacked_pane_for_leaf(LayoutNodeId 
         apply_focus();
         if (StackedPane* pane = layout_stack(leaf_id); pane != nullptr) {
             const std::optional<PanelDock> dock = layout_tree_.node(leaf_id).leaf.dock;
-            if (dock == PanelDock::Sidebar) {
-                model_.status_message = "Sidebar: " + pane->active_label() + " (" + std::to_string(index + 1) + "/" +
+            if (dock == PanelDock::Left) {
+                model_.status_message = "Left: " + pane->active_label() + " (" + std::to_string(index + 1) + "/" +
                                         std::to_string(pane->count()) + ") — ◄ ► or [ ]";
                 sync_status_bar();
             } else if (dock == PanelDock::Bottom) {
@@ -3237,13 +3255,13 @@ std::unique_ptr<tuinator::Widget> DebugApp::build_layout_widget(LayoutNodeId nod
     const int tray_body = bottom_tray_height(term_size.height, model_.layout.bottom_pct);
     const int main_h = main_area_height(term_size.height, tray_body);
 
-    auto first = build_layout_widget(node.split.first);
-    auto second = build_layout_widget(node.split.second);
+    auto first = build_layout_widget(node.container.first);
+    auto second = build_layout_widget(node.container.second);
 
     int first_size = 0;
     bool use_proportional = true;
-    if (node.split.orientation == tuinator::SplitOrientation::Horizontal) {
-        if (is_sidebar_main_split(layout_tree_, node_id)) {
+    if (node.container.orientation == tuinator::SplitOrientation::Horizontal) {
+        if (is_left_center_split(layout_tree_, node_id)) {
             first_size = sidebar_first_size(term_size.width, model_.layout.sidebar_pct);
             use_proportional = false;
         }
@@ -3255,7 +3273,7 @@ std::unique_ptr<tuinator::Widget> DebugApp::build_layout_widget(LayoutNodeId nod
     auto split = std::make_unique<ResizableSplitPane>(
         std::move(first), std::move(second),
         tuinator::SplitPaneOptions{
-            .orientation = node.split.orientation,
+            .orientation = node.container.orientation,
             .first_size = first_size,
             .divider_style = dap_theme_.divider,
         },
@@ -3263,7 +3281,7 @@ std::unique_ptr<tuinator::Widget> DebugApp::build_layout_widget(LayoutNodeId nod
 
     ResizableSplitPane* split_ptr = split.get();
     if (use_proportional) {
-        split_ptr->set_proportional_first_size(node.split.first_pct);
+        split_ptr->set_proportional_first_size(node.container.first_pct);
     }
     layout_splits_[node_id] = split_ptr;
     bind_split_pane(split_ptr);
@@ -3271,7 +3289,7 @@ std::unique_ptr<tuinator::Widget> DebugApp::build_layout_widget(LayoutNodeId nod
     const LayoutNodeId split_id = node_id;
     split_ptr->set_on_first_size_changed([this, split_id](int /*first*/) {
         LayoutNode& split_node = layout_tree_.node(split_id);
-        if (split_node.kind != LayoutNode::Kind::Split) {
+        if (split_node.kind != LayoutNode::Kind::Container) {
             return;
         }
         const auto it = layout_splits_.find(split_id);
@@ -3279,18 +3297,22 @@ std::unique_ptr<tuinator::Widget> DebugApp::build_layout_widget(LayoutNodeId nod
             return;
         }
         const tuinator::Rect bounds = it->second->bounds();
-        const bool horizontal = split_node.split.orientation == tuinator::SplitOrientation::Horizontal;
+        const bool horizontal = split_node.container.orientation == tuinator::SplitOrientation::Horizontal;
         const int total = horizontal ? bounds.width : bounds.height;
         if (total <= 0) {
             return;
         }
-        split_node.split.first_pct =
+        split_node.container.first_pct =
             static_cast<std::uint16_t>(std::clamp(it->second->first_size() * 100 / total, 1, 99));
 
-        if (is_sidebar_main_split(layout_tree_, split_id)) {
-            model_.layout.sidebar_pct = split_node.split.first_pct;
+        if (divider_drag_active_) {
+            refresh_scroll_views();
+        }
+
+        if (is_left_center_split(layout_tree_, split_id)) {
+            model_.layout.sidebar_pct = split_node.container.first_pct;
             if (!divider_drag_active_) {
-                model_.status_message = "Sidebar " + std::to_string(model_.layout.sidebar_pct) + "%";
+                model_.status_message = "Left " + std::to_string(model_.layout.sidebar_pct) + "%";
                 if (status_bar_ != nullptr) {
                     status_bar_->set_text(format_status_bar_text());
                 }
@@ -3309,7 +3331,7 @@ std::unique_ptr<tuinator::Widget> DebugApp::build_layout_widget(LayoutNodeId nod
     if (is_default_bottom_root_split(layout_tree_, split_id)) {
         content_split_ = split_ptr;
     }
-    if (is_sidebar_main_split(layout_tree_, split_id)) {
+    if (is_left_center_split(layout_tree_, split_id)) {
         main_row_split_ = split_ptr;
     }
 
@@ -3383,6 +3405,249 @@ void DebugApp::rebuild_layout_ui() {
     request_full_screen_refresh();
 }
 
+void DebugApp::clear_layout_menu_preview() {
+    if (!layout_menu_preview_.has_value()) {
+        return;
+    }
+    layout_menu_preview_.reset();
+    request_repaint();
+}
+
+void DebugApp::set_layout_menu_pane_preview(LayoutNodeId source_leaf, LayoutNodeId target_leaf) {
+    const tuinator::Rect bounds = layout_node_bounds(target_leaf);
+    layout_menu_preview_ = LayoutMenuPreview{
+        .source_leaf = source_leaf,
+        .target =
+            LayoutDropTarget{
+                .anchor = target_leaf,
+                .hover_leaf = target_leaf,
+                .zone = LayoutDropZone::Center,
+                .highlight = bounds,
+                .spans_siblings = false,
+            },
+        .mode = LayoutMenuPreview::Mode::PaneHighlight,
+        .swap = false,
+    };
+    request_repaint();
+}
+
+void DebugApp::set_layout_menu_placement_preview(LayoutNodeId source_leaf, const LayoutPlacementOption& option) {
+    layout_menu_preview_ = LayoutMenuPreview{
+        .source_leaf = source_leaf,
+        .target = option.target,
+        .mode = LayoutMenuPreview::Mode::Placement,
+        .swap = option.swap,
+    };
+    request_repaint();
+}
+
+std::vector<LayoutNodeId> DebugApp::leaves_in_subtree(LayoutNodeId node_id) const {
+    if (!layout_tree_.has_node(node_id)) {
+        return {};
+    }
+
+    const LayoutNode& node = layout_tree_.node(node_id);
+    if (node.kind == LayoutNode::Kind::Leaf) {
+        return {node_id};
+    }
+
+    std::vector<LayoutNodeId> leaves = leaves_in_subtree(node.container.first);
+    const std::vector<LayoutNodeId> right = leaves_in_subtree(node.container.second);
+    leaves.insert(leaves.end(), right.begin(), right.end());
+    std::sort(leaves.begin(), leaves.end());
+    return leaves;
+}
+
+std::string DebugApp::layout_group_label(LayoutNodeId node_id) const {
+    const std::vector<LayoutNodeId> leaves = leaves_in_subtree(node_id);
+    if (leaves.empty()) {
+        return "group";
+    }
+    if (leaves.size() == 1) {
+        return layout_leaf_label(leaves.front());
+    }
+
+    std::string label;
+    for (std::size_t i = 0; i < leaves.size(); ++i) {
+        if (i > 0) {
+            label += '+';
+        }
+        label += layout_leaf_label(leaves[i]);
+    }
+    return label;
+}
+
+LayoutDropTarget DebugApp::make_placement_drop_target(LayoutNodeId anchor, LayoutNodeId reference_leaf,
+                                                      LayoutDropZone zone, bool spans_siblings) const {
+    LayoutDropTarget target{
+        .anchor = anchor,
+        .hover_leaf = reference_leaf,
+        .zone = zone,
+        .spans_siblings = spans_siblings,
+    };
+
+    const tuinator::Rect content = layout_content_bounds();
+    const int shell_x = std::max(4, std::min(10, content.width / 10));
+    const int shell_y = std::max(4, std::min(10, content.height / 10));
+
+    if (spans_siblings && anchor == layout_tree_.root() &&
+        (zone == LayoutDropZone::Above || zone == LayoutDropZone::Below || zone == LayoutDropZone::Left ||
+         zone == LayoutDropZone::Right)) {
+        target.highlight = layout_drop_outer_shell_rect(content, zone, shell_x, shell_y);
+        return target;
+    }
+
+    const tuinator::Rect anchor_bounds = layout_node_bounds(anchor);
+    if (spans_siblings) {
+        target.highlight = layout_drop_span_rect(anchor_bounds, zone);
+        return target;
+    }
+
+    const tuinator::Rect reference_bounds = layout_node_bounds(reference_leaf);
+    target.anchor = reference_leaf;
+    target.highlight = zone == LayoutDropZone::Center ? reference_bounds : layout_drop_zone_rect(reference_bounds, zone);
+    return target;
+}
+
+std::vector<LayoutPlacementOption> DebugApp::collect_move_placement_options(LayoutNodeId from_leaf,
+                                                                            LayoutNodeId reference_leaf) const {
+    struct PlacementKey {
+        LayoutNodeId anchor = 0;
+        LayoutDropZone zone = LayoutDropZone::Center;
+        bool spans_siblings = false;
+        bool swap = false;
+
+        bool operator<(const PlacementKey& other) const {
+            if (anchor != other.anchor) {
+                return anchor < other.anchor;
+            }
+            if (zone != other.zone) {
+                return zone < other.zone;
+            }
+            if (spans_siblings != other.spans_siblings) {
+                return spans_siblings < other.spans_siblings;
+            }
+            return swap < other.swap;
+        }
+    };
+
+    auto zone_prefix = [](LayoutDropZone zone) -> std::string {
+        switch (zone) {
+        case LayoutDropZone::Above:
+            return "Above ";
+        case LayoutDropZone::Below:
+            return "Below ";
+        case LayoutDropZone::Left:
+            return "Left ";
+        case LayoutDropZone::Right:
+            return "Right ";
+        case LayoutDropZone::Center:
+            return "Into ";
+        }
+        return "";
+    };
+
+    auto can_place = [&](const LayoutDropTarget& target, bool swap) -> bool {
+        if (swap) {
+            return from_leaf != target.hover_leaf;
+        }
+        if (!swap && !target.spans_siblings && from_leaf == target.anchor) {
+            return false;
+        }
+        return compute_insert_anchor(from_leaf, target.anchor, target.zone) != 0;
+    };
+
+    std::vector<LayoutPlacementOption> options;
+    std::set<PlacementKey> seen;
+
+    auto add_option = [&](const std::string& label, LayoutNodeId anchor, LayoutDropZone zone, bool spans_siblings,
+                          bool swap) {
+        const LayoutDropTarget target = make_placement_drop_target(anchor, reference_leaf, zone, spans_siblings);
+        const PlacementKey key{target.anchor, target.zone, target.spans_siblings, swap};
+        if (seen.count(key) > 0 || !can_place(target, swap)) {
+            return;
+        }
+        seen.insert(key);
+        options.push_back(LayoutPlacementOption{label, target, swap});
+    };
+
+    const std::string reference_label = layout_leaf_label(reference_leaf);
+    add_option(zone_prefix(LayoutDropZone::Above) + reference_label, reference_leaf, LayoutDropZone::Above, false,
+               false);
+    add_option(zone_prefix(LayoutDropZone::Below) + reference_label, reference_leaf, LayoutDropZone::Below, false,
+               false);
+    add_option(zone_prefix(LayoutDropZone::Left) + reference_label, reference_leaf, LayoutDropZone::Left, false,
+               false);
+    add_option(zone_prefix(LayoutDropZone::Right) + reference_label, reference_leaf, LayoutDropZone::Right, false,
+               false);
+    if (from_leaf != reference_leaf) {
+        add_option(zone_prefix(LayoutDropZone::Center) + reference_label, reference_leaf, LayoutDropZone::Center, false,
+                   true);
+    }
+
+    const LayoutNodeId root = layout_tree_.root();
+    for (std::optional<LayoutNodeId> parent = layout_tree_.parent_of(reference_leaf); parent.has_value();
+         parent = layout_tree_.parent_of(*parent)) {
+        if (*parent == root) {
+            break;
+        }
+        const LayoutNode& parent_node = layout_tree_.node(*parent);
+        if (parent_node.kind != LayoutNode::Kind::Container) {
+            break;
+        }
+
+        const std::string group_label = layout_group_label(*parent);
+        const bool horizontal = parent_node.container.orientation == tuinator::SplitOrientation::Horizontal;
+        if (horizontal) {
+            add_option(zone_prefix(LayoutDropZone::Above) + group_label, *parent, LayoutDropZone::Above, true, false);
+            add_option(zone_prefix(LayoutDropZone::Below) + group_label, *parent, LayoutDropZone::Below, true, false);
+        } else {
+            add_option(zone_prefix(LayoutDropZone::Left) + group_label, *parent, LayoutDropZone::Left, true, false);
+            add_option(zone_prefix(LayoutDropZone::Right) + group_label, *parent, LayoutDropZone::Right, true, false);
+        }
+    }
+
+    const tuinator::Rect reference_bounds = layout_node_bounds(reference_leaf);
+    const tuinator::Rect content = layout_content_bounds();
+    if (layout_tree_.leaf_count() > 1 && reference_bounds.width > 0 && content.width > 0) {
+        if (reference_bounds.y <= content.y) {
+            add_option(zone_prefix(LayoutDropZone::Above) + "all", root, LayoutDropZone::Above, true, false);
+        }
+        if (reference_bounds.y + reference_bounds.height >= content.y + content.height - 1) {
+            add_option(zone_prefix(LayoutDropZone::Below) + "all", root, LayoutDropZone::Below, true, false);
+        }
+        if (reference_bounds.x <= content.x) {
+            add_option(zone_prefix(LayoutDropZone::Left) + "all", root, LayoutDropZone::Left, true, false);
+        }
+        if (reference_bounds.x + reference_bounds.width >= content.x + content.width - 1) {
+            add_option(zone_prefix(LayoutDropZone::Right) + "all", root, LayoutDropZone::Right, true, false);
+        }
+    }
+
+    return options;
+}
+
+void DebugApp::open_layout_context_menu(tuinator::Point anchor, std::vector<ContextMenu::Item> items,
+                                        const std::function<void(int index)>& on_hover) {
+    if (context_menu_ == nullptr) {
+        return;
+    }
+
+    clear_layout_menu_preview();
+    context_menu_->set_on_selection_changed([this, on_hover](int index) {
+        if (index < 0) {
+            clear_layout_menu_preview();
+            return;
+        }
+        if (on_hover) {
+            on_hover(index);
+        }
+    });
+    context_menu_->open(anchor, overlay_clip_bounds(), std::move(items));
+    context_menu_->layout(overlay_clip_bounds());
+    request_full_screen_refresh();
+}
+
 void DebugApp::show_pane_layout_menu(LayoutNodeId leaf_id, tuinator::Point anchor) {
     if (context_menu_ == nullptr) {
         return;
@@ -3402,15 +3667,1016 @@ void DebugApp::show_pane_layout_menu(LayoutNodeId leaf_id, tuinator::Point ancho
             "Delete",
             [this, leaf_id]() { delete_layout_pane(leaf_id); },
         });
+        items.push_back(ContextMenu::Item{
+            "Swap with ›",
+            [this, leaf_id, anchor]() { show_swap_pane_menu(leaf_id, anchor); },
+        });
+        items.push_back(ContextMenu::Item{
+            "Move ›",
+            [this, leaf_id, anchor]() { show_move_pane_menu(leaf_id, anchor); },
+        });
     }
-    items.push_back(ContextMenu::Item{
-        "Add ›",
-        [this, leaf_id, anchor]() { show_pane_add_menu(leaf_id, anchor); },
-    });
+
+    open_layout_context_menu(anchor, std::move(items), nullptr);
+}
+
+std::string DebugApp::layout_leaf_label(LayoutNodeId leaf_id) const {
+    if (const auto it = layout_stacks_.find(leaf_id); it != layout_stacks_.end()) {
+        if (StackedPane* stack = it->second; stack != nullptr && stack->count() > 0) {
+            const std::string& active = stack->active_label();
+            if (!active.empty()) {
+                return active;
+            }
+        }
+    }
+
+    int pane_number = 1;
+    for (LayoutNodeId id : layout_tree_.leaf_ids()) {
+        if (id == leaf_id) {
+            break;
+        }
+        ++pane_number;
+    }
+    return "Pane " + std::to_string(pane_number);
+}
+
+std::string DebugApp::layout_leaf_move_label(LayoutNodeId from_leaf, LayoutNodeId to_leaf) const {
+    const std::optional<PanelDock> from_dock = layout_tree_.node(from_leaf).leaf.dock;
+    const std::optional<PanelDock> to_dock = layout_tree_.node(to_leaf).leaf.dock;
+    if (from_dock.has_value() && to_dock.has_value()) {
+        if (*from_dock == PanelDock::Left) {
+            if (*to_dock == PanelDock::Center) {
+                return "Right";
+            }
+            if (*to_dock == PanelDock::Bottom) {
+                return "Below";
+            }
+        }
+        if (*from_dock == PanelDock::Center) {
+            if (*to_dock == PanelDock::Left) {
+                return "Left";
+            }
+            if (*to_dock == PanelDock::Bottom) {
+                return "Below";
+            }
+        }
+        if (*from_dock == PanelDock::Bottom) {
+            if (*to_dock == PanelDock::Left) {
+                return "Above (left)";
+            }
+            if (*to_dock == PanelDock::Center) {
+                return "Above";
+            }
+        }
+    }
+
+    const std::optional<LayoutNodeId> shared_parent = layout_tree_.parent_of(from_leaf);
+    if (shared_parent.has_value() && layout_tree_.parent_of(to_leaf) == shared_parent) {
+        const LayoutNode& parent = layout_tree_.node(*shared_parent);
+        if (parent.kind == LayoutNode::Kind::Container) {
+            const bool horizontal = parent.container.orientation == tuinator::SplitOrientation::Horizontal;
+            if (parent.container.first == from_leaf && parent.container.second == to_leaf) {
+                return horizontal ? "Right" : "Below";
+            }
+            if (parent.container.first == to_leaf && parent.container.second == from_leaf) {
+                return horizontal ? "Left" : "Above";
+            }
+        }
+    }
+
+    return layout_leaf_label(to_leaf);
+}
+
+void DebugApp::show_move_tab_menu(LayoutNodeId from_leaf, tuinator::Point anchor) {
+    if (context_menu_ == nullptr) {
+        return;
+    }
+
+    std::vector<ContextMenu::Item> items;
+    for (LayoutNodeId target_leaf : layout_tree_.leaf_ids()) {
+        if (target_leaf == from_leaf) {
+            continue;
+        }
+        items.push_back(ContextMenu::Item{
+            layout_leaf_label(target_leaf),
+            [this, from_leaf, target_leaf]() { move_active_panel_to_leaf(from_leaf, target_leaf); },
+        });
+    }
+    if (items.empty()) {
+        return;
+    }
 
     context_menu_->open(anchor, overlay_clip_bounds(), std::move(items));
     context_menu_->layout(overlay_clip_bounds());
     request_full_screen_refresh();
+}
+
+void DebugApp::show_swap_pane_menu(LayoutNodeId from_leaf, tuinator::Point anchor) {
+    if (context_menu_ == nullptr) {
+        return;
+    }
+
+    std::vector<LayoutNodeId> targets;
+    std::vector<ContextMenu::Item> items;
+    for (LayoutNodeId target_leaf : layout_tree_.leaf_ids()) {
+        if (target_leaf == from_leaf) {
+            continue;
+        }
+        targets.push_back(target_leaf);
+        items.push_back(ContextMenu::Item{
+            layout_leaf_label(target_leaf),
+            [this, from_leaf, target_leaf]() { swap_layout_panes(from_leaf, target_leaf); },
+        });
+    }
+    if (items.empty()) {
+        return;
+    }
+
+    open_layout_context_menu(
+        anchor, std::move(items),
+        [this, from_leaf, targets](int index) {
+            if (index < 0 || index >= static_cast<int>(targets.size())) {
+                return;
+            }
+            set_layout_menu_pane_preview(from_leaf, targets[static_cast<std::size_t>(index)]);
+        });
+}
+
+void DebugApp::show_move_pane_direction_menu(LayoutNodeId from_leaf, LayoutNodeId target_leaf,
+                                             tuinator::Point anchor) {
+    if (context_menu_ == nullptr) {
+        return;
+    }
+
+    const std::vector<LayoutPlacementOption> placements = collect_move_placement_options(from_leaf, target_leaf);
+    if (placements.empty()) {
+        return;
+    }
+
+    std::vector<ContextMenu::Item> items;
+    items.reserve(placements.size());
+    for (const LayoutPlacementOption& placement : placements) {
+        items.push_back(ContextMenu::Item{
+            placement.label,
+            [this, from_leaf, placement]() {
+                if (placement.swap) {
+                    swap_layout_panes(from_leaf, placement.target.hover_leaf);
+                    return;
+                }
+                move_layout_pane_adjacent(from_leaf, placement.target.anchor, placement.target.zone);
+            },
+        });
+    }
+
+    open_layout_context_menu(
+        anchor, std::move(items),
+        [this, from_leaf, placements](int index) {
+            if (index < 0 || index >= static_cast<int>(placements.size())) {
+                return;
+            }
+            set_layout_menu_placement_preview(from_leaf, placements[static_cast<std::size_t>(index)]);
+        });
+}
+
+void DebugApp::show_move_pane_menu(LayoutNodeId from_leaf, tuinator::Point anchor) {
+    if (context_menu_ == nullptr) {
+        return;
+    }
+
+    std::vector<LayoutNodeId> targets;
+    std::vector<ContextMenu::Item> items;
+    for (LayoutNodeId target_leaf : layout_tree_.leaf_ids()) {
+        if (target_leaf == from_leaf) {
+            continue;
+        }
+        targets.push_back(target_leaf);
+        items.push_back(ContextMenu::Item{
+            layout_leaf_label(target_leaf),
+            [this, from_leaf, target_leaf, anchor]() {
+                show_move_pane_direction_menu(from_leaf, target_leaf, anchor);
+            },
+        });
+    }
+    if (items.empty()) {
+        return;
+    }
+
+    open_layout_context_menu(
+        anchor, std::move(items),
+        [this, from_leaf, targets](int index) {
+            if (index < 0 || index >= static_cast<int>(targets.size())) {
+                return;
+            }
+            set_layout_menu_pane_preview(from_leaf, targets[static_cast<std::size_t>(index)]);
+        });
+}
+
+void DebugApp::collapse_empty_leaf_if_needed(LayoutNodeId leaf_id) {
+    if (leaf_slots(leaf_id).empty() && layout_tree_.leaf_count() > 1) {
+        layout_tree_.delete_leaf(leaf_id);
+    }
+}
+
+void DebugApp::move_active_panel_to_leaf(LayoutNodeId from_leaf, LayoutNodeId to_leaf) {
+    if (from_leaf == to_leaf) {
+        return;
+    }
+    if (context_menu_ != nullptr) {
+        context_menu_->close();
+    }
+
+    std::vector<SidebarSlot>& from_slots = leaf_slots(from_leaf);
+    if (from_slots.empty()) {
+        return;
+    }
+
+    int index = leaf_stack_index(from_leaf);
+    if (StackedPane* from_stack = layout_stack(from_leaf); from_stack != nullptr) {
+        index = from_stack->active_index();
+    }
+    index = std::clamp(index, 0, static_cast<int>(from_slots.size()) - 1);
+
+    if (from_slots[static_cast<std::size_t>(index)].config.type == SidebarPanelType::Source) {
+        move_source_panel_to_leaf(to_leaf);
+        return;
+    }
+
+    SidebarSlot slot = std::move(from_slots[static_cast<std::size_t>(index)]);
+    from_slots.erase(from_slots.begin() + static_cast<std::ptrdiff_t>(index));
+
+    int& from_active = leaf_stack_index(from_leaf);
+    if (from_slots.empty()) {
+        from_active = 0;
+    } else {
+        if (from_active > index) {
+            --from_active;
+        } else if (from_active == index) {
+            from_active = std::min(index, static_cast<int>(from_slots.size()) - 1);
+        }
+        from_active = std::clamp(from_active, 0, static_cast<int>(from_slots.size()) - 1);
+    }
+
+    if (slot.config.type == SidebarPanelType::Repl || slot.config.type == SidebarPanelType::Console) {
+        slot.shared_host.reset();
+    }
+
+    std::vector<SidebarSlot>& to_slots = leaf_slots(to_leaf);
+    to_slots.push_back(std::move(slot));
+    const std::string moved_label = to_slots.back().config.tab_label;
+    leaf_stack_index(to_leaf) = static_cast<int>(to_slots.size()) - 1;
+
+    model_.focus = focus_for_panel_type(to_slots.back().config.type);
+    if (model_.focus == Focus::Repl) {
+        repl_input_focused_ = false;
+    }
+
+    collapse_empty_leaf_if_needed(from_leaf);
+    rebuild_layout_ui();
+    model_.status_message = "Moved " + moved_label + " to " + layout_leaf_label(to_leaf);
+    sync_status_bar();
+}
+
+void DebugApp::move_tab_to_leaf(LayoutNodeId from_leaf, int tab_index, LayoutNodeId to_leaf) {
+    if (from_leaf == to_leaf) {
+        return;
+    }
+    if (context_menu_ != nullptr) {
+        context_menu_->close();
+    }
+
+    std::vector<SidebarSlot>& from_slots = leaf_slots(from_leaf);
+    if (from_slots.empty()) {
+        return;
+    }
+    tab_index = std::clamp(tab_index, 0, static_cast<int>(from_slots.size()) - 1);
+
+    if (from_slots[static_cast<std::size_t>(tab_index)].config.type == SidebarPanelType::Source) {
+        move_source_panel_to_leaf(to_leaf);
+        return;
+    }
+
+    SidebarSlot slot = std::move(from_slots[static_cast<std::size_t>(tab_index)]);
+    from_slots.erase(from_slots.begin() + static_cast<std::ptrdiff_t>(tab_index));
+
+    int& from_active = leaf_stack_index(from_leaf);
+    if (from_slots.empty()) {
+        from_active = 0;
+    } else {
+        if (from_active > tab_index) {
+            --from_active;
+        } else if (from_active == tab_index) {
+            from_active = std::min(tab_index, static_cast<int>(from_slots.size()) - 1);
+        }
+        from_active = std::clamp(from_active, 0, static_cast<int>(from_slots.size()) - 1);
+    }
+
+    if (slot.config.type == SidebarPanelType::Repl || slot.config.type == SidebarPanelType::Console) {
+        slot.shared_host.reset();
+    }
+
+    std::vector<SidebarSlot>& to_slots = leaf_slots(to_leaf);
+    to_slots.push_back(std::move(slot));
+    const std::string moved_label = to_slots.back().config.tab_label;
+    leaf_stack_index(to_leaf) = static_cast<int>(to_slots.size()) - 1;
+
+    model_.focus = focus_for_panel_type(to_slots.back().config.type);
+    if (model_.focus == Focus::Repl) {
+        repl_input_focused_ = false;
+    }
+
+    collapse_empty_leaf_if_needed(from_leaf);
+    rebuild_layout_ui();
+    model_.status_message = "Added " + moved_label + " to " + layout_leaf_label(to_leaf);
+    sync_status_bar();
+}
+
+void DebugApp::normalize_split_after_swap(LayoutNodeId a, LayoutNodeId b) {
+    const std::optional<LayoutNodeId> parent = layout_tree_.parent_of(a);
+    if (!parent.has_value() || layout_tree_.parent_of(b) != parent) {
+        return;
+    }
+
+    LayoutNode& parent_node = layout_tree_.node(*parent);
+    if (parent_node.kind != LayoutNode::Kind::Container || is_left_center_split(layout_tree_, *parent)) {
+        return;
+    }
+
+    if (parent_node.container.orientation == tuinator::SplitOrientation::Horizontal) {
+        const LayoutNodeId first = parent_node.container.first;
+        const LayoutNodeId second = parent_node.container.second;
+        if (layout_tree_.subtree_contains_dock(first, PanelDock::Center) &&
+            layout_tree_.subtree_contains_dock(second, PanelDock::Left)) {
+            parent_node.container.first_pct = static_cast<std::uint16_t>(
+                std::clamp(100 - static_cast<int>(model_.layout.sidebar_pct), 1, 99));
+        } else {
+            parent_node.container.first_pct = 50;
+        }
+        return;
+    }
+
+    parent_node.container.first_pct = 50;
+}
+
+void DebugApp::swap_layout_panes(LayoutNodeId a, LayoutNodeId b) {
+    if (a == b) {
+        return;
+    }
+    if (context_menu_ != nullptr) {
+        context_menu_->close();
+    }
+
+    const std::string a_label = layout_leaf_label(a);
+    const std::string b_label = layout_leaf_label(b);
+    layout_tree_.swap_leaf_contents(a, b);
+    normalize_split_after_swap(a, b);
+    rebuild_layout_ui();
+    model_.status_message = "Swapped " + a_label + " with " + b_label;
+    sync_status_bar();
+}
+
+LayoutNodeId DebugApp::compute_insert_anchor(LayoutNodeId from_leaf, LayoutNodeId anchor, LayoutDropZone zone) const {
+    if (!layout_tree_.has_node(anchor)) {
+        return 0;
+    }
+
+    if (!layout_tree_.subtree_contains(anchor, from_leaf)) {
+        return anchor;
+    }
+
+    const bool vertical_insert = zone == LayoutDropZone::Above || zone == LayoutDropZone::Below;
+    const bool horizontal_insert = zone == LayoutDropZone::Left || zone == LayoutDropZone::Right;
+
+    if (const std::optional<LayoutNodeId> from_parent = layout_tree_.parent_of(from_leaf);
+        from_parent.has_value() && *from_parent == anchor) {
+        const LayoutNode& anchor_node = layout_tree_.node(anchor);
+        const LayoutNodeId sibling =
+            anchor_node.container.first == from_leaf ? anchor_node.container.second : anchor_node.container.first;
+        if (vertical_insert) {
+            if (const std::optional<LayoutNodeId> grandparent = layout_tree_.parent_of(anchor);
+                grandparent.has_value()) {
+                return *grandparent;
+            }
+            return sibling;
+        }
+        if (horizontal_insert) {
+            return anchor;
+        }
+    }
+
+    return anchor;
+}
+
+void DebugApp::move_layout_pane_adjacent(LayoutNodeId from_leaf, LayoutNodeId anchor, LayoutDropZone zone) {
+    if (from_leaf == anchor || zone == LayoutDropZone::Center) {
+        return;
+    }
+    if (context_menu_ != nullptr) {
+        context_menu_->close();
+    }
+
+    const LayoutNodeId insert_anchor = compute_insert_anchor(from_leaf, anchor, zone);
+    if (insert_anchor == 0) {
+        model_.status_message = "Could not move pane";
+        sync_status_bar();
+        return;
+    }
+
+    std::optional<LayoutLeafData> extracted = layout_tree_.extract_leaf(from_leaf);
+    if (!extracted.has_value()) {
+        model_.status_message = "Cannot move the last pane";
+        sync_status_bar();
+        return;
+    }
+
+    LayoutLeafData leaf_data = std::move(*extracted);
+    LayoutNodeId resolved_anchor = insert_anchor;
+    if (!layout_tree_.has_node(resolved_anchor)) {
+        resolved_anchor = layout_tree_.root();
+    }
+
+    const PaneSplitDirection direction = layout_drop_zone_to_split(zone);
+    bool inserted = layout_tree_.has_node(resolved_anchor) &&
+                    layout_tree_.insert_adjacent(resolved_anchor, direction, leaf_data);
+    if (!inserted && layout_tree_.has_node(layout_tree_.root())) {
+        inserted = layout_tree_.insert_adjacent(layout_tree_.root(), PaneSplitDirection::Right, leaf_data);
+    }
+
+    if (!inserted && !leaf_data.slots.empty() && layout_tree_.has_node(layout_tree_.root())) {
+        const LayoutNodeId restored = layout_tree_.split_leaf(layout_tree_.root(), PaneSplitDirection::Right);
+        layout_tree_.node(restored).leaf = std::move(leaf_data);
+        inserted = true;
+    }
+
+    rebuild_layout_ui();
+
+    if (!inserted) {
+        model_.status_message = "Could not move pane";
+    } else {
+        model_.status_message = "Moved pane";
+    }
+    sync_status_bar();
+}
+
+void DebugApp::move_tab_to_new_pane_adjacent(LayoutNodeId from_leaf, int tab_index, LayoutNodeId to_leaf,
+                                             LayoutDropZone zone) {
+    if (zone == LayoutDropZone::Center) {
+        move_tab_to_leaf(from_leaf, tab_index, to_leaf);
+        return;
+    }
+    if (context_menu_ != nullptr) {
+        context_menu_->close();
+    }
+
+    std::vector<SidebarSlot>& from_slots = leaf_slots(from_leaf);
+    if (from_slots.empty()) {
+        return;
+    }
+    tab_index = std::clamp(tab_index, 0, static_cast<int>(from_slots.size()) - 1);
+
+    if (from_slots[static_cast<std::size_t>(tab_index)].config.type == SidebarPanelType::Source) {
+        move_layout_pane_adjacent(from_leaf, to_leaf, zone);
+        return;
+    }
+
+    SidebarSlot slot = std::move(from_slots[static_cast<std::size_t>(tab_index)]);
+    from_slots.erase(from_slots.begin() + static_cast<std::ptrdiff_t>(tab_index));
+
+    int& from_active = leaf_stack_index(from_leaf);
+    if (from_slots.empty()) {
+        from_active = 0;
+    } else {
+        if (from_active > tab_index) {
+            --from_active;
+        } else if (from_active == tab_index) {
+            from_active = std::min(tab_index, static_cast<int>(from_slots.size()) - 1);
+        }
+        from_active = std::clamp(from_active, 0, static_cast<int>(from_slots.size()) - 1);
+    }
+
+    if (slot.config.type == SidebarPanelType::Repl || slot.config.type == SidebarPanelType::Console) {
+        slot.shared_host.reset();
+    }
+
+    LayoutLeafData new_leaf;
+    new_leaf.slots.push_back(std::move(slot));
+    new_leaf.active_index = 0;
+
+    LayoutNodeId insert_anchor = compute_insert_anchor(from_leaf, to_leaf, zone);
+    if (!layout_tree_.has_node(insert_anchor)) {
+        insert_anchor = layout_tree_.root();
+    }
+
+    bool inserted = layout_tree_.has_node(insert_anchor) &&
+                    layout_tree_.insert_adjacent(insert_anchor, layout_drop_zone_to_split(zone), new_leaf);
+    if (!inserted && layout_tree_.has_node(layout_tree_.root())) {
+        inserted = layout_tree_.insert_adjacent(layout_tree_.root(), PaneSplitDirection::Right, new_leaf);
+    }
+
+    collapse_empty_leaf_if_needed(from_leaf);
+    rebuild_layout_ui();
+
+    if (!inserted) {
+        model_.status_message = "Could not move tab";
+        sync_status_bar();
+        return;
+    }
+    model_.status_message = "Moved tab next to " + layout_leaf_label(to_leaf);
+    sync_status_bar();
+}
+
+namespace {
+
+int layout_shell_thickness_y(const tuinator::Rect& content) {
+    return std::max(4, std::min(10, content.height / 10));
+}
+
+int layout_shell_thickness_x(const tuinator::Rect& content) {
+    return std::max(4, std::min(10, content.width / 10));
+}
+
+bool leaf_touches_content_bottom(const tuinator::Rect& leaf, const tuinator::Rect& content) {
+    return leaf.y + leaf.height >= content.y + content.height - 1;
+}
+
+bool leaf_touches_content_right(const tuinator::Rect& leaf, const tuinator::Rect& content) {
+    return leaf.x + leaf.width >= content.x + content.width - 1;
+}
+
+bool leaf_touches_content_top(const tuinator::Rect& leaf, const tuinator::Rect& content) {
+    return leaf.y <= content.y;
+}
+
+bool leaf_touches_content_left(const tuinator::Rect& leaf, const tuinator::Rect& content) {
+    return leaf.x <= content.x;
+}
+
+LayoutDropTarget make_layout_shell_target(LayoutNodeId root, LayoutNodeId hover_leaf, LayoutDropZone zone,
+                                          const tuinator::Rect& content, int shell_x, int shell_y) {
+    return LayoutDropTarget{
+        .anchor = root,
+        .hover_leaf = hover_leaf,
+        .zone = zone,
+        .highlight = layout_drop_outer_shell_rect(content, zone, shell_x, shell_y),
+        .spans_siblings = true,
+    };
+}
+
+std::optional<LayoutNodeId> horizontal_parent_of(const LayoutTree& tree, LayoutNodeId leaf) {
+    const std::optional<LayoutNodeId> parent = tree.parent_of(leaf);
+    if (!parent.has_value()) {
+        return std::nullopt;
+    }
+    const LayoutNode& parent_node = tree.node(*parent);
+    if (parent_node.kind != LayoutNode::Kind::Container ||
+        parent_node.container.orientation != tuinator::SplitOrientation::Horizontal) {
+        return std::nullopt;
+    }
+    return *parent;
+}
+
+bool near_horizontal_seam(LayoutNodeId leaf, tuinator::Point position, const tuinator::Rect& leaf_bounds,
+                          const LayoutTree& tree) {
+    const std::optional<LayoutNodeId> parent = horizontal_parent_of(tree, leaf);
+    if (!parent.has_value()) {
+        return false;
+    }
+    const LayoutNode& parent_node = tree.node(*parent);
+    const bool is_first = parent_node.container.first == leaf;
+    const int seam_x = is_first ? leaf_bounds.x + leaf_bounds.width : leaf_bounds.x;
+    const int seam_band = std::max(3, leaf_bounds.width / 3);
+    return std::abs(position.x - seam_x) <= seam_band;
+}
+
+std::optional<LayoutNodeId> vertical_parent_of(const LayoutTree& tree, LayoutNodeId leaf) {
+    const std::optional<LayoutNodeId> parent = tree.parent_of(leaf);
+    if (!parent.has_value()) {
+        return std::nullopt;
+    }
+    const LayoutNode& parent_node = tree.node(*parent);
+    if (parent_node.kind != LayoutNode::Kind::Container ||
+        parent_node.container.orientation != tuinator::SplitOrientation::Vertical) {
+        return std::nullopt;
+    }
+    return *parent;
+}
+
+bool near_vertical_seam(LayoutNodeId leaf, tuinator::Point position, const tuinator::Rect& leaf_bounds,
+                        const LayoutTree& tree) {
+    const std::optional<LayoutNodeId> parent = vertical_parent_of(tree, leaf);
+    if (!parent.has_value()) {
+        return false;
+    }
+    const LayoutNode& parent_node = tree.node(*parent);
+    const bool is_first = parent_node.container.first == leaf;
+    const int seam_y = is_first ? leaf_bounds.y + leaf_bounds.height : leaf_bounds.y;
+    const int seam_band = std::max(2, leaf_bounds.height / 3);
+    return std::abs(position.y - seam_y) <= seam_band;
+}
+
+}  // namespace
+
+tuinator::Rect DebugApp::layout_node_bounds(LayoutNodeId node_id) const {
+    if (const StackedPane* stack = layout_stack(node_id); stack != nullptr) {
+        return stack->bounds();
+    }
+    if (const auto it = layout_splits_.find(node_id); it != layout_splits_.end() && it->second != nullptr) {
+        return it->second->bounds();
+    }
+    return {};
+}
+
+tuinator::Rect DebugApp::layout_content_bounds() const {
+    const tuinator::Rect root_bounds = layout_node_bounds(layout_tree_.root());
+    if (root_bounds.width > 0 && root_bounds.height > 0) {
+        return root_bounds;
+    }
+
+    tuinator::Rect merged;
+    for (const auto& [leaf_id, stack] : layout_stacks_) {
+        if (stack == nullptr) {
+            continue;
+        }
+        const tuinator::Rect bounds = stack->bounds();
+        if (merged.width <= 0) {
+            merged = bounds;
+            continue;
+        }
+        const int x2 = std::max(merged.x + merged.width, bounds.x + bounds.width);
+        const int y2 = std::max(merged.y + merged.height, bounds.y + bounds.height);
+        merged.x = std::min(merged.x, bounds.x);
+        merged.y = std::min(merged.y, bounds.y);
+        merged.width = x2 - merged.x;
+        merged.height = y2 - merged.y;
+    }
+    return merged;
+}
+
+std::optional<LayoutDropTarget> DebugApp::resolve_layout_drop_target(tuinator::Point position,
+                                                                     LayoutDragSourceKind kind,
+                                                                     LayoutNodeId source_leaf) const {
+    const std::optional<LayoutNodeId> hover_leaf = layout_leaf_at_point(position);
+    if (!hover_leaf.has_value()) {
+        return std::nullopt;
+    }
+
+    const StackedPane* stack = layout_stack(*hover_leaf);
+    if (stack == nullptr) {
+        return std::nullopt;
+    }
+
+    const tuinator::Rect leaf_bounds = stack->bounds();
+    const tuinator::Rect content = layout_content_bounds();
+    const int shell_y = layout_shell_thickness_y(content);
+    const int shell_x = layout_shell_thickness_x(content);
+    const LayoutNodeId root = layout_tree_.root();
+    const LayoutDropZone zone = layout_drop_zone_at(leaf_bounds, position);
+
+    if (position.y >= content.y + content.height - shell_y) {
+        return make_layout_shell_target(root, *hover_leaf, LayoutDropZone::Below, content, shell_x, shell_y);
+    }
+    if (position.y < content.y + shell_y) {
+        return make_layout_shell_target(root, *hover_leaf, LayoutDropZone::Above, content, shell_x, shell_y);
+    }
+    if (position.x >= content.x + content.width - shell_x) {
+        return make_layout_shell_target(root, *hover_leaf, LayoutDropZone::Right, content, shell_x, shell_y);
+    }
+    if (position.x < content.x + shell_x) {
+        return make_layout_shell_target(root, *hover_leaf, LayoutDropZone::Left, content, shell_x, shell_y);
+    }
+
+    if (zone == LayoutDropZone::Below && leaf_touches_content_bottom(leaf_bounds, content)) {
+        return make_layout_shell_target(root, *hover_leaf, LayoutDropZone::Below, content, shell_x, shell_y);
+    }
+    if (zone == LayoutDropZone::Right && leaf_touches_content_right(leaf_bounds, content)) {
+        return make_layout_shell_target(root, *hover_leaf, LayoutDropZone::Right, content, shell_x, shell_y);
+    }
+    if (zone == LayoutDropZone::Above && leaf_touches_content_top(leaf_bounds, content)) {
+        return make_layout_shell_target(root, *hover_leaf, LayoutDropZone::Above, content, shell_x, shell_y);
+    }
+    if (zone == LayoutDropZone::Left && leaf_touches_content_left(leaf_bounds, content)) {
+        return make_layout_shell_target(root, *hover_leaf, LayoutDropZone::Left, content, shell_x, shell_y);
+    }
+
+    LayoutDropTarget target{
+        .anchor = *hover_leaf,
+        .hover_leaf = *hover_leaf,
+        .zone = zone,
+        .highlight = layout_drop_zone_rect(leaf_bounds, zone),
+        .spans_siblings = false,
+    };
+
+    if (kind == LayoutDragSourceKind::Pane && *hover_leaf == source_leaf && zone == LayoutDropZone::Center) {
+        return std::nullopt;
+    }
+    if (kind == LayoutDragSourceKind::Tab && *hover_leaf == source_leaf && zone == LayoutDropZone::Center) {
+        return std::nullopt;
+    }
+
+    if (zone == LayoutDropZone::Center) {
+        return target;
+    }
+
+    const int edge_x = std::max(2, leaf_bounds.width / 4);
+    const int edge_y = std::max(1, leaf_bounds.height / 4);
+    const bool in_leaf_edge =
+        (zone == LayoutDropZone::Below && position.y >= leaf_bounds.y + leaf_bounds.height - edge_y) ||
+        (zone == LayoutDropZone::Above && position.y < leaf_bounds.y + edge_y) ||
+        (zone == LayoutDropZone::Left && position.x < leaf_bounds.x + edge_x) ||
+        (zone == LayoutDropZone::Right && position.x >= leaf_bounds.x + leaf_bounds.width - edge_x);
+    if (!in_leaf_edge) {
+        return target;
+    }
+
+    for (const auto& [split_id, split] : layout_splits_) {
+        if (split == nullptr || !layout_tree_.has_node(split_id)) {
+            continue;
+        }
+        const LayoutNode& split_node = layout_tree_.node(split_id);
+        if (split_node.kind != LayoutNode::Kind::Container ||
+            split_node.container.orientation != tuinator::SplitOrientation::Vertical) {
+            continue;
+        }
+
+        const tuinator::Rect split_bounds = split->bounds();
+        const int divider_y = split_bounds.y + split->first_size();
+        if (std::abs(position.y - divider_y) > 2) {
+            continue;
+        }
+        if (position.x < split_bounds.x || position.x >= split_bounds.x + split_bounds.width) {
+            continue;
+        }
+
+        if (zone == LayoutDropZone::Below && position.y >= divider_y) {
+            target.anchor = split_node.container.first;
+            target.spans_siblings = true;
+            target.highlight = layout_drop_span_rect(split_bounds, zone);
+            return target;
+        }
+        if (zone == LayoutDropZone::Above && position.y < divider_y) {
+            target.anchor = split_node.container.second;
+            target.spans_siblings = true;
+            target.highlight = layout_drop_span_rect(split_bounds, LayoutDropZone::Above);
+            return target;
+        }
+    }
+
+    if (zone == LayoutDropZone::Below) {
+        const std::optional<LayoutNodeId> row = horizontal_parent_of(layout_tree_, *hover_leaf);
+        if (row.has_value()) {
+            const LayoutNode& row_node = layout_tree_.node(*row);
+            const bool is_first = row_node.container.first == *hover_leaf;
+            const int local_x = position.x - leaf_bounds.x;
+            const int inner_band = std::max(2, leaf_bounds.width / 3);
+            const bool toward_seam =
+                near_horizontal_seam(*hover_leaf, position, leaf_bounds, layout_tree_) ||
+                (is_first && local_x >= leaf_bounds.width - inner_band) ||
+                (!is_first && local_x < inner_band);
+            if (toward_seam) {
+                target.anchor = *row;
+                target.spans_siblings = true;
+                target.highlight = layout_drop_span_rect(layout_node_bounds(*row), zone);
+                return target;
+            }
+        }
+    }
+
+    if (zone == LayoutDropZone::Right || zone == LayoutDropZone::Left) {
+        for (const auto& [split_id, split] : layout_splits_) {
+            if (split == nullptr || !layout_tree_.has_node(split_id)) {
+                continue;
+            }
+            const LayoutNode& split_node = layout_tree_.node(split_id);
+            if (split_node.kind != LayoutNode::Kind::Container ||
+                split_node.container.orientation != tuinator::SplitOrientation::Horizontal) {
+                continue;
+            }
+
+            const tuinator::Rect split_bounds = split->bounds();
+            const int divider_x = split_bounds.x + split->first_size();
+            if (std::abs(position.x - divider_x) > 2) {
+                continue;
+            }
+            if (position.y < split_bounds.y || position.y >= split_bounds.y + split_bounds.height) {
+                continue;
+            }
+
+            if (zone == LayoutDropZone::Right && position.x >= divider_x) {
+                target.anchor = split_node.container.first;
+                target.spans_siblings = true;
+                target.highlight = layout_drop_span_rect(split_bounds, zone);
+                return target;
+            }
+            if (zone == LayoutDropZone::Left && position.x < divider_x) {
+                target.anchor = split_node.container.second;
+                target.spans_siblings = true;
+                target.highlight = layout_drop_span_rect(split_bounds, LayoutDropZone::Left);
+                return target;
+            }
+        }
+
+        const std::optional<LayoutNodeId> column = vertical_parent_of(layout_tree_, *hover_leaf);
+        if (column.has_value()) {
+            const LayoutNode& column_node = layout_tree_.node(*column);
+            const bool is_first = column_node.container.first == *hover_leaf;
+            const int local_y = position.y - leaf_bounds.y;
+            const int inner_band = std::max(2, leaf_bounds.height / 3);
+            const bool toward_seam =
+                near_vertical_seam(*hover_leaf, position, leaf_bounds, layout_tree_) ||
+                (is_first && local_y >= leaf_bounds.height - inner_band) ||
+                (!is_first && local_y < inner_band);
+            if (toward_seam) {
+                target.anchor = *column;
+                target.spans_siblings = true;
+                target.highlight = layout_drop_span_rect(layout_node_bounds(*column), zone);
+                return target;
+            }
+        }
+    }
+
+    return target;
+}
+
+bool DebugApp::layout_drag_active() const { return layout_drag_.active; }
+
+void DebugApp::on_layout_drag_press(LayoutNodeId leaf_id, LayoutDragSourceKind kind, int tab_index,
+                                    tuinator::Point position) {
+    if (context_menu_ != nullptr && context_menu_->is_open()) {
+        context_menu_->close();
+    }
+
+    layout_drag_.pending = LayoutDragState::Pending{leaf_id, kind, tab_index, position};
+}
+
+void DebugApp::begin_layout_drag() {
+    if (!layout_drag_.pending.has_value()) {
+        return;
+    }
+
+    layout_drag_.active = true;
+    layout_drag_.source_leaf = layout_drag_.pending->source_leaf;
+    layout_drag_.kind = layout_drag_.pending->kind;
+    layout_drag_.tab_index = layout_drag_.pending->tab_index;
+    layout_drag_.position = layout_drag_.pending->start;
+    layout_drag_.pending.reset();
+    layout_drag_.hover.reset();
+    request_repaint();
+}
+
+void DebugApp::update_layout_drag_hover(tuinator::Point position) {
+    layout_drag_.position = position;
+    layout_drag_.hover =
+        resolve_layout_drop_target(position, layout_drag_.kind, layout_drag_.source_leaf);
+}
+
+void DebugApp::cancel_layout_drag() {
+    layout_drag_ = {};
+    request_repaint();
+}
+
+void DebugApp::commit_layout_drag(tuinator::Point position) {
+    if (!layout_drag_.active) {
+        return;
+    }
+
+    update_layout_drag_hover(position);
+    const LayoutNodeId source_leaf = layout_drag_.source_leaf;
+    const LayoutDragSourceKind kind = layout_drag_.kind;
+    const int tab_index = layout_drag_.tab_index;
+
+    if (!layout_drag_.hover.has_value()) {
+        cancel_layout_drag();
+        return;
+    }
+
+    const LayoutDropTarget target = *layout_drag_.hover;
+    const LayoutDropZone zone = target.zone;
+    cancel_layout_drag();
+
+    if (kind == LayoutDragSourceKind::Pane) {
+        if (source_leaf == target.hover_leaf && zone == LayoutDropZone::Center) {
+            return;
+        }
+        if (zone == LayoutDropZone::Center) {
+            swap_layout_panes(source_leaf, target.hover_leaf);
+        } else {
+            move_layout_pane_adjacent(source_leaf, target.anchor, zone);
+        }
+        return;
+    }
+
+    if (zone == LayoutDropZone::Center) {
+        move_tab_to_leaf(source_leaf, tab_index, target.hover_leaf);
+    } else {
+        move_tab_to_new_pane_adjacent(source_leaf, tab_index, target.anchor, zone);
+    }
+}
+
+std::optional<LayoutNodeId> DebugApp::layout_leaf_at_point(tuinator::Point position) const {
+    for (const auto& [leaf_id, stack] : layout_stacks_) {
+        if (stack != nullptr && stack->bounds().contains(position)) {
+            return leaf_id;
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<LayoutDropTarget> DebugApp::layout_menu_preview_target() const {
+    if (!layout_menu_preview_.has_value()) {
+        return std::nullopt;
+    }
+
+    const LayoutDropTarget& target = layout_menu_preview_->target;
+    if (target.highlight.width <= 0 || target.highlight.height <= 0) {
+        return std::nullopt;
+    }
+    return target;
+}
+
+void DebugApp::paint_layout_drop_highlight(tuinator::PaintContext& ctx, const LayoutDropTarget& target,
+                                           tuinator::Style style) const {
+    const tuinator::Rect local{target.highlight.x, target.highlight.y, target.highlight.width,
+                               target.highlight.height};
+    if (local.width <= 0 || local.height <= 0) {
+        return;
+    }
+    ctx.canvas.fill_rect(local, ' ', style);
+}
+
+void DebugApp::paint_layout_menu_preview(tuinator::PaintContext& ctx) const {
+    if (!layout_menu_preview_.has_value()) {
+        return;
+    }
+
+    const std::optional<LayoutDropTarget> target = layout_menu_preview_target();
+    if (!target.has_value()) {
+        return;
+    }
+
+    tuinator::Style style = dap_theme_.layout_menu_pane;
+    if (layout_menu_preview_->mode == LayoutMenuPreview::Mode::Placement) {
+        if (layout_menu_preview_->swap) {
+            style = dap_theme_.layout_drop_swap;
+        } else if (target->spans_siblings) {
+            style = dap_theme_.layout_drop_span;
+        } else {
+            style = dap_theme_.layout_drop_insert;
+        }
+    }
+    paint_layout_drop_highlight(ctx, *target, style);
+}
+
+void DebugApp::paint_layout_drag_overlay(tuinator::PaintContext& ctx) const {
+    if (!layout_drag_.active || !layout_drag_.hover.has_value()) {
+        return;
+    }
+
+    const LayoutDropTarget& target = *layout_drag_.hover;
+    tuinator::Style style = target.spans_siblings ? dap_theme_.layout_drop_span : dap_theme_.layout_drop_insert;
+    if (target.zone == LayoutDropZone::Center) {
+        style = layout_drag_.kind == LayoutDragSourceKind::Pane ? dap_theme_.layout_drop_swap
+                                                                 : dap_theme_.layout_drop_merge;
+    }
+    paint_layout_drop_highlight(ctx, target, style);
+}
+
+bool DebugApp::handle_layout_drag_mouse(const tuinator::MouseEvent& mouse) {
+    if (layout_drag_.active) {
+        if (mouse.action == tuinator::MouseAction::Move) {
+            update_layout_drag_hover(mouse.position);
+            request_repaint();
+            return true;
+        }
+        if (mouse.action == tuinator::MouseAction::Release || mouse.action == tuinator::MouseAction::Click) {
+            commit_layout_drag(mouse.position);
+            return true;
+        }
+        return true;
+    }
+
+    if (!layout_drag_.pending.has_value()) {
+        return false;
+    }
+
+    if (mouse.action == tuinator::MouseAction::Move && mouse.left_pressed) {
+        const int dx = mouse.position.x - layout_drag_.pending->start.x;
+        const int dy = mouse.position.y - layout_drag_.pending->start.y;
+        if ((dx * dx + dy * dy) >= 4) {
+            begin_layout_drag();
+            update_layout_drag_hover(mouse.position);
+        }
+        return true;
+    }
+
+    if (mouse.action == tuinator::MouseAction::Release || mouse.action == tuinator::MouseAction::Click) {
+        if (StackedPane* stack = layout_stack(layout_drag_.pending->source_leaf); stack != nullptr) {
+            stack->handle_chrome_click(mouse.position);
+        }
+        layout_drag_.pending.reset();
+        request_repaint();
+        return true;
+    }
+
+    return mouse.left_pressed;
 }
 
 void DebugApp::show_pane_add_menu(LayoutNodeId leaf_id, tuinator::Point anchor) {
@@ -3541,6 +4807,14 @@ SidebarSlot* DebugApp::dock_slot_at(PanelDock dock, int index) {
 
 SidebarSlot* DebugApp::active_dock_slot(PanelDock dock) {
     return dock_slot_at(dock, dock_stack_index(dock));
+}
+
+void DebugApp::for_each_sidebar_slot(const std::function<void(SidebarSlot&)>& visitor) {
+    for (LayoutNodeId leaf_id : layout_tree_.leaf_ids()) {
+        for (SidebarSlot& slot : leaf_slots(leaf_id)) {
+            visitor(slot);
+        }
+    }
 }
 
 SidebarSlot* DebugApp::slot_by_id(std::uint64_t slot_id) {
@@ -3837,10 +5111,10 @@ std::unique_ptr<tuinator::Widget> DebugApp::release_sidebar_slot_widget(SidebarS
     return std::make_unique<SharedWidgetHost>(nullptr);
 }
 
-SidebarSlot* DebugApp::sidebar_slot_at(int index) { return dock_slot_at(PanelDock::Sidebar, index); }
+SidebarSlot* DebugApp::sidebar_slot_at(int index) { return dock_slot_at(PanelDock::Left, index); }
 
 SidebarSlot* DebugApp::active_sidebar_slot() {
-    return dock_slot_at(PanelDock::Sidebar, dock_stack_index(PanelDock::Sidebar));
+    return dock_slot_at(PanelDock::Left, dock_stack_index(PanelDock::Left));
 }
 
 SidebarSlot* DebugApp::sidebar_slot_by_id(std::uint64_t slot_id) { return slot_by_id(slot_id); }
@@ -3927,19 +5201,71 @@ void DebugApp::sync_dock_stack_to_focus(PanelDock dock) {
 }
 
 SidebarSlot* DebugApp::active_slot_for_focus() {
-    for (PanelDock dock : {PanelDock::Sidebar, PanelDock::Main, PanelDock::Bottom}) {
-        if (SidebarSlot* slot = active_dock_slot(dock); slot != nullptr &&
-                                                          focus_matches_panel_type(model_.focus, slot->config.type)) {
-            return slot;
+    for (LayoutNodeId leaf_id : layout_tree_.leaf_ids()) {
+        if (StackedPane* stack = layout_stack(leaf_id); stack != nullptr) {
+            const int active = stack->active_index();
+            if (SidebarSlot* slot = leaf_slot_at(leaf_id, active); slot != nullptr &&
+                                                                    focus_matches_panel_type(model_.focus,
+                                                                                             slot->config.type)) {
+                return slot;
+            }
         }
     }
-    for (PanelDock dock : {PanelDock::Sidebar, PanelDock::Main, PanelDock::Bottom}) {
-        const int index = dock_index_for_focus(dock, model_.focus);
-        if (index >= 0) {
-            return dock_slot_at(dock, index);
+    for (LayoutNodeId leaf_id : layout_tree_.leaf_ids()) {
+        const std::vector<SidebarSlot>& slots = leaf_slots(leaf_id);
+        for (std::size_t i = 0; i < slots.size(); ++i) {
+            if (focus_matches_panel_type(model_.focus, slots[i].config.type)) {
+                return leaf_slot_at(leaf_id, static_cast<int>(i));
+            }
         }
     }
     return nullptr;
+}
+
+SidebarSlot* DebugApp::find_memory_slot() {
+    if (memory_focus_slot_id_ != 0) {
+        if (SidebarSlot* slot = slot_by_id(memory_focus_slot_id_); slot != nullptr && slot->memory != nullptr) {
+            return slot;
+        }
+    }
+    SidebarSlot* found = nullptr;
+    for_each_sidebar_slot([&](SidebarSlot& slot) {
+        if (found == nullptr && slot.memory != nullptr) {
+            found = &slot;
+        }
+    });
+    return found;
+}
+
+SidebarSlot* DebugApp::memory_slot_for_focus(std::uint64_t preferred_slot_id) {
+    if (preferred_slot_id != 0) {
+        if (SidebarSlot* slot = slot_by_id(preferred_slot_id); slot != nullptr && slot->memory != nullptr) {
+            return slot;
+        }
+    }
+    if (memory_focus_slot_id_ != 0) {
+        if (SidebarSlot* slot = slot_by_id(memory_focus_slot_id_); slot != nullptr && slot->memory != nullptr) {
+            return slot;
+        }
+    }
+    if (SidebarSlot* slot = active_slot_for_focus(); slot != nullptr && slot->memory != nullptr) {
+        return slot;
+    }
+    return find_memory_slot();
+}
+
+void DebugApp::activate_memory_toolbar(std::uint64_t slot_id) {
+    SidebarSlot* slot = slot_by_id(slot_id);
+    if (slot == nullptr || slot->memory == nullptr) {
+        return;
+    }
+    memory_focus_slot_id_ = slot_id;
+    memory_write_active_ = false;
+    memory_write_row_ = -1;
+    memory_toolbar_focused_ = true;
+    model_.focus = Focus::Memory;
+    apply_focus();
+    request_repaint();
 }
 
 std::optional<std::pair<LayoutNodeId, int>> DebugApp::find_source_panel_slot() const {
@@ -3957,11 +5283,6 @@ std::optional<std::pair<LayoutNodeId, int>> DebugApp::find_source_panel_slot() c
 bool DebugApp::has_source_panel() const { return find_source_panel_slot().has_value(); }
 
 void DebugApp::move_source_panel_to_leaf(LayoutNodeId target_leaf) {
-    StackedPane* target_stack = layout_stack(target_leaf);
-    if (target_stack == nullptr) {
-        return;
-    }
-
     const std::optional<std::pair<LayoutNodeId, int>> current = find_source_panel_slot();
     if (current.has_value() && current->first == target_leaf) {
         model_.status_message = "Source is already in this pane";
@@ -3969,30 +5290,32 @@ void DebugApp::move_source_panel_to_leaf(LayoutNodeId target_leaf) {
         return;
     }
 
-    const auto scroll_options = dap_theme_.scroll_view_options();
-
     if (current.has_value()) {
-        if (StackedPane* from_stack = layout_stack(current->first); from_stack != nullptr) {
-            from_stack->remove_entry(current->second);
+        std::vector<SidebarSlot>& from_slots = leaf_slots(current->first);
+        const int index = current->second;
+        if (index < 0 || index >= static_cast<int>(from_slots.size())) {
+            return;
         }
 
-        std::vector<SidebarSlot>& from_slots = leaf_slots(current->first);
-        SidebarSlot slot = std::move(from_slots[static_cast<std::size_t>(current->second)]);
-        from_slots.erase(from_slots.begin() + static_cast<std::ptrdiff_t>(current->second));
+        SidebarSlot slot = std::move(from_slots[static_cast<std::size_t>(index)]);
+        from_slots.erase(from_slots.begin() + static_cast<std::ptrdiff_t>(index));
 
         int& from_index = leaf_stack_index(current->first);
-        if (from_index >= static_cast<int>(from_slots.size())) {
-            from_index = std::max(0, static_cast<int>(from_slots.size()) - 1);
+        if (from_slots.empty()) {
+            from_index = 0;
+        } else {
+            if (from_index > index) {
+                --from_index;
+            } else if (from_index == index) {
+                from_index = std::min(index, static_cast<int>(from_slots.size()) - 1);
+            }
+            from_index = std::clamp(from_index, 0, static_cast<int>(from_slots.size()) - 1);
         }
 
+        slot.shared_host.reset();
         std::vector<SidebarSlot>& target_slots = leaf_slots(target_leaf);
         target_slots.push_back(std::move(slot));
-        SidebarSlot& moved_slot = target_slots.back();
-        moved_slot.shared_host.reset();
-        ensure_sidebar_slot_panels(moved_slot, scroll_options);
-        auto widget = release_sidebar_slot_widget(moved_slot);
-        widget->set_flex(1);
-        target_stack->append_entry(moved_slot.config.tab_label, std::move(widget));
+        collapse_empty_leaf_if_needed(current->first);
     } else {
         PanelSlotConfig config;
         config.type = SidebarPanelType::Source;
@@ -4002,20 +5325,12 @@ void DebugApp::move_source_panel_to_leaf(LayoutNodeId target_leaf) {
         SidebarSlot new_slot;
         new_slot.config = std::move(config);
         target_slots.push_back(std::move(new_slot));
-        SidebarSlot& moved_slot = target_slots.back();
-        ensure_sidebar_slot_panels(moved_slot, scroll_options);
-        auto widget = release_sidebar_slot_widget(moved_slot);
-        widget->set_flex(1);
-        target_stack->append_entry(moved_slot.config.tab_label, std::move(widget));
     }
 
-    const int new_index = target_stack->count() - 1;
-    target_stack->set_active_index(new_index);
-    leaf_stack_index(target_leaf) = new_index;
-
+    leaf_stack_index(target_leaf) = static_cast<int>(leaf_slots(target_leaf).size()) - 1;
     model_.focus = Focus::Source;
-    update_active_panel_pointers();
-    apply_focus();
+
+    rebuild_layout_ui();
 
     source_layout_settling_ = true;
     refresh_source_highlight_if_needed();
@@ -4023,15 +5338,8 @@ void DebugApp::move_source_panel_to_leaf(LayoutNodeId target_leaf) {
     refresh_scroll_views(true);
     mark_source_view_dirty();
 
-    for (const auto& [leaf_id, stack] : layout_stacks_) {
-        if (stack != nullptr) {
-            stack->mark_dirty();
-        }
-    }
-
-    model_.status_message = "Added Source panel";
+    model_.status_message = "Moved Source to " + layout_leaf_label(target_leaf);
     sync_status_bar();
-    request_full_screen_refresh();
 }
 
 void DebugApp::move_source_panel_to_dock(PanelDock target_dock) {
@@ -4072,18 +5380,16 @@ void DebugApp::sync_scope_slot(SidebarSlot& slot) {
 }
 
 void DebugApp::refresh_all_scope_slots() {
-    for (PanelDock dock : {PanelDock::Sidebar, PanelDock::Main, PanelDock::Bottom}) {
-        for (SidebarSlot& slot : dock_slots(dock)) {
-            if (slot.config.type != SidebarPanelType::Variables) {
-                continue;
-            }
-            std::vector<ScopeVariableRowMeta> meta;
-            slot.cached_scope_rows =
-                build_scope_rows(model_, expanded_scope_paths_, pending_scope_paths_, meta, slot.config.scope_filter);
-            slot.cached_scope_row_meta = std::move(meta);
-            sync_scope_slot(slot);
+    for_each_sidebar_slot([&](SidebarSlot& slot) {
+        if (slot.config.type != SidebarPanelType::Variables) {
+            return;
         }
-    }
+        std::vector<ScopeVariableRowMeta> meta;
+        slot.cached_scope_rows =
+            build_scope_rows(model_, expanded_scope_paths_, pending_scope_paths_, meta, slot.config.scope_filter);
+        slot.cached_scope_row_meta = std::move(meta);
+        sync_scope_slot(slot);
+    });
     apply_scope_value_overrides();
 }
 
@@ -4091,8 +5397,8 @@ std::vector<WatchEntry>& DebugApp::active_watch_list() {
     if (SidebarSlot* slot = active_slot_for_focus(); slot != nullptr && slot->config.type == SidebarPanelType::Watches) {
         return slot->watches_data;
     }
-    for (PanelDock dock : {PanelDock::Sidebar, PanelDock::Main, PanelDock::Bottom}) {
-        for (SidebarSlot& slot : dock_slots(dock)) {
+    for (LayoutNodeId leaf_id : layout_tree_.leaf_ids()) {
+        for (SidebarSlot& slot : leaf_slots(leaf_id)) {
             if (slot.config.type == SidebarPanelType::Watches) {
                 return slot.watches_data;
             }
@@ -4468,17 +5774,17 @@ Focus DebugApp::focus_for_sidebar_index(int index) {
     return Focus::Scopes;
 }
 
-int DebugApp::sidebar_index_for_focus(Focus focus) { return dock_index_for_focus(PanelDock::Sidebar, focus); }
+int DebugApp::sidebar_index_for_focus(Focus focus) { return dock_index_for_focus(PanelDock::Left, focus); }
 
 void DebugApp::sync_stack_panes_to_focus() {
-    sync_dock_stack_to_focus(PanelDock::Sidebar);
-    sync_dock_stack_to_focus(PanelDock::Main);
+    sync_dock_stack_to_focus(PanelDock::Left);
+    sync_dock_stack_to_focus(PanelDock::Center);
     sync_dock_stack_to_focus(PanelDock::Bottom);
     update_active_panel_pointers();
 }
 
 void DebugApp::cycle_sidebar_stack(int delta) {
-    if (const std::optional<LayoutNodeId> leaf_id = layout_tree_.find_leaf_for_dock(PanelDock::Sidebar);
+    if (const std::optional<LayoutNodeId> leaf_id = layout_tree_.find_leaf_for_dock(PanelDock::Left);
         leaf_id.has_value()) {
         if (StackedPane* stack = layout_stack(*leaf_id); stack != nullptr && delta != 0) {
             stack->cycle(delta);
@@ -4532,12 +5838,12 @@ bool DebugApp::handle_layout_resize_key(const tuinator::KeyPress& key) {
     switch (key.key) {
     case tuinator::Key::Left:
         model_.layout.narrow_sidebar();
-        model_.status_message = "Sidebar " + std::to_string(model_.layout.sidebar_pct) + "%";
+        model_.status_message = "Left " + std::to_string(model_.layout.sidebar_pct) + "%";
         build_ui();
         return true;
     case tuinator::Key::Right:
         model_.layout.widen_sidebar();
-        model_.status_message = "Sidebar " + std::to_string(model_.layout.sidebar_pct) + "%";
+        model_.status_message = "Left " + std::to_string(model_.layout.sidebar_pct) + "%";
         build_ui();
         return true;
     case tuinator::Key::Up:
@@ -4674,6 +5980,11 @@ void DebugApp::blur_active_memory_input() {
 }
 
 bool DebugApp::handle_global_key(const tuinator::KeyPress& key) {
+    if ((layout_drag_.active || layout_drag_.pending.has_value()) && key.key == tuinator::Key::Escape) {
+        cancel_layout_drag();
+        return true;
+    }
+
     if (handle_step_in_selection_key(key)) {
         return true;
     }
@@ -4710,7 +6021,7 @@ bool DebugApp::handle_global_key(const tuinator::KeyPress& key) {
     }
 
     if (model_.focus == Focus::Memory && (key.character == 'e' || key.character == 'E')) {
-        if (SidebarSlot* slot = active_slot_for_focus(); slot != nullptr && slot->memory != nullptr) {
+        if (SidebarSlot* slot = memory_slot_for_focus(); slot != nullptr && slot->memory != nullptr) {
             const int row = slot->memory->selected_row();
             if (row >= 0) {
                 begin_memory_row_edit(slot->config.id, row);
@@ -4720,9 +6031,11 @@ bool DebugApp::handle_global_key(const tuinator::KeyPress& key) {
     }
 
     if (model_.focus == Focus::Memory && (key.character == 'g' || key.character == 'G')) {
-        if (SidebarSlot* slot = active_slot_for_focus(); slot != nullptr && slot->memory != nullptr) {
+        if (SidebarSlot* slot = memory_slot_for_focus(); slot != nullptr && slot->memory != nullptr) {
+            memory_focus_slot_id_ = slot->config.id;
             memory_toolbar_focused_ = true;
             slot->memory->focus_address_input();
+            apply_focus();
             model_.status_message = "Addr: hex (0x…) or expression like &g_buffer";
             sync_status_bar();
             request_repaint();
@@ -4731,9 +6044,11 @@ bool DebugApp::handle_global_key(const tuinator::KeyPress& key) {
     }
 
     if (model_.focus == Focus::Memory && key.character == '/') {
-        if (SidebarSlot* slot = active_slot_for_focus(); slot != nullptr && slot->memory != nullptr) {
+        if (SidebarSlot* slot = memory_slot_for_focus(); slot != nullptr && slot->memory != nullptr) {
+            memory_focus_slot_id_ = slot->config.id;
             memory_toolbar_focused_ = true;
             slot->memory->focus_search_input();
+            apply_focus();
             model_.status_message = "Find: text or hex bytes in loaded memory";
             sync_status_bar();
             request_repaint();
@@ -4742,7 +6057,7 @@ bool DebugApp::handle_global_key(const tuinator::KeyPress& key) {
     }
 
     if (model_.focus == Focus::Memory && (key.character == 'n' || key.character == 'N')) {
-        if (SidebarSlot* slot = active_slot_for_focus(); slot != nullptr && slot->memory != nullptr) {
+        if (SidebarSlot* slot = memory_slot_for_focus(); slot != nullptr && slot->memory != nullptr) {
             const std::string query = slot->memory->search_value();
             if (!query.empty()) {
                 submit_memory_search(slot->config.id, query, key.character == 'n');
@@ -4766,6 +6081,12 @@ bool DebugApp::handle_global_key(const tuinator::KeyPress& key) {
     if (key.key == tuinator::Key::Tab) {
         if (model_.focus == Focus::Memory && memory_toolbar_focused_) {
             return false;
+        }
+        if (model_.focus == Focus::Memory && !memory_toolbar_focused_) {
+            if (SidebarSlot* slot = memory_slot_for_focus(); slot != nullptr && slot->memory != nullptr) {
+                activate_memory_toolbar(slot->config.id);
+                return true;
+            }
         }
         cycle_focus_next();
         return true;
@@ -5348,39 +6669,37 @@ void DebugApp::apply_focus() {
     if (source_panel_ != nullptr) {
         widgets.push_back(source_panel_);
     }
-    for (PanelDock dock : {PanelDock::Sidebar, PanelDock::Main, PanelDock::Bottom}) {
-        for (const SidebarSlot& slot : dock_slots(dock)) {
-            if (slot.scopes != nullptr && slot.scopes->list_widget() != nullptr) {
-                widgets.push_back(slot.scopes->list_widget());
+    for_each_sidebar_slot([&](SidebarSlot& slot) {
+        if (slot.scopes != nullptr && slot.scopes->list_widget() != nullptr) {
+            widgets.push_back(slot.scopes->list_widget());
+        }
+        if (slot.watches != nullptr && slot.watches->list_widget() != nullptr) {
+            widgets.push_back(slot.watches->list_widget());
+        }
+        if (slot.stacks != nullptr && slot.stacks->list_widget() != nullptr) {
+            widgets.push_back(slot.stacks->list_widget());
+        }
+        if (slot.breakpoints != nullptr && slot.breakpoints->list_widget() != nullptr) {
+            widgets.push_back(slot.breakpoints->list_widget());
+        }
+        if (slot.memory != nullptr) {
+            if (slot.memory->list_widget() != nullptr) {
+                widgets.push_back(slot.memory->list_widget());
             }
-            if (slot.watches != nullptr && slot.watches->list_widget() != nullptr) {
-                widgets.push_back(slot.watches->list_widget());
+            if (slot.memory->address_input_widget() != nullptr) {
+                widgets.push_back(slot.memory->address_input_widget());
             }
-            if (slot.stacks != nullptr && slot.stacks->list_widget() != nullptr) {
-                widgets.push_back(slot.stacks->list_widget());
-            }
-            if (slot.breakpoints != nullptr && slot.breakpoints->list_widget() != nullptr) {
-                widgets.push_back(slot.breakpoints->list_widget());
-            }
-            if (slot.memory != nullptr) {
-                if (slot.memory->list_widget() != nullptr) {
-                    widgets.push_back(slot.memory->list_widget());
-                }
-                if (slot.memory->address_input_widget() != nullptr) {
-                    widgets.push_back(slot.memory->address_input_widget());
-                }
-                if (slot.memory->search_input_widget() != nullptr) {
-                    widgets.push_back(slot.memory->search_input_widget());
-                }
-            }
-            if (slot.disassembly != nullptr && slot.disassembly->list_widget() != nullptr) {
-                widgets.push_back(slot.disassembly->list_widget());
-            }
-            if (slot.runtime_source != nullptr && slot.runtime_source->list_widget() != nullptr) {
-                widgets.push_back(slot.runtime_source->list_widget());
+            if (slot.memory->search_input_widget() != nullptr) {
+                widgets.push_back(slot.memory->search_input_widget());
             }
         }
-    }
+        if (slot.disassembly != nullptr && slot.disassembly->list_widget() != nullptr) {
+            widgets.push_back(slot.disassembly->list_widget());
+        }
+        if (slot.runtime_source != nullptr && slot.runtime_source->list_widget() != nullptr) {
+            widgets.push_back(slot.runtime_source->list_widget());
+        }
+    });
     if (stacks_panel_ != nullptr && stacks_panel_->list_widget() != nullptr) {
         widgets.push_back(stacks_panel_->list_widget());
     }
@@ -5427,11 +6746,12 @@ void DebugApp::apply_focus() {
         }
         break;
     case Focus::Memory:
-        if (SidebarSlot* slot = active_slot_for_focus(); slot != nullptr && slot->memory != nullptr) {
+        if (SidebarSlot* slot = memory_slot_for_focus(); slot != nullptr && slot->memory != nullptr) {
             if (memory_write_active_ && slot->memory->has_inline_edit()) {
                 target = slot->memory->list_widget();
             } else if (memory_toolbar_focused_) {
-                if (slot->memory->is_search_input_focused()) {
+                if (slot->memory->is_search_toolbar_active()) {
+                    slot->memory->focus_search_input();
                     target = slot->memory->search_input_widget();
                 } else {
                     slot->memory->focus_address_input();
@@ -5487,65 +6807,64 @@ void DebugApp::sync_focus_from_ui() {
         breakpoint_input_focused_ = breakpoints_panel_->has_inline_edit();
     } else {
         bool panel_list_focused = false;
-        for (PanelDock dock : {PanelDock::Sidebar, PanelDock::Main, PanelDock::Bottom}) {
-            for (const SidebarSlot& slot : dock_slots(dock)) {
-                if (slot.watches != nullptr && slot.watches->list_widget() != nullptr &&
-                    slot.watches->list_widget()->is_focused()) {
-                    detected = Focus::Watches;
-                    watch_input_focused_ = slot.watches->has_inline_edit();
-                    panel_list_focused = true;
-                    break;
-                }
-                if (slot.scopes != nullptr && slot.scopes->list_widget() != nullptr &&
-                    slot.scopes->list_widget()->is_focused()) {
-                    detected = Focus::Scopes;
-                    scope_input_focused_ = slot.scopes->has_inline_edit();
-                    panel_list_focused = true;
-                    break;
-                }
-                if (slot.stacks != nullptr && slot.stacks->list_widget() != nullptr &&
-                    slot.stacks->list_widget()->is_focused()) {
-                    detected = Focus::Stacks;
-                    panel_list_focused = true;
-                    break;
-                }
-                if (slot.breakpoints != nullptr && slot.breakpoints->list_widget() != nullptr &&
-                    slot.breakpoints->list_widget()->is_focused()) {
-                    detected = Focus::Breakpoints;
-                    breakpoint_input_focused_ = slot.breakpoints->has_inline_edit();
-                    panel_list_focused = true;
-                    break;
-                }
-                if (slot.memory != nullptr && slot.memory->is_toolbar_input_focused()) {
-                    detected = Focus::Memory;
-                    memory_toolbar_focused_ = true;
-                    panel_list_focused = true;
-                    break;
-                }
-                if (slot.memory != nullptr && slot.memory->list_widget() != nullptr &&
-                    slot.memory->list_widget()->is_focused()) {
-                    detected = Focus::Memory;
-                    memory_toolbar_focused_ = false;
-                    panel_list_focused = true;
-                    break;
-                }
-                if (slot.disassembly != nullptr && slot.disassembly->list_widget() != nullptr &&
-                    slot.disassembly->list_widget()->is_focused()) {
-                    detected = Focus::Disassembly;
-                    panel_list_focused = true;
-                    break;
-                }
-                if (slot.runtime_source != nullptr && slot.runtime_source->list_widget() != nullptr &&
-                    slot.runtime_source->list_widget()->is_focused()) {
-                    detected = Focus::RuntimeSource;
-                    panel_list_focused = true;
-                    break;
-                }
-            }
+        for_each_sidebar_slot([&](SidebarSlot& slot) {
             if (panel_list_focused) {
-                break;
+                return;
             }
-        }
+            if (slot.watches != nullptr && slot.watches->list_widget() != nullptr &&
+                slot.watches->list_widget()->is_focused()) {
+                detected = Focus::Watches;
+                watch_input_focused_ = slot.watches->has_inline_edit();
+                panel_list_focused = true;
+                return;
+            }
+            if (slot.scopes != nullptr && slot.scopes->list_widget() != nullptr &&
+                slot.scopes->list_widget()->is_focused()) {
+                detected = Focus::Scopes;
+                scope_input_focused_ = slot.scopes->has_inline_edit();
+                panel_list_focused = true;
+                return;
+            }
+            if (slot.stacks != nullptr && slot.stacks->list_widget() != nullptr &&
+                slot.stacks->list_widget()->is_focused()) {
+                detected = Focus::Stacks;
+                panel_list_focused = true;
+                return;
+            }
+            if (slot.breakpoints != nullptr && slot.breakpoints->list_widget() != nullptr &&
+                slot.breakpoints->list_widget()->is_focused()) {
+                detected = Focus::Breakpoints;
+                breakpoint_input_focused_ = slot.breakpoints->has_inline_edit();
+                panel_list_focused = true;
+                return;
+            }
+            if (slot.memory != nullptr && slot.memory->is_toolbar_active()) {
+                detected = Focus::Memory;
+                memory_focus_slot_id_ = slot.config.id;
+                memory_toolbar_focused_ = true;
+                panel_list_focused = true;
+                return;
+            }
+            if (slot.memory != nullptr && slot.memory->list_widget() != nullptr &&
+                slot.memory->list_widget()->is_focused()) {
+                detected = Focus::Memory;
+                memory_focus_slot_id_ = slot.config.id;
+                memory_toolbar_focused_ = false;
+                panel_list_focused = true;
+                return;
+            }
+            if (slot.disassembly != nullptr && slot.disassembly->list_widget() != nullptr &&
+                slot.disassembly->list_widget()->is_focused()) {
+                detected = Focus::Disassembly;
+                panel_list_focused = true;
+                return;
+            }
+            if (slot.runtime_source != nullptr && slot.runtime_source->list_widget() != nullptr &&
+                slot.runtime_source->list_widget()->is_focused()) {
+                detected = Focus::RuntimeSource;
+                panel_list_focused = true;
+            }
+        });
         if (!panel_list_focused) {
             if (repl_panel_ != nullptr && repl_panel_->input_widget() != nullptr &&
                        repl_panel_->input_widget()->is_focused()) {
@@ -5598,31 +6917,29 @@ void DebugApp::mark_all_panels_dirty() {
     if (source_scroll_view_ != nullptr) {
         source_scroll_view_->mark_dirty();
     }
-    for (PanelDock dock : {PanelDock::Sidebar, PanelDock::Main, PanelDock::Bottom}) {
-        for (const SidebarSlot& slot : dock_slots(dock)) {
-            if (slot.scopes != nullptr && slot.scopes->list_widget() != nullptr) {
-                slot.scopes->list_widget()->mark_dirty();
-            }
-            if (slot.watches != nullptr && slot.watches->list_widget() != nullptr) {
-                slot.watches->list_widget()->mark_dirty();
-            }
-            if (slot.stacks != nullptr && slot.stacks->list_widget() != nullptr) {
-                slot.stacks->list_widget()->mark_dirty();
-            }
-            if (slot.breakpoints != nullptr && slot.breakpoints->list_widget() != nullptr) {
-                slot.breakpoints->list_widget()->mark_dirty();
-            }
-            if (slot.memory != nullptr && slot.memory->list_widget() != nullptr) {
-                slot.memory->list_widget()->mark_dirty();
-            }
-            if (slot.disassembly != nullptr && slot.disassembly->list_widget() != nullptr) {
-                slot.disassembly->list_widget()->mark_dirty();
-            }
-            if (slot.runtime_source != nullptr && slot.runtime_source->list_widget() != nullptr) {
-                slot.runtime_source->list_widget()->mark_dirty();
-            }
+    for_each_sidebar_slot([&](const SidebarSlot& slot) {
+        if (slot.scopes != nullptr && slot.scopes->list_widget() != nullptr) {
+            slot.scopes->list_widget()->mark_dirty();
         }
-    }
+        if (slot.watches != nullptr && slot.watches->list_widget() != nullptr) {
+            slot.watches->list_widget()->mark_dirty();
+        }
+        if (slot.stacks != nullptr && slot.stacks->list_widget() != nullptr) {
+            slot.stacks->list_widget()->mark_dirty();
+        }
+        if (slot.breakpoints != nullptr && slot.breakpoints->list_widget() != nullptr) {
+            slot.breakpoints->list_widget()->mark_dirty();
+        }
+        if (slot.memory != nullptr && slot.memory->list_widget() != nullptr) {
+            slot.memory->list_widget()->mark_dirty();
+        }
+        if (slot.disassembly != nullptr && slot.disassembly->list_widget() != nullptr) {
+            slot.disassembly->list_widget()->mark_dirty();
+        }
+        if (slot.runtime_source != nullptr && slot.runtime_source->list_widget() != nullptr) {
+            slot.runtime_source->list_widget()->mark_dirty();
+        }
+    });
     if (stacks_panel_ != nullptr && stacks_panel_->list_widget() != nullptr) {
         stacks_panel_->list_widget()->mark_dirty();
     }
@@ -6214,13 +7531,11 @@ std::vector<ThreadStackContent> DebugApp::build_thread_stack_contents() const {
 
 void DebugApp::sync_threads_list_panel() {
     const std::vector<ThreadStackContent> threads = build_thread_stack_contents();
-    for (PanelDock dock : {PanelDock::Sidebar, PanelDock::Main, PanelDock::Bottom}) {
-        for (SidebarSlot& slot : dock_slots(dock)) {
-            if (slot.config.type == SidebarPanelType::Threads) {
-                sync_thread_slot(slot, threads);
-            }
+    for_each_sidebar_slot([&](SidebarSlot& slot) {
+        if (slot.config.type == SidebarPanelType::Threads) {
+            sync_thread_slot(slot, threads);
         }
-    }
+    });
 }
 
 std::vector<BreakpointRow> DebugApp::build_breakpoint_rows() const {
@@ -6288,13 +7603,11 @@ std::vector<BreakpointRow> DebugApp::build_breakpoint_rows() const {
 
 void DebugApp::sync_breakpoints_list_panel() {
     const std::vector<BreakpointRow> rows = build_breakpoint_rows();
-    for (PanelDock dock : {PanelDock::Sidebar, PanelDock::Main, PanelDock::Bottom}) {
-        for (SidebarSlot& slot : dock_slots(dock)) {
-            if (slot.config.type == SidebarPanelType::Breakpoints) {
-                sync_breakpoint_slot(slot, rows);
-            }
+    for_each_sidebar_slot([&](SidebarSlot& slot) {
+        if (slot.config.type == SidebarPanelType::Breakpoints) {
+            sync_breakpoint_slot(slot, rows);
         }
-    }
+    });
 }
 
 void DebugApp::toggle_breakpoint() {
@@ -7719,9 +9032,11 @@ void DebugApp::sync_execution_location_ui() {
 }
 
 void DebugApp::sync_scopes_list_panel() {
-    if (SidebarSlot* slot = active_sidebar_slot(); slot != nullptr && slot->config.type == SidebarPanelType::Variables) {
-        sync_scope_slot(*slot);
-    }
+    for_each_sidebar_slot([&](SidebarSlot& slot) {
+        if (slot.config.type == SidebarPanelType::Variables) {
+            sync_scope_slot(slot);
+        }
+    });
 }
 
 bool DebugApp::scope_prompt_active() const {
@@ -7736,14 +9051,14 @@ bool DebugApp::handle_scope_input_key(const tuinator::Event& event) {
 }
 
 bool DebugApp::handle_memory_toolbar_input_key(const tuinator::Event& event) {
-    SidebarSlot* slot = active_slot_for_focus();
+    SidebarSlot* slot = memory_slot_for_focus();
     if (slot == nullptr || slot->memory == nullptr) {
         return false;
     }
-    if (!memory_toolbar_focused_ && !slot->memory->is_toolbar_input_focused()) {
+    if (!memory_toolbar_focused_ && !slot->memory->is_toolbar_active()) {
         return false;
     }
-    if (!slot->memory->is_toolbar_input_focused()) {
+    if (!slot->memory->is_toolbar_active()) {
         memory_toolbar_focused_ = true;
         slot->memory->focus_address_input();
     }
@@ -7751,7 +9066,7 @@ bool DebugApp::handle_memory_toolbar_input_key(const tuinator::Event& event) {
 }
 
 bool DebugApp::handle_memory_input_key(const tuinator::Event& event) {
-    if (SidebarSlot* slot = active_slot_for_focus(); slot != nullptr && slot->memory != nullptr &&
+    if (SidebarSlot* slot = memory_slot_for_focus(); slot != nullptr && slot->memory != nullptr &&
                               slot->memory->has_inline_edit()) {
         return slot->memory->handle_inline_edit_key(event);
     }
@@ -7859,7 +9174,7 @@ bool DebugApp::breakpoint_prompt_active() const {
 }
 
 bool DebugApp::overlay_intercepts_events() const {
-    return context_menu_open();
+    return context_menu_open() || layout_drag_active();
 }
 
 void DebugApp::blur_breakpoint_input(bool cancelled) {
@@ -7902,6 +9217,8 @@ bool DebugApp::handle_overlay_event(const tuinator::Event& event) {
 }
 
 void DebugApp::paint_overlay(tuinator::PaintContext& ctx) const {
+    paint_layout_drag_overlay(ctx);
+    paint_layout_menu_preview(ctx);
     if (context_menu_ != nullptr && context_menu_->is_open()) {
         context_menu_->layout(overlay_clip_bounds());
         context_menu_->paint(ctx);
@@ -7955,8 +9272,8 @@ std::optional<std::int64_t> DebugApp::scope_container_for_local(const std::strin
         return std::nullopt;
     }
 
-    for (PanelDock dock : {PanelDock::Sidebar, PanelDock::Main, PanelDock::Bottom}) {
-        for (const SidebarSlot& slot : dock_slots(dock)) {
+    for (LayoutNodeId leaf_id : layout_tree_.leaf_ids()) {
+        for (const SidebarSlot& slot : layout_tree_.node(leaf_id).leaf.slots) {
             if (slot.config.type != SidebarPanelType::Variables) {
                 continue;
             }
@@ -8669,23 +9986,23 @@ void DebugApp::submit_repl_expression(const std::string& expression) {
 }
 
 void DebugApp::sync_watches_panel() {
-    if (watches_panel_ == nullptr) {
-        return;
-    }
-
-    const std::vector<WatchEntry>& watches = active_watch_list();
-    std::vector<std::string> lines;
-    lines.reserve(watches.size());
-    for (const WatchEntry& watch : watches) {
-        if (!watch.error.empty()) {
-            lines.push_back(watch.expression + " = <error: " + watch.error + ">");
-        } else if (watch.value.empty()) {
-            lines.push_back(watch.expression + " = ?");
-        } else {
-            lines.push_back(watch.expression + " = " + watch.value);
+    for_each_sidebar_slot([&](SidebarSlot& slot) {
+        if (slot.config.type != SidebarPanelType::Watches || slot.watches == nullptr) {
+            return;
         }
-    }
-    watches_panel_->set_lines(std::move(lines));
+        std::vector<std::string> lines;
+        lines.reserve(slot.watches_data.size());
+        for (const WatchEntry& watch : slot.watches_data) {
+            if (!watch.error.empty()) {
+                lines.push_back(watch.expression + " = <error: " + watch.error + ">");
+            } else if (watch.value.empty()) {
+                lines.push_back(watch.expression + " = ?");
+            } else {
+                lines.push_back(watch.expression + " = " + watch.value);
+            }
+        }
+        slot.watches->set_lines(std::move(lines));
+    });
 }
 
 void DebugApp::begin_edit_watch_at(int index) {
@@ -8799,29 +10116,22 @@ void DebugApp::resolve_watches_from_locals() {
     }
 
     bool has_watches = false;
-    for (PanelDock dock : {PanelDock::Sidebar, PanelDock::Main, PanelDock::Bottom}) {
-        for (const SidebarSlot& slot : dock_slots(dock)) {
-            if (slot.config.type == SidebarPanelType::Watches && !slot.watches_data.empty()) {
-                has_watches = true;
-                break;
-            }
+    for_each_sidebar_slot([&](const SidebarSlot& slot) {
+        if (slot.config.type == SidebarPanelType::Watches && !slot.watches_data.empty()) {
+            has_watches = true;
         }
-        if (has_watches) {
-            break;
-        }
-    }
+    });
     if (!has_watches) {
         return;
     }
 
     bool changed = false;
-    for (PanelDock dock : {PanelDock::Sidebar, PanelDock::Main, PanelDock::Bottom}) {
-        for (SidebarSlot& slot : dock_slots(dock)) {
-            if (slot.config.type != SidebarPanelType::Watches) {
-                continue;
-            }
+    for_each_sidebar_slot([&](SidebarSlot& slot) {
+        if (slot.config.type != SidebarPanelType::Watches) {
+            return;
+        }
 
-            std::vector<std::string> scope_rows = slot.cached_scope_rows;
+        std::vector<std::string> scope_rows = slot.cached_scope_rows;
         if (scope_rows.empty()) {
             std::vector<ScopeVariableRowMeta> meta;
             scope_rows = build_scope_rows(model_, expanded_scope_paths_, pending_scope_paths_, meta,
@@ -8857,8 +10167,7 @@ void DebugApp::resolve_watches_from_locals() {
                 changed = true;
             }
         }
-        }
-    }
+    });
 
     if (changed) {
         sync_watches_panel();
@@ -8883,30 +10192,28 @@ void DebugApp::append_console_text(const std::string& text, const std::string& c
 
 void DebugApp::remove_dollar_exception_watches() {
     bool changed = false;
-    for (PanelDock dock : {PanelDock::Sidebar, PanelDock::Main, PanelDock::Bottom}) {
-        for (SidebarSlot& slot : dock_slots(dock)) {
-            if (slot.config.type != SidebarPanelType::Watches) {
+    for_each_sidebar_slot([&](SidebarSlot& slot) {
+        if (slot.config.type != SidebarPanelType::Watches) {
+            return;
+        }
+        for (auto it = slot.watches_data.begin(); it != slot.watches_data.end();) {
+            if (normalize_watch_expression(it->expression) != "$exception") {
+                ++it;
                 continue;
             }
-            for (auto it = slot.watches_data.begin(); it != slot.watches_data.end();) {
-                if (normalize_watch_expression(it->expression) != "$exception") {
-                    ++it;
-                    continue;
-                }
 
-                const int index = static_cast<int>(std::distance(slot.watches_data.begin(), it));
-                if (watches_panel_ != nullptr && active_slot_for_focus() == &slot && editing_watch_index_ == index) {
-                    finish_watch_input();
-                } else if (watches_panel_ != nullptr && active_slot_for_focus() == &slot &&
-                           editing_watch_index_ > index) {
-                    --editing_watch_index_;
-                }
-
-                it = slot.watches_data.erase(it);
-                changed = true;
+            const int index = static_cast<int>(std::distance(slot.watches_data.begin(), it));
+            if (watches_panel_ != nullptr && active_slot_for_focus() == &slot && editing_watch_index_ == index) {
+                finish_watch_input();
+            } else if (watches_panel_ != nullptr && active_slot_for_focus() == &slot &&
+                       editing_watch_index_ > index) {
+                --editing_watch_index_;
             }
+
+            it = slot.watches_data.erase(it);
+            changed = true;
         }
-    }
+    });
 
     if (changed) {
         sync_watches_panel();

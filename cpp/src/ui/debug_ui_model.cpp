@@ -21,6 +21,10 @@ std::string DebugUiModel::connection_label() const {
 
 void LayoutConfig::widen_sidebar() { sidebar_pct = std::min<std::uint16_t>(45, sidebar_pct + 2); }
 void LayoutConfig::narrow_sidebar() { sidebar_pct = std::max<std::uint16_t>(15, sidebar_pct - 2); }
+void LayoutConfig::widen_right() { right_pct = std::min<std::uint16_t>(45, right_pct + 2); }
+void LayoutConfig::narrow_right() { right_pct = std::max<std::uint16_t>(15, right_pct - 2); }
+void LayoutConfig::grow_top() { top_pct = std::min<std::uint16_t>(50, top_pct + 2); }
+void LayoutConfig::shrink_top() { top_pct = std::max<std::uint16_t>(15, top_pct - 2); }
 void LayoutConfig::grow_bottom() { bottom_pct = std::min<std::uint16_t>(50, bottom_pct + 2); }
 void LayoutConfig::shrink_bottom() { bottom_pct = std::max<std::uint16_t>(15, bottom_pct - 2); }
 void LayoutConfig::widen_watches() { watches_pct = std::min<std::uint16_t>(50, watches_pct + 2); }

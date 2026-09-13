@@ -4,6 +4,18 @@
 
 namespace tui_debug_ui {
 
+std::string panel_dock_label(PanelDock dock) {
+    switch (dock) {
+    case PanelDock::Left:
+        return "Left";
+    case PanelDock::Center:
+        return "Center";
+    case PanelDock::Bottom:
+        return "Bottom";
+    }
+    return "Pane";
+}
+
 std::string panel_type_label(SidebarPanelType type) {
     switch (type) {
     case SidebarPanelType::Variables:

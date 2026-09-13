@@ -22,6 +22,10 @@ ContextMenu::ContextMenu(tuinator::Style background, tuinator::Style item_style,
       selected_style_(std::move(selected_style)),
       border_style_(std::move(border_style)) {}
 
+void ContextMenu::set_on_selection_changed(std::function<void(int index)> callback) {
+    on_selection_changed_ = std::move(callback);
+}
+
 void ContextMenu::open(tuinator::Point anchor, tuinator::Rect clip_bounds, std::vector<Item> items, bool open_above) {
     pending_action_ = nullptr;
     items_ = std::move(items);
@@ -35,6 +39,9 @@ void ContextMenu::open(tuinator::Point anchor, tuinator::Rect clip_bounds, std::
     selected_ = 0;
     open_ = true;
     clamp_selection();
+    if (on_selection_changed_) {
+        on_selection_changed_(selected_);
+    }
     mark_dirty();
 }
 
@@ -46,6 +53,9 @@ void ContextMenu::close() {
     open_above_ = false;
     items_.clear();
     selected_ = 0;
+    if (on_selection_changed_) {
+        on_selection_changed_(-1);
+    }
     mark_dirty();
 }
 
@@ -144,6 +154,7 @@ void ContextMenu::clamp_selection() {
         selected_ = 0;
         return;
     }
+    const int previous = selected_;
     selected_ = std::clamp(selected_, 0, static_cast<int>(items_.size()) - 1);
     while (selected_ >= 0 && selected_ < static_cast<int>(items_.size()) &&
            !items_[static_cast<std::size_t>(selected_)].enabled) {
@@ -151,6 +162,9 @@ void ContextMenu::clamp_selection() {
     }
     if (selected_ >= static_cast<int>(items_.size())) {
         selected_ = 0;
+    }
+    if (previous != selected_ && on_selection_changed_) {
+        on_selection_changed_(selected_);
     }
 }
 
@@ -204,8 +218,11 @@ bool ContextMenu::handle_event(const tuinator::Event& event) {
 
         if (mouse->action == tuinator::MouseAction::Move) {
             const int row = row_at_position(mouse->position);
-            if (row >= 0) {
+            if (row >= 0 && row != selected_) {
                 selected_ = row;
+                if (on_selection_changed_) {
+                    on_selection_changed_(selected_);
+                }
                 mark_dirty();
             }
             return true;
@@ -241,7 +258,12 @@ bool ContextMenu::handle_event(const tuinator::Event& event) {
         if (mouse->action == tuinator::MouseAction::Press) {
             const int row = row_at_position(mouse->position);
             if (row >= 0) {
-                selected_ = row;
+                if (row != selected_) {
+                    selected_ = row;
+                    if (on_selection_changed_) {
+                        on_selection_changed_(selected_);
+                    }
+                }
                 mark_dirty();
             } else if (left) {
                 close();

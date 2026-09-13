@@ -12,6 +12,7 @@
 #include "tui_debug_ui/repl_panel.hpp"
 #include "tui_debug_ui/session_io_thread.hpp"
 #include "tui_debug_ui/stacks_panel.hpp"
+#include "tui_debug_ui/layout_drag.hpp"
 #include "tui_debug_ui/layout_tree.hpp"
 #include "tui_debug_ui/panel_slot.hpp"
 #include "tui_debug_ui/sidebar_slot.hpp"
@@ -21,6 +22,7 @@
 #include <tuinator/widgets/views/list_view.hpp>
 
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -117,6 +119,8 @@ class DebugApp {
     void blur_repl_input();
     bool handle_stacked_pane_rename_key(const tuinator::Event& event);
     void handle_pointer_pick(const tuinator::MouseEvent& mouse);
+    bool handle_layout_drag_mouse(const tuinator::MouseEvent& mouse);
+    [[nodiscard]] bool layout_drag_active() const;
 
   private:
     void ensure_ui_built();
@@ -269,12 +273,56 @@ class DebugApp {
     void reset_layout_slot_widgets();
     std::unique_ptr<tuinator::Widget> build_layout_content_widget();
     void show_pane_layout_menu(LayoutNodeId leaf_id, tuinator::Point anchor);
+    void show_move_tab_menu(LayoutNodeId from_leaf, tuinator::Point anchor);
+    void show_swap_pane_menu(LayoutNodeId from_leaf, tuinator::Point anchor);
+    void show_move_pane_menu(LayoutNodeId from_leaf, tuinator::Point anchor);
+    void show_move_pane_direction_menu(LayoutNodeId from_leaf, LayoutNodeId target_leaf, tuinator::Point anchor);
+    void open_layout_context_menu(tuinator::Point anchor, std::vector<ContextMenu::Item> items,
+                                  const std::function<void(int index)>& on_hover);
+    void clear_layout_menu_preview();
+    void set_layout_menu_pane_preview(LayoutNodeId source_leaf, LayoutNodeId target_leaf);
+    void set_layout_menu_placement_preview(LayoutNodeId source_leaf, const LayoutPlacementOption& option);
+    [[nodiscard]] std::vector<LayoutPlacementOption> collect_move_placement_options(LayoutNodeId from_leaf,
+                                                                                    LayoutNodeId reference_leaf) const;
+    [[nodiscard]] LayoutDropTarget make_placement_drop_target(LayoutNodeId anchor, LayoutNodeId reference_leaf,
+                                                              LayoutDropZone zone, bool spans_siblings) const;
+    [[nodiscard]] std::string layout_group_label(LayoutNodeId node_id) const;
+    [[nodiscard]] std::vector<LayoutNodeId> leaves_in_subtree(LayoutNodeId node_id) const;
     void show_pane_add_menu(LayoutNodeId leaf_id, tuinator::Point anchor);
+    void move_active_panel_to_leaf(LayoutNodeId from_leaf, LayoutNodeId to_leaf);
+    void move_tab_to_leaf(LayoutNodeId from_leaf, int tab_index, LayoutNodeId to_leaf);
+    void swap_layout_panes(LayoutNodeId a, LayoutNodeId b);
+    void normalize_split_after_swap(LayoutNodeId a, LayoutNodeId b);
+    void move_layout_pane_adjacent(LayoutNodeId from_leaf, LayoutNodeId anchor, LayoutDropZone zone);
+    void move_tab_to_new_pane_adjacent(LayoutNodeId from_leaf, int tab_index, LayoutNodeId to_leaf,
+                                       LayoutDropZone zone);
+    void on_layout_drag_press(LayoutNodeId leaf_id, LayoutDragSourceKind kind, int tab_index, tuinator::Point position);
+    void begin_layout_drag();
+    void update_layout_drag_hover(tuinator::Point position);
+    void cancel_layout_drag();
+    void commit_layout_drag(tuinator::Point position);
+    [[nodiscard]] std::optional<LayoutNodeId> layout_leaf_at_point(tuinator::Point position) const;
+    [[nodiscard]] tuinator::Rect layout_node_bounds(LayoutNodeId node_id) const;
+    [[nodiscard]] tuinator::Rect layout_content_bounds() const;
+    [[nodiscard]] LayoutNodeId compute_insert_anchor(LayoutNodeId from_leaf, LayoutNodeId anchor,
+                                                     LayoutDropZone zone) const;
+    [[nodiscard]] std::optional<LayoutDropTarget> resolve_layout_drop_target(tuinator::Point position,
+                                                                             LayoutDragSourceKind kind,
+                                                                             LayoutNodeId source_leaf) const;
+    void paint_layout_drag_overlay(tuinator::PaintContext& ctx) const;
+    void paint_layout_menu_preview(tuinator::PaintContext& ctx) const;
+    void paint_layout_drop_highlight(tuinator::PaintContext& ctx, const LayoutDropTarget& target,
+                                     tuinator::Style style) const;
+    [[nodiscard]] std::optional<LayoutDropTarget> layout_menu_preview_target() const;
+    void collapse_empty_leaf_if_needed(LayoutNodeId leaf_id);
+    [[nodiscard]] std::string layout_leaf_label(LayoutNodeId leaf_id) const;
+    [[nodiscard]] std::string layout_leaf_move_label(LayoutNodeId from_leaf, LayoutNodeId to_leaf) const;
     void split_layout_pane(LayoutNodeId leaf_id, PaneSplitDirection direction);
     void delete_layout_pane(LayoutNodeId leaf_id);
     [[nodiscard]] LayoutNodeId dock_leaf_id(PanelDock dock) const;
     [[nodiscard]] std::vector<SidebarSlot>& leaf_slots(LayoutNodeId leaf_id);
     [[nodiscard]] StackedPane* layout_stack(LayoutNodeId leaf_id);
+    [[nodiscard]] const StackedPane* layout_stack(LayoutNodeId leaf_id) const;
     [[nodiscard]] int& leaf_stack_index(LayoutNodeId leaf_id);
     void init_default_sidebar_slots(std::vector<SidebarSlot>& slots);
     void ensure_sidebar_slot_panels(SidebarSlot& slot, const tuinator::ScrollViewOptions& scroll_options);
@@ -287,6 +335,7 @@ class DebugApp {
     [[nodiscard]] std::vector<PanelSlotConfig> dock_slot_configs(PanelDock dock) const;
     [[nodiscard]] SidebarSlot* dock_slot_at(PanelDock dock, int index);
     [[nodiscard]] SidebarSlot* active_dock_slot(PanelDock dock);
+    void for_each_sidebar_slot(const std::function<void(SidebarSlot&)>& visitor);
     [[nodiscard]] SidebarSlot* slot_by_id(std::uint64_t slot_id);
     [[nodiscard]] SidebarSlot* sidebar_slot_at(int index);
     [[nodiscard]] SidebarSlot* active_sidebar_slot();
@@ -296,6 +345,9 @@ class DebugApp {
     [[nodiscard]] int dock_index_for_focus(PanelDock dock, Focus focus) const;
     void sync_dock_stack_to_focus(PanelDock dock);
     [[nodiscard]] SidebarSlot* active_slot_for_focus();
+    [[nodiscard]] SidebarSlot* find_memory_slot();
+    [[nodiscard]] SidebarSlot* memory_slot_for_focus(std::uint64_t preferred_slot_id = 0);
+    void activate_memory_toolbar(std::uint64_t slot_id);
     [[nodiscard]] std::optional<std::pair<LayoutNodeId, int>> find_source_panel_slot() const;
     [[nodiscard]] bool has_source_panel() const;
     void move_source_panel_to_leaf(LayoutNodeId target_leaf);
@@ -430,6 +482,29 @@ class DebugApp {
     std::unordered_map<LayoutNodeId, StackedPane*> layout_stacks_;
     std::unordered_map<LayoutNodeId, ResizableSplitPane*> layout_splits_;
     LayoutNodeId focused_layout_leaf_ = 0;
+    struct LayoutDragState {
+        bool active = false;
+        struct Pending {
+            LayoutNodeId source_leaf = 0;
+            LayoutDragSourceKind kind = LayoutDragSourceKind::Pane;
+            int tab_index = 0;
+            tuinator::Point start{};
+        };
+        std::optional<Pending> pending;
+        LayoutNodeId source_leaf = 0;
+        LayoutDragSourceKind kind = LayoutDragSourceKind::Pane;
+        int tab_index = 0;
+        tuinator::Point position{};
+        std::optional<LayoutDropTarget> hover;
+    };
+    LayoutDragState layout_drag_;
+    struct LayoutMenuPreview {
+        LayoutNodeId source_leaf = 0;
+        LayoutDropTarget target{};
+        enum class Mode { PaneHighlight, Placement } mode = Mode::PaneHighlight;
+        bool swap = false;
+    };
+    std::optional<LayoutMenuPreview> layout_menu_preview_;
     std::uint64_t next_slot_id_ = 1;
     std::unique_ptr<tuinator::Widget> repl_shell_;
     std::unique_ptr<tuinator::Widget> console_shell_;
@@ -499,6 +574,7 @@ class DebugApp {
     std::string scope_variables_fetch_signature_;
     bool scope_variables_fetch_pending_ = false;
     std::uint64_t memory_write_slot_id_ = 0;
+    std::uint64_t memory_focus_slot_id_ = 0;
     std::uint64_t memory_address_eval_slot_id_ = 0;
     std::int64_t memory_write_offset_ = 0;
     int memory_write_row_ = -1;
