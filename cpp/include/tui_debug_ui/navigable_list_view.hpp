@@ -47,6 +47,7 @@ inline constexpr const char* kInlineWhenEditRow = "\x1E\x01when";
 inline constexpr const char* kInlineHitEditRow = "\x1E\x01hit";
 inline constexpr const char* kInlineVariableEditRow = "\x1E\x01var";
 inline constexpr const char* kInlineWatchEditRow = "\x1E\x01watch";
+inline constexpr const char* kWatchAddPromptRow = "\x1E\x01watch_add";
 inline constexpr const char* kScopeExpandCollapsed = "\xe2\x96\xb8 ";
 inline constexpr const char* kScopeExpandExpanded = "\xe2\x96\xbe ";
 
@@ -78,7 +79,7 @@ class NavigableListView : public tuinator::ListView {
     void set_variable_row_show_edit(std::vector<bool> show_edit);
 
     using ActivateCallback = std::function<void(int index)>;
-    using RowClickCallback = std::function<bool(int index, const std::string& item)>;
+    using RowClickCallback = std::function<bool(int index, const std::string& item, int local_x)>;
     using RowContextCallback = std::function<void(int index, const std::string& item, tuinator::Point anchor)>;
     void set_on_activate(ActivateCallback callback);
     void set_on_row_click(RowClickCallback callback);
@@ -99,6 +100,8 @@ class NavigableListView : public tuinator::ListView {
     [[nodiscard]] static bool is_inline_hit_edit_row(const std::string& item);
     [[nodiscard]] static bool is_inline_variable_edit_row(const std::string& item);
     [[nodiscard]] static bool is_inline_watch_edit_row(const std::string& item);
+    [[nodiscard]] static bool is_watch_add_prompt_row(const std::string& item);
+    [[nodiscard]] static bool scope_expand_arrow_hit(const std::string& item, int local_x);
     [[nodiscard]] static std::optional<ScopeVariableRowParts> parse_scope_variable_row(std::string_view line);
     [[nodiscard]] static bool is_scope_loading_row(std::string_view line);
     using InlineEditChangeCallback = std::function<void(const std::string& value)>;
@@ -124,6 +127,7 @@ class NavigableListView : public tuinator::ListView {
     void paint_inline_row_edit(tuinator::Canvas& canvas, int row, const std::string& prefix, int max_width) const;
     void paint_inline_variable_row_edit(tuinator::Canvas& canvas, int row, int max_width) const;
     void paint_inline_watch_row_edit(tuinator::Canvas& canvas, int row, int max_width) const;
+    void paint_watch_add_prompt_row(tuinator::Canvas& canvas, int row, int max_width) const;
     [[nodiscard]] std::optional<RowActionType> row_action_at(int index, const std::string& item, int local_x) const;
     [[nodiscard]] tuinator::Point to_terminal_point(tuinator::Point event_position) const;
     [[nodiscard]] static bool is_breakpoint_condition_row(const std::string& item);

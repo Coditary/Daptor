@@ -556,6 +556,7 @@ class DebugApp {
     std::string pending_source_fetch_key_;
     std::string cached_status_bar_text_;
     std::unordered_set<std::string> expanded_scope_paths_;
+    std::vector<ThreadStackContent> cached_thread_stack_contents_;
     std::unordered_set<std::string> pending_scope_paths_;
     std::vector<std::string> cached_stack_lines_;
     std::uint64_t cached_follow_generation_ = 0;

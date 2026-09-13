@@ -1,6 +1,7 @@
 #include "tui_debug_ui/navigable_list_view.hpp"
 
 #include "tui_debug_ui/dap_ui_theme.hpp"
+#include "tui_debug_ui/ui_icons.hpp"
 
 #include <tuinator/render/paint_context.hpp>
 #include <tuinator/render/text.hpp>
@@ -19,8 +20,7 @@ namespace {
 constexpr auto kDoubleClickInterval = std::chrono::milliseconds(500);
 constexpr int kActionContentGap = 1;
 constexpr int kActionIconGap = 1;
-// Nerd Font: nf-md-plus, nf-md-trash_can_outline, nf-md-pencil
-constexpr const char* kAddIcon = "\uF44D";
+// Nerd Font: nf-md-trash_can_outline, nf-md-pencil
 constexpr const char* kRemoveIcon = "\U000F01B4";
 constexpr const char* kEditIcon = "\uF448";
 
@@ -333,6 +333,22 @@ bool NavigableListView::is_inline_watch_edit_row(const std::string& item) {
     return item == kInlineWatchEditRow;
 }
 
+bool NavigableListView::is_watch_add_prompt_row(const std::string& item) {
+    return item == kWatchAddPromptRow;
+}
+
+bool NavigableListView::scope_expand_arrow_hit(const std::string& item, int local_x) {
+    const std::optional<ScopeVariableRowParts> parsed = parse_scope_variable_row_impl(item);
+    if (!parsed.has_value() || !parsed->expandable) {
+        return false;
+    }
+
+    constexpr int kHitPad = 1;
+    const int arrow_x = parsed->depth * 2;
+    const int arrow_width = tuinator::text_display_width(kScopeExpandCollapsed);
+    return local_x >= arrow_x - kHitPad && local_x < arrow_x + arrow_width + kHitPad;
+}
+
 void NavigableListView::set_on_inline_edit_change(InlineEditChangeCallback callback) {
     on_inline_edit_change_ = std::move(callback);
 }
@@ -397,6 +413,16 @@ void NavigableListView::paint_inline_variable_row_edit(tuinator::Canvas& canvas,
         draw_segment(canvas, column, row, "_", field_style, max_width);
     }
     draw_segment(canvas, column, row, "]", field_style, max_width);
+}
+
+void NavigableListView::paint_watch_add_prompt_row(tuinator::Canvas& canvas, int row, int max_width) const {
+    if (theme_ == nullptr || max_width <= 0) {
+        return;
+    }
+
+    int column = 0;
+    draw_segment(canvas, column, row, kUiAddIcon, action_add_style(*theme_), max_width);
+    draw_segment(canvas, column, row, " [expression]", theme_->control_disabled, max_width);
 }
 
 void NavigableListView::paint_inline_watch_row_edit(tuinator::Canvas& canvas, int row, int max_width) const {
@@ -618,7 +644,8 @@ void NavigableListView::paint_themed(tuinator::PaintContext& ctx) const {
 
     const bool show_selection = is_focused() && paint_mode_ != ListPaintMode::Watches &&
                                 paint_mode_ != ListPaintMode::Scopes &&
-                                paint_mode_ != ListPaintMode::Breakpoints;
+                                paint_mode_ != ListPaintMode::Breakpoints &&
+                                paint_mode_ != ListPaintMode::Stacks;
     const int max_width = std::max(0, bounds().width);
     for (int index = 0; index < static_cast<int>(items().size()); ++index) {
         const bool selected = show_selection && index == selected_index();
@@ -682,7 +709,7 @@ bool NavigableListView::row_shows_actions(int index, const std::string& item) co
 int NavigableListView::row_action_reserve_width() const {
     switch (row_action_layout_) {
     case ListRowActionLayout::BreakpointRow:
-        return kActionContentGap + tuinator::text_display_width(kAddIcon) + kActionIconGap +
+        return kActionContentGap + tuinator::text_display_width(kUiAddIcon) + kActionIconGap +
                remove_icon_display_width();
     case ListRowActionLayout::WatchRow:
         return kActionContentGap + tuinator::text_display_width(kEditIcon) + kActionIconGap +
@@ -754,14 +781,14 @@ void NavigableListView::paint_row_actions(tuinator::Canvas& canvas, int index, i
         const int remove_x = std::max(0, max_width - remove_width);
         if (enabled) {
             canvas.draw_text({remove_x, row}, kRemoveIcon, action_remove_style(*theme_));
-            const int add_width = tuinator::text_display_width(kAddIcon);
+            const int add_width = tuinator::text_display_width(kUiAddIcon);
             const int add_x = std::max(0, remove_x - kActionIconGap - add_width);
-            canvas.draw_text({add_x, row}, kAddIcon, action_add_style(*theme_));
+            canvas.draw_text({add_x, row}, kUiAddIcon, action_add_style(*theme_));
             return;
         }
-        const int add_width = tuinator::text_display_width(kAddIcon);
+        const int add_width = tuinator::text_display_width(kUiAddIcon);
         const int add_x = std::max(0, max_width - add_width);
-        canvas.draw_text({add_x, row}, kAddIcon, action_add_style(*theme_));
+        canvas.draw_text({add_x, row}, kUiAddIcon, action_add_style(*theme_));
         return;
     }
 
@@ -770,9 +797,9 @@ void NavigableListView::paint_row_actions(tuinator::Canvas& canvas, int index, i
     canvas.draw_text({remove_x, row}, kRemoveIcon, action_remove_style(*theme_));
 
     if (row_action_layout_ == ListRowActionLayout::BreakpointRow) {
-        const int add_width = tuinator::text_display_width(kAddIcon);
+        const int add_width = tuinator::text_display_width(kUiAddIcon);
         const int add_x = std::max(0, remove_x - kActionIconGap - add_width);
-        canvas.draw_text({add_x, row}, kAddIcon, action_add_style(*theme_));
+        canvas.draw_text({add_x, row}, kUiAddIcon, action_add_style(*theme_));
     }
 }
 
@@ -839,14 +866,14 @@ std::optional<RowActionType> NavigableListView::row_action_at(int index, const s
             if (local_x >= remove_x) {
                 return RowActionType::Remove;
             }
-            const int add_width = tuinator::text_display_width(kAddIcon);
+            const int add_width = tuinator::text_display_width(kUiAddIcon);
             const int add_x = std::max(0, remove_x - kActionIconGap - add_width);
             if (local_x >= add_x && local_x < remove_x - kActionIconGap) {
                 return RowActionType::Add;
             }
             return std::nullopt;
         }
-        const int add_width = tuinator::text_display_width(kAddIcon);
+        const int add_width = tuinator::text_display_width(kUiAddIcon);
         const int add_x = std::max(0, max_width - add_width);
         if (local_x >= add_x) {
             return RowActionType::Add;
@@ -861,7 +888,7 @@ std::optional<RowActionType> NavigableListView::row_action_at(int index, const s
     }
 
     if (row_action_layout_ == ListRowActionLayout::BreakpointRow) {
-        const int add_width = tuinator::text_display_width(kAddIcon);
+        const int add_width = tuinator::text_display_width(kUiAddIcon);
         const int add_x = std::max(0, remove_x - kActionIconGap - add_width);
         if (local_x >= add_x && local_x < remove_x - kActionIconGap) {
             return RowActionType::Add;
@@ -1069,6 +1096,10 @@ void NavigableListView::paint_themed_row(tuinator::Canvas& canvas, int row, int 
             break;
         }
         case ListPaintMode::Watches: {
+            if (is_watch_add_prompt_row(item)) {
+                paint_watch_add_prompt_row(canvas, row, max_width);
+                return;
+            }
             if (is_inline_watch_edit_row(item)) {
                 paint_inline_watch_row_edit(canvas, row, max_width);
                 return;
@@ -1121,7 +1152,7 @@ tuinator::Point NavigableListView::row_action_anchor(int index, RowActionType ac
     int local_x = remove_x;
 
     if (action == RowActionType::Add) {
-        const int add_width = tuinator::text_display_width(kAddIcon);
+        const int add_width = tuinator::text_display_width(kUiAddIcon);
         local_x = std::max(0, remove_x - kActionIconGap - add_width) + add_width / 2;
     } else if (action == RowActionType::Edit) {
         const int edit_width = tuinator::text_display_width(kEditIcon);
@@ -1189,7 +1220,7 @@ bool NavigableListView::handle_event(const tuinator::Event& event) {
                 return false;
             }
 
-            if (on_row_click_ && on_row_click_(row, item)) {
+            if (on_row_click_ && on_row_click_(row, item, local.x)) {
                 set_focused(true);
                 set_selected_index(row);
                 return true;

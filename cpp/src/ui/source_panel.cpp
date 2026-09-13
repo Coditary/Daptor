@@ -1,5 +1,6 @@
 #include <tui_debug_ui/source_panel.hpp>
 #include <tui_debug_ui/highlight_bridge.hpp>
+#include <tui_debug_ui/ui_icons.hpp>
 
 #include <tuinator/core/event.hpp>
 #include <tuinator/render/text.hpp>
@@ -23,9 +24,6 @@ namespace tui_debug_ui {
 
 namespace {
 
-constexpr const char* kBreakpointGlyph = "\u{eaff}"; // codicon breakpoint
-constexpr const char* kConditionalBreakpointGlyph = "\u{25c6}"; // ◆
-constexpr const char* kExecutionGlyph = "\u{eaf0}";  // codicon current frame
 constexpr const char* kEmptyMessage = "No source loaded \u2014 press p to open a file";
 
 } // namespace
@@ -35,6 +33,7 @@ SourcePanel::SourcePanel(SyntaxTheme theme) : theme_(std::move(theme)) {
     theme_.breakpoint_marker.bold = true;
     theme_.breakpoint_conditional_marker.bold = true;
     theme_.execution_row.bold = true;
+    theme_.execution_marker.bold = true;
 }
 
 void SourcePanel::set_scroll_parent(tuinator::ScrollView* scroll_parent) { scroll_parent_ = scroll_parent; }
@@ -144,7 +143,7 @@ void SourcePanel::set_cursor_line(int line) {
     mark_dirty();
 }
 
-void SourcePanel::set_breakpoints(std::unordered_map<int, std::string> breakpoints) {
+void SourcePanel::set_breakpoints(std::unordered_map<int, bool> breakpoints) {
     breakpoints_ = std::move(breakpoints);
     mark_dirty();
 }
@@ -290,6 +289,7 @@ void SourcePanel::set_syntax_theme(SyntaxTheme theme) {
     theme_.breakpoint_marker.bold = true;
     theme_.breakpoint_conditional_marker.bold = true;
     theme_.execution_row.bold = true;
+    theme_.execution_marker.bold = true;
     theme_.step_in_candidate.bold = true;
     theme_.step_in_active.bold = true;
     mark_dirty();
@@ -540,11 +540,9 @@ void SourcePanel::paint_line(PaintContext& ctx, int row, const HighlightedLine& 
 
     const auto breakpoint_it = breakpoints_.find(line.line_number);
     const bool has_breakpoint = breakpoint_it != breakpoints_.end();
-    const bool is_conditional =
-        has_breakpoint && !breakpoint_it->second.empty();
+    const bool is_conditional = has_breakpoint && breakpoint_it->second;
     const bool has_function_breakpoint = function_breakpoint_lines_.contains(line.line_number);
     const bool is_execution = execution_line_ > 0 && line.line_number == execution_line_;
-    const bool is_cursor = line.line_number == cursor_line_;
 
     std::string breakpoint_text = "  ";
     tuinator::Style breakpoint_style = theme_.line_number;
@@ -552,20 +550,20 @@ void SourcePanel::paint_line(PaintContext& ctx, int row, const HighlightedLine& 
         breakpoint_text = "\u0192 ";
         breakpoint_style = theme_.breakpoint_marker;
     } else if (has_breakpoint) {
-        breakpoint_text = (is_conditional ? kConditionalBreakpointGlyph : kBreakpointGlyph);
+        breakpoint_text = (is_conditional ? kUiConditionalBreakpointIcon : kUiBreakpointIcon);
         breakpoint_text += " ";
-        breakpoint_style = is_conditional ? theme_.breakpoint_conditional_marker : theme_.breakpoint_marker;
+        breakpoint_style = theme_.breakpoint_marker;
     }
     canvas.draw_text({x, row}, breakpoint_text, breakpoint_style);
     x += 2;
 
     std::string marker = "  ";
+    Style marker_style = theme_.line_number;
     if (is_execution) {
-        marker = std::string(kExecutionGlyph) + " ";
-    } else if (is_cursor) {
-        marker = "> ";
+        marker = std::string(kUiExecutionLineIcon) + " ";
+        marker_style = theme_.execution_marker;
     }
-    canvas.draw_text({x, row}, marker, row_style.foreground_rgb.has_value() ? row_style : theme_.line_number);
+    canvas.draw_text({x, row}, marker, marker_style);
     x += 2;
 
     char number_buffer[32];

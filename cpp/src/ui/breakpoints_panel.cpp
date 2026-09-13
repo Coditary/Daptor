@@ -84,7 +84,7 @@ BreakpointsPanel::BreakpointsPanel(const DapUiTheme& theme, tuinator::ScrollView
             break;
         }
     });
-    list_->set_on_row_click([this](int index, const std::string& /*item*/) {
+    list_->set_on_row_click([this](int index, const std::string& /*item*/, int /*local_x*/) {
         const DisplayLineKind kind = display_kind_at(index);
         if (kind == DisplayLineKind::GroupHeader) {
             return try_toggle_expand(index);

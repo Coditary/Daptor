@@ -178,6 +178,15 @@ bool command_state_synced_via_snapshot(const char* op) {
            std::strcmp(op, "reverse_continue") == 0;
 }
 
+std::unordered_map<int, bool> source_breakpoints_from_info(
+    const std::unordered_map<int, tui_debug_ui::BreakpointInfo>& breakpoints) {
+    std::unordered_map<int, bool> source_breakpoints;
+    for (const auto& [line, info] : breakpoints) {
+        source_breakpoints[line] = !info.condition.empty() || !info.hit_condition.empty();
+    }
+    return source_breakpoints;
+}
+
 std::string trim_watch_text(const std::string& text) {
     std::size_t begin = 0;
     while (begin < text.size() && std::isspace(static_cast<unsigned char>(text[begin]))) {
@@ -1410,6 +1419,7 @@ void DebugApp::maybe_start_launch() {
         return;
     }
     launch_posted_ = true;
+    cached_thread_stack_contents_.clear();
     prefetch_program_source_highlight();
     session_io_->start_launch(program_path_, program_args_);
 }
@@ -6210,7 +6220,7 @@ bool DebugApp::handle_global_key(const tuinator::KeyPress& key) {
 
     if (model_.focus == Focus::Watches && watches_panel_ != nullptr) {
         if (key.character == 'd') {
-            const int index = watches_panel_->selected_index();
+            const int index = watches_panel_->selected_watch_index();
             if (index >= 0) {
                 remove_watch_at(static_cast<std::size_t>(index));
             }
@@ -7530,7 +7540,14 @@ std::vector<ThreadStackContent> DebugApp::build_thread_stack_contents() const {
 }
 
 void DebugApp::sync_threads_list_panel() {
-    const std::vector<ThreadStackContent> threads = build_thread_stack_contents();
+    std::vector<ThreadStackContent> threads = build_thread_stack_contents();
+    const bool session_ended =
+        model_.session_state == "exited" || model_.session_state == "disconnected";
+    if (!threads.empty()) {
+        cached_thread_stack_contents_ = threads;
+    } else if (session_ended && !cached_thread_stack_contents_.empty()) {
+        threads = cached_thread_stack_contents_;
+    }
     for_each_sidebar_slot([&](SidebarSlot& slot) {
         if (slot.config.type == SidebarPanelType::Threads) {
             sync_thread_slot(slot, threads);
@@ -8164,19 +8181,15 @@ void DebugApp::sync_breakpoints_to_panel() {
     }
 
     const std::string normalized = normalize_source_path(path);
-    std::unordered_map<int, std::string> breakpoints;
+    std::unordered_map<int, bool> breakpoints;
     const auto it = breakpoints_by_path_.find(path);
     if (it == breakpoints_by_path_.end()) {
         const auto normalized_it = breakpoints_by_path_.find(normalized);
         if (normalized_it != breakpoints_by_path_.end()) {
-            for (const auto& [line, info] : normalized_it->second) {
-                breakpoints[line] = info.condition;
-            }
+            breakpoints = source_breakpoints_from_info(normalized_it->second);
         }
     } else {
-        for (const auto& [line, info] : it->second) {
-            breakpoints[line] = info.condition;
-        }
+        breakpoints = source_breakpoints_from_info(it->second);
     }
 
     const std::string file_text =
@@ -8257,12 +8270,10 @@ void DebugApp::remove_breakpoint_at(const std::string& path, int line) {
         "Removed breakpoint at " + panel_title_from_path(normalized) + ":" + std::to_string(line);
 
     if (source_panel_ != nullptr && effective_source_path() == normalized) {
-        std::unordered_map<int, std::string> breakpoints;
+        std::unordered_map<int, bool> breakpoints;
         const auto current = breakpoints_by_path_.find(normalized);
         if (current != breakpoints_by_path_.end()) {
-            for (const auto& [bp_line, info] : current->second) {
-                breakpoints[bp_line] = info.condition;
-            }
+            breakpoints = source_breakpoints_from_info(current->second);
         }
         source_panel_->set_breakpoints(std::move(breakpoints));
     }
@@ -8341,11 +8352,7 @@ void DebugApp::toggle_breakpoint_at_line(int line) {
 
     breakpoints[line] = BreakpointInfo{.line = line};
     model_.status_message = "Set breakpoint at line " + std::to_string(line);
-    std::unordered_map<int, std::string> source_breakpoints;
-    for (const auto& [bp_line, info] : breakpoints) {
-        source_breakpoints[bp_line] = info.condition;
-    }
-    source_panel_->set_breakpoints(std::move(source_breakpoints));
+    source_panel_->set_breakpoints(source_breakpoints_from_info(breakpoints));
 
     if (source_panel_->lines().empty() && !cached_source_text_.empty()) {
         const int line_count =

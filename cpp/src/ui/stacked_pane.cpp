@@ -1,6 +1,7 @@
 #include "tui_debug_ui/stacked_pane.hpp"
 
 #include "tui_debug_ui/divider_paint.hpp"
+#include "tui_debug_ui/ui_icons.hpp"
 
 #include <tuinator/core/event.hpp>
 #include <tuinator/render/paint_context.hpp>
@@ -18,7 +19,7 @@ namespace {
 constexpr const char* kLeadingPad = "  ";
 constexpr const char* kPrevGlyph = "◄";
 constexpr const char* kNextGlyph = "►";
-constexpr const char* kAddGlyph = "+";
+constexpr const char* kAddGlyph = kUiAddIcon;
 constexpr int kTabGapWidth = 3;
 constexpr int kArrowGap = 1;
 constexpr int kClusterGap = 1;

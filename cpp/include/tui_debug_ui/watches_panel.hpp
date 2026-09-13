@@ -5,6 +5,7 @@
 
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -51,11 +52,13 @@ class WatchesPanel {
     [[nodiscard]] std::string input_value() const;
     void focus_input();
     [[nodiscard]] int selected_index() const;
+    [[nodiscard]] int selected_watch_index() const;
     tuinator::Widget* list_widget() const;
     tuinator::ScrollView* scroll_view() const;
 
   private:
     void sync_inline_edit_to_list();
+    [[nodiscard]] std::optional<int> watch_index_for_display(int display_index) const;
 
     struct InlineEditTarget {
         int watch_index = -1;
@@ -68,6 +71,7 @@ class WatchesPanel {
     NavigableListView* list_ = nullptr;
     InlineEditTarget inline_edit_;
     int inline_edit_display_index_ = -1;
+    int add_prompt_index_ = -1;
     SubmitCallback on_submit_;
     ChangeCallback on_change_;
     RemoveCallback on_remove_;

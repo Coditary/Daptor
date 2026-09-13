@@ -184,7 +184,7 @@ void ConsolePanel::reset_cursor_blink() {
 }
 
 void ConsolePanel::paint_input_cursor(tuinator::PaintContext& ctx) const {
-    if (!is_focused() || !input_active_ || !cursor_blink_visible_) {
+    if (!is_focused() || !input_active_) {
         return;
     }
 
@@ -198,15 +198,25 @@ void ConsolePanel::paint_input_cursor(tuinator::PaintContext& ctx) const {
     row = std::clamp(row, 0, std::max(0, bounds_.height - 1));
     col = std::clamp(col, 0, std::max(0, bounds_.width - 1));
 
-    std::string glyph;
     tuinator::Style style;
-    if (!buffer_.cell_at(row, col, glyph, style) || glyph.empty()) {
-        glyph = " ";
+    std::string glyph;
+    if (!buffer_.cell_at(row, col, glyph, style)) {
+        style = {};
     }
 
     tuinator::Style cursor_style = style;
-    cursor_style.reverse = !style.reverse;
-    ctx.canvas.draw_text({col, row}, glyph, cursor_style);
+    cursor_style.background = panel_background_.background;
+    cursor_style.background_rgb = panel_background_.background_rgb;
+    cursor_style.reverse = false;
+    if (!cursor_style.foreground_rgb.has_value()) {
+        cursor_style.foreground_rgb = tuinator::Rgb{220, 220, 225};
+    }
+
+    if (cursor_blink_visible_) {
+        ctx.canvas.draw_text({col, row}, "_", cursor_style);
+    } else if (!glyph.empty()) {
+        ctx.canvas.draw_text({col, row}, glyph, cursor_style);
+    }
 }
 
 void ConsolePanel::paint(tuinator::PaintContext& ctx) const {

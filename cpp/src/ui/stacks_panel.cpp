@@ -4,6 +4,8 @@
 #include "tui_debug_ui/navigable_list_view.hpp"
 #include "tui_debug_ui/titled_scroll_pane.hpp"
 
+#include <tuinator/render/text.hpp>
+
 #include <algorithm>
 #include <string>
 #include <unordered_set>
@@ -44,12 +46,17 @@ StacksPanel::StacksPanel(const DapUiTheme& theme, tuinator::ScrollViewOptions sc
             on_activate_(*frame);
         }
     });
-    list_->set_on_row_click([this](int /*index*/, const std::string& item) {
-        if (item.rfind("\u25b6 ", 0) == 0 && on_continue_ != nullptr) {
-            on_continue_();
-            return true;
+    list_->set_on_row_click([this](int /*index*/, const std::string& item, int local_x) {
+        constexpr const char* kContinueMarker = "\u25b6 ";
+        if (item.rfind(kContinueMarker, 0) != 0 || on_continue_ == nullptr) {
+            return false;
         }
-        return false;
+        const int marker_width = tuinator::text_display_width(kContinueMarker);
+        if (local_x < 0 || local_x >= marker_width) {
+            return false;
+        }
+        on_continue_();
+        return true;
     });
     list_->set_on_row_context([this](int index, const std::string& /*item*/, tuinator::Point anchor) {
         const StackFrameRow* frame = frame_at_display_index(index);

@@ -56,6 +56,15 @@ ScopesPanel::ScopesPanel(const DapUiTheme& theme, tuinator::ScrollViewOptions sc
             on_context_(index, anchor);
         }
     });
+    list_->set_on_row_click([this](int index, const std::string& item, int local_x) {
+        if (!NavigableListView::scope_expand_arrow_hit(item, local_x)) {
+            return false;
+        }
+        if (on_activate_ != nullptr) {
+            on_activate_(index);
+        }
+        return true;
+    });
 
     pane_ = std::make_unique<TitledScrollPane>(title, std::move(list), theme.title_scopes, theme.panel_background,
                                                std::move(scroll_options), true, false);
