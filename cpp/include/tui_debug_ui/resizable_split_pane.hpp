@@ -39,6 +39,7 @@ class ResizableSplitPane : public tuinator::Widget {
     bool has_focused_descendant() const override;
     void collect_focusable(std::vector<tuinator::Widget*>& out) override;
     void for_each_child(const std::function<void(tuinator::Widget*)>& visitor) override;
+    void set_on_dirty(std::function<void(tuinator::Rect)> callback) override;
 
   private:
     int divider_position() const;

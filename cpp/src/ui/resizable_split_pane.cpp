@@ -64,25 +64,28 @@ void ResizableSplitPane::set_on_screen_refresh(ScreenRefreshCallback callback) {
     on_screen_refresh_ = std::move(callback);
 }
 
-void ResizableSplitPane::propagate_on_dirty(std::function<void(tuinator::Rect)> callback) {
-    set_on_dirty(std::move(callback));
+void ResizableSplitPane::set_on_dirty(std::function<void(tuinator::Rect)> callback) {
+    Widget::set_on_dirty(std::move(callback));
+    // Children with their own override (nested splits, stacked panes, hosts)
+    // recurse on their own via virtual dispatch.
     if (first_) {
         first_->set_on_dirty(on_dirty_);
-        if (auto* nested = dynamic_cast<ResizableSplitPane*>(first_.get())) {
-            nested->propagate_on_dirty(on_dirty_);
-        }
     }
     if (second_) {
         second_->set_on_dirty(on_dirty_);
-        if (auto* nested = dynamic_cast<ResizableSplitPane*>(second_.get())) {
-            nested->propagate_on_dirty(on_dirty_);
-        }
     }
 }
 
+void ResizableSplitPane::propagate_on_dirty(std::function<void(tuinator::Rect)> callback) {
+    set_on_dirty(std::move(callback));
+}
+
 void ResizableSplitPane::request_full_redraw() {
+    // Report the split's own bounds: children always stay within them, so this
+    // covers both their old and new positions. An empty rect would be discarded
+    // as "nothing to paint" by the Application.
     if (on_dirty_) {
-        on_dirty_({});
+        on_dirty_(bounds_);
     } else {
         mark_dirty();
     }

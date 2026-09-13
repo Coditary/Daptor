@@ -54,4 +54,11 @@ void SharedWidgetHost::for_each_child(const std::function<void(tuinator::Widget*
     }
 }
 
+void SharedWidgetHost::set_on_dirty(std::function<void(tuinator::Rect)> callback) {
+    Widget::set_on_dirty(std::move(callback));
+    if (target_ != nullptr) {
+        target_->set_on_dirty(on_dirty_);
+    }
+}
+
 }  // namespace tui_debug_ui

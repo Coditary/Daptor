@@ -523,29 +523,6 @@ std::vector<std::string> build_scope_rows(const tui_debug_ui::DebugUiModel& mode
     return scope_rows;
 }
 
-tuinator::Rect union_rect(tuinator::Rect a, tuinator::Rect b) {
-    if (a.width <= 0 || a.height <= 0) {
-        return b;
-    }
-    if (b.width <= 0 || b.height <= 0) {
-        return a;
-    }
-
-    const int x1 = std::min(a.x, b.x);
-    const int y1 = std::min(a.y, b.y);
-    const int x2 = std::max(a.x + a.width, b.x + b.width);
-    const int y2 = std::max(a.y + a.height, b.y + b.height);
-    return {x1, y1, x2 - x1, y2 - y1};
-}
-
-tuinator::Rect controls_row_rect(const tuinator::Rect& root) {
-    return {root.x, root.y, root.width, kControlsBarRows};
-}
-
-tuinator::Rect status_row_rect(const tuinator::Rect& root) {
-    return {root.x, root.y + root.height - kStatusBarRows, root.width, kStatusBarRows};
-}
-
 bool is_wheel_action(tuinator::MouseAction action) {
     return action == tuinator::MouseAction::WheelUp || action == tuinator::MouseAction::WheelDown ||
            action == tuinator::MouseAction::WheelLeft || action == tuinator::MouseAction::WheelRight;
@@ -823,25 +800,10 @@ class DebugChromeRoot : public tuinator::Widget {
     }
 
     void set_on_dirty(std::function<void(tuinator::Rect)> callback) override {
-        // Keep the fixed chrome rows in sync on partial redraws without repainting the whole terminal.
-        const auto include_chrome_rows = [this, callback = std::move(callback)](tuinator::Rect region) {
-            if (!callback) {
-                return;
-            }
-            if (region.width <= 0 || region.height <= 0) {
-                callback({});
-                return;
-            }
-            if (bounds_.width <= 0 || bounds_.height <= 0) {
-                callback(region);
-                return;
-            }
-
-            tuinator::Rect expanded = union_rect(region, controls_row_rect(bounds_));
-            expanded = union_rect(expanded, status_row_rect(bounds_));
-            callback(expanded);
-        };
-        Widget::set_on_dirty(include_chrome_rows);
+        // Chrome rows repaint via their own widgets' dirty rects; expanding every
+        // child rect to include them would turn each partial redraw into a
+        // full-height repaint.
+        Widget::set_on_dirty(std::move(callback));
         if (controls_ != nullptr) {
             controls_->set_on_dirty(on_dirty_);
         }
@@ -2871,10 +2833,20 @@ void DebugApp::scroll_source_to_line(int line) {
     source_panel_->set_cursor_line(line);
     if (source_scroll_view_ != nullptr) {
         const int viewport = std::max(1, source_viewport_height());
-        const int scroll_y = std::max(0, line - viewport / 2 - 1);
-        source_scroll_view_->scroll_to(0, scroll_y);
-        source_scroll_view_->refresh_content();
-        cached_highlight_scroll_y_ = scroll_y;
+        const int current_scroll = source_scroll_view_->scroll_y();
+        // Keep the viewport put while the line is comfortably visible and only
+        // re-center once it leaves a small margin. Unconditional centering
+        // scrolled on every debugger step, which repainted every source row.
+        constexpr int kMargin = 2;
+        const int first_visible = current_scroll + 1;
+        const int last_visible = current_scroll + viewport;
+        const bool visible = line >= first_visible + kMargin && line <= last_visible - kMargin;
+        if (!visible) {
+            const int scroll_y = std::max(0, line - viewport / 2 - 1);
+            source_scroll_view_->scroll_to(0, scroll_y);
+            source_scroll_view_->refresh_content();
+            cached_highlight_scroll_y_ = scroll_y;
+        }
     } else {
         source_panel_->ensure_cursor_visible();
     }
@@ -3128,7 +3100,12 @@ void DebugApp::request_full_screen_refresh() {
         return;
     }
 
-    app_->present();
+    // Repaint everything without clearing the terminal: repaint_all() goes
+    // through the partial-render path, where the backend's cell diff reduces
+    // output to the cells that actually changed. present() would force a
+    // \033[2J clear first, which visibly flashed the whole screen on every
+    // debugger step.
+    app_->repaint_all();
 }
 
 void DebugApp::request_repaint() {

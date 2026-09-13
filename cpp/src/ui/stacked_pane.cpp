@@ -455,8 +455,8 @@ void StackedPane::set_entry_label(int index, std::string label) {
     mark_dirty();
 }
 
-void StackedPane::propagate_on_dirty(std::function<void(tuinator::Rect)> callback) {
-    set_on_dirty(std::move(callback));
+void StackedPane::set_on_dirty(std::function<void(tuinator::Rect)> callback) {
+    Widget::set_on_dirty(std::move(callback));
     for (EntryData& entry : entries_) {
         if (entry.widget != nullptr) {
             entry.widget->set_on_dirty(on_dirty_);
@@ -465,6 +465,10 @@ void StackedPane::propagate_on_dirty(std::function<void(tuinator::Rect)> callbac
     if (rename_input_ != nullptr) {
         rename_input_->set_on_dirty(on_dirty_);
     }
+}
+
+void StackedPane::propagate_on_dirty(std::function<void(tuinator::Rect)> callback) {
+    set_on_dirty(std::move(callback));
 }
 
 void StackedPane::notify_active_changed() {

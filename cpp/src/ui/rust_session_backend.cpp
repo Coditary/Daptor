@@ -89,9 +89,16 @@ class RustSessionBackend final : public SessionBackend {
     }
 
     std::optional<std::string> drain_console_json() override {
-        return read_json_buffer([this](char* out, std::size_t cap) {
+        auto json = read_json_buffer([this](char* out, std::size_t cap) {
             return tui_debug_drain_console(session_, out, cap);
         });
+        // The Rust core serializes an empty drain as "[]" instead of signalling
+        // "no output". Treat it as empty so the UI is not woken up (and
+        // repainted) on every 50ms worker tick.
+        if (json.has_value() && *json == "[]") {
+            return std::nullopt;
+        }
+        return json;
     }
 
     bool terminal_write(const std::string& bytes, std::string& error_out) override {

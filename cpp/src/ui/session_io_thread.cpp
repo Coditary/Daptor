@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
+#include <cstring>
 #include <sstream>
 #include <utility>
 
@@ -1082,15 +1084,26 @@ void SessionIoThread::run_poll_cycle() {
         return;
     }
 
+    static const bool debug_events = [] {
+        const char* env = std::getenv("TUINATOR_DEBUG_EVENTS");
+        return env != nullptr && env[0] != '\0' && std::strcmp(env, "0") != 0;
+    }();
+
     std::string json_out;
     const int rc = backend_->poll_json(json_out);
     if (rc == 0) {
+        if (debug_events) {
+            std::fprintf(stderr, "session-event: PollJson %.200s\n", json_out.c_str());
+        }
         push_event(SessionIoEvent{SessionIoEventKind::PollJson, true, std::move(json_out)});
     } else if (rc < 0) {
         push_event(SessionIoEvent{SessionIoEventKind::PollJson, false, {}, "Session poll failed"});
     }
 
     if (const auto json = backend_->drain_console_json()) {
+        if (debug_events) {
+            std::fprintf(stderr, "session-event: ConsoleJson %.200s\n", json->c_str());
+        }
         push_event(SessionIoEvent{SessionIoEventKind::ConsoleJson, true, *json});
     }
 }
