@@ -327,6 +327,7 @@ impl RrDebugSession {
             capabilities: rr_capabilities(),
             breakpoint_hits: vec![],
             exception_info: None,
+            debug_process_ids: vec![],
         })
     }
 
@@ -341,6 +342,7 @@ impl RrDebugSession {
             breakpoint_hits: vec![],
             exception_info: None,
             capabilities: rr_capabilities(),
+            debug_process_ids: vec![],
         }
     }
 }

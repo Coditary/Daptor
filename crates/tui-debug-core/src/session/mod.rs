@@ -373,6 +373,9 @@ pub struct SessionSnapshot {
     pub breakpoint_hits: Vec<BreakpointHitInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exception_info: Option<ExceptionInfo>,
+    /// OS process IDs from DAP `process` events (`systemProcessId`), aggregated for metrics.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub debug_process_ids: Vec<u32>,
 }
 
 /// Owns the Dap transport and implements the debug session lifecycle.
@@ -401,6 +404,8 @@ pub struct DebugSession {
     breakpoint_ids: HashMap<i64, (String, u32)>,
     last_breakpoint_requests: HashMap<String, Vec<SourceBreakpoint>>,
     debuggee_io: Arc<Mutex<Option<DebuggeeIo>>>,
+    /// Tracked debuggee OS PIDs from DAP `process` events (multiple for subprocesses).
+    debug_process_ids: Vec<u32>,
 }
 
 impl DebugSession {
@@ -444,6 +449,7 @@ impl DebugSession {
             breakpoint_ids: HashMap::new(),
             last_breakpoint_requests: HashMap::new(),
             debuggee_io: Arc::new(Mutex::new(None)),
+            debug_process_ids: Vec::new(),
         };
 
         session.initialize_and_launch()?;
@@ -490,6 +496,7 @@ impl DebugSession {
             breakpoint_ids: HashMap::new(),
             last_breakpoint_requests: HashMap::new(),
             debuggee_io: Arc::new(Mutex::new(None)),
+            debug_process_ids: Vec::new(),
         };
 
         session.initialize_and_launch()?;
@@ -785,7 +792,29 @@ impl DebugSession {
             exception_breakpoint_filters: self.exception_breakpoint_filters.clone(),
         };
         snapshot.breakpoint_hits = self.collect_breakpoint_hits();
+        snapshot.debug_process_ids = self.debug_process_ids.clone();
         snapshot
+    }
+
+    fn handle_process_event(&mut self, body: &serde_json::Value) {
+        let Some(pid) = body.get("systemProcessId").and_then(|value| value.as_u64()) else {
+            return;
+        };
+        if pid == 0 || pid > u32::MAX as u64 {
+            return;
+        }
+        let pid = pid as u32;
+        if self.debug_process_ids.contains(&pid) {
+            return;
+        }
+        self.debug_process_ids.push(pid);
+        info!("tracking debug process pid={pid}");
+    }
+
+    fn clear_debug_process_ids(&mut self) {
+        if !self.debug_process_ids.is_empty() {
+            self.debug_process_ids.clear();
+        }
     }
 
     fn record_breakpoint_hit_count(&mut self, path: &str, line: u32, hit_count: u32) {
@@ -937,6 +966,7 @@ impl DebugSession {
             capabilities: AdapterCapabilities::default(),
             breakpoint_hits: vec![],
             exception_info: None,
+            debug_process_ids: vec![],
         })
     }
 
@@ -981,8 +1011,12 @@ impl DebugSession {
                                 if Self::is_restart_event(&body) {
                                     continue;
                                 }
+                                self.clear_debug_process_ids();
                                 self.state = SessionState::Exited;
                                 return Ok(None);
+                            }
+                            "process" => {
+                                self.handle_process_event(&body);
                             }
                             "output" => {
                                 if let Ok(output) =
@@ -1041,8 +1075,12 @@ impl DebugSession {
                         if Self::is_restart_event(&body) {
                             continue;
                         }
+                        self.clear_debug_process_ids();
                         self.state = SessionState::Exited;
                         return Ok(Some(self.empty_state_snapshot(SessionState::Exited)));
+                    }
+                    "process" => {
+                        self.handle_process_event(&body);
                     }
                     "output" => {
                         if let Ok(output) = serde_json::from_value::<OutputEventBody>(body.clone())
@@ -1142,6 +1180,7 @@ impl DebugSession {
             capabilities: AdapterCapabilities::default(),
             breakpoint_hits: vec![],
             exception_info: None,
+            debug_process_ids: vec![],
         }))
     }
 

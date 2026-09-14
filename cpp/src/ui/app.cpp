@@ -24,6 +24,7 @@
 #include "tui_debug_ui/memory_panel.hpp"
 #include "tui_debug_ui/disassembly_panel.hpp"
 #include "tui_debug_ui/runtime_source_panel.hpp"
+#include "tui_debug_ui/resources_panel.hpp"
 #include "tui_debug_ui/dap_view_formatters.hpp"
 #include "tui_debug_ui/repl_panel.hpp"
 #include "tui_debug_ui/titled_scroll_pane.hpp"
@@ -1520,6 +1521,9 @@ void DebugApp::apply_snapshot_json_payload(const std::string& json) {
     }
     step_in_targets_pending_ = false;
     model_.apply_snapshot_json(json);
+    if (model_.debug_process_ids.empty() && model_.session_state == "exited") {
+        process_metrics_sampler_.reset();
+    }
     remember_scope_names_from_model();
     remember_threads_from_model();
     if (adapter_ == DebugAdapter::Lldb) {
@@ -2006,6 +2010,7 @@ void DebugApp::handle_session_event(const SessionIoEvent& event) {
 
 void DebugApp::poll_session() {
     ensure_ui_built();
+    tick_process_metrics();
     sync_overlay_mouse_tracking();
     process_pending_file_tree_open();
 
@@ -2548,10 +2553,51 @@ void DebugApp::refresh_all_dap_panel_slots() {
         case SidebarPanelType::FileTree:
             sync_file_tree_slot(slot);
             break;
+        case SidebarPanelType::Resources:
+            sync_resources_slot(slot);
+            break;
         default:
             break;
         }
     });
+}
+
+void DebugApp::sync_resources_slot(SidebarSlot& slot) {
+    if (slot.resources == nullptr || slot.config.type != SidebarPanelType::Resources) {
+        return;
+    }
+    slot.resources->set_title(panel_type_label(SidebarPanelType::Resources));
+    slot.resources->set_tracked_pids(model_.debug_process_ids);
+    slot.resources->set_metrics(process_metrics_sampler_.latest(), process_metrics_sampler_);
+}
+
+void DebugApp::tick_process_metrics() {
+    if (!launch_complete_handled_) {
+        return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (last_process_metrics_tick_ != std::chrono::steady_clock::time_point{} &&
+        now - last_process_metrics_tick_ < std::chrono::milliseconds(500)) {
+        return;
+    }
+    last_process_metrics_tick_ = now;
+
+    const bool changed = process_metrics_sampler_.tick(model_.debug_process_ids);
+    if (!changed) {
+        return;
+    }
+
+    bool updated = false;
+    for_each_sidebar_slot([&](SidebarSlot& slot) {
+        if (slot.config.type != SidebarPanelType::Resources || slot.resources == nullptr) {
+            return;
+        }
+        sync_resources_slot(slot);
+        updated = true;
+    });
+    if (updated) {
+        request_repaint();
+    }
 }
 
 void DebugApp::request_memory_fetch_for_slot(SidebarSlot& slot, const std::string& reference, std::int64_t offset) {
@@ -5004,6 +5050,7 @@ void DebugApp::init_default_sidebar_slots(std::vector<SidebarSlot>& slots) {
     push_slot(make_config(SidebarPanelType::Threads));
     push_slot(make_config(SidebarPanelType::Breakpoints));
     push_slot(make_config(SidebarPanelType::Watches));
+    push_slot(make_config(SidebarPanelType::Resources));
     if (!model_.watches.empty()) {
         slots.back().watches_data = std::move(model_.watches);
         model_.watches.clear();
@@ -5209,6 +5256,12 @@ void DebugApp::ensure_sidebar_slot_panels(SidebarSlot& slot, const tuinator::Scr
             sync_file_tree_slot(slot);
         }
         break;
+    case SidebarPanelType::Resources:
+        if (slot.resources == nullptr) {
+            slot.resources = std::make_unique<ResourcesPanel>(dap_theme_, scroll_options);
+            sync_resources_slot(slot);
+        }
+        break;
     case SidebarPanelType::Repl:
         if (repl_shell_ != nullptr && slot.shared_host == nullptr) {
             slot.shared_host = std::make_unique<SharedWidgetHost>(repl_shell_.get());
@@ -5265,6 +5318,11 @@ std::unique_ptr<tuinator::Widget> DebugApp::release_sidebar_slot_widget(SidebarS
             return slot.file_tree->release_widget();
         }
         break;
+    case SidebarPanelType::Resources:
+        if (slot.resources != nullptr) {
+            return slot.resources->release_widget();
+        }
+        break;
     case SidebarPanelType::Source:
     case SidebarPanelType::Repl:
     case SidebarPanelType::Console:
@@ -5303,6 +5361,8 @@ bool DebugApp::focus_matches_panel_type(Focus focus, SidebarPanelType type) {
         return focus == Focus::RuntimeSource;
     case SidebarPanelType::FileTree:
         return focus == Focus::FileTree;
+    case SidebarPanelType::Resources:
+        return focus == Focus::Resources;
     case SidebarPanelType::Source:
         return focus == Focus::Source;
     case SidebarPanelType::Repl:
@@ -5332,6 +5392,8 @@ Focus DebugApp::focus_for_panel_type(SidebarPanelType type) {
         return Focus::RuntimeSource;
     case SidebarPanelType::FileTree:
         return Focus::FileTree;
+    case SidebarPanelType::Resources:
+        return Focus::Resources;
     case SidebarPanelType::Source:
         return Focus::Source;
     case SidebarPanelType::Repl:
@@ -5674,29 +5736,85 @@ void DebugApp::show_add_panel_menu(tuinator::Point anchor, LayoutNodeId leaf_id)
         "Breakpoints ›",
         [this, leaf_id, anchor]() { show_add_breakpoint_menu(leaf_id, anchor); },
     });
+    items.push_back(ContextMenu::Item{
+        "Advanced ›",
+        [this, leaf_id, anchor]() { show_add_advanced_menu(leaf_id, anchor); },
+    });
+    items.push_back(ContextMenu::Item{
+        "Workspace ›",
+        [this, leaf_id, anchor]() { show_add_workspace_menu(leaf_id, anchor); },
+    });
+    items.push_back(ContextMenu::Item{
+        "Output ›",
+        [this, leaf_id, anchor]() { show_add_output_menu(leaf_id, anchor); },
+    });
+
+    context_menu_->open(anchor, overlay_clip_bounds(), std::move(items));
+    context_menu_->layout(overlay_clip_bounds());
+    request_full_screen_refresh();
+}
+
+void DebugApp::show_add_advanced_menu(LayoutNodeId leaf_id, tuinator::Point anchor) {
+    if (context_menu_ == nullptr) {
+        return;
+    }
+
+    std::vector<ContextMenu::Item> items;
     if (model_.supports_read_memory_request) {
         items.push_back(ContextMenu::Item{
             "Memory",
             [this, leaf_id]() { add_panel_to_leaf(leaf_id, SidebarPanelType::Memory); },
         });
     }
-    if (model_.supports_disassemble_request) {
-        items.push_back(ContextMenu::Item{
-            "Disassembly (ASM)",
-            [this, leaf_id]() { add_panel_to_leaf(leaf_id, SidebarPanelType::DisassemblyAsm); },
-        });
-        items.push_back(ContextMenu::Item{
-            "Disassembly (Hex)",
-            [this, leaf_id]() { add_panel_to_leaf(leaf_id, SidebarPanelType::DisassemblyBytes); },
-        });
-    }
     items.push_back(ContextMenu::Item{
         "Runtime Source",
         [this, leaf_id]() { add_panel_to_leaf(leaf_id, SidebarPanelType::RuntimeSource); },
     });
+    if (model_.supports_disassemble_request) {
+        items.push_back(ContextMenu::Item{
+            "Disassembly ›",
+            [this, leaf_id, anchor]() { show_add_disassembly_menu(leaf_id, anchor); },
+        });
+    }
+
+    context_menu_->open(anchor, overlay_clip_bounds(), std::move(items));
+    context_menu_->layout(overlay_clip_bounds());
+    request_full_screen_refresh();
+}
+
+void DebugApp::show_add_disassembly_menu(LayoutNodeId leaf_id, tuinator::Point anchor) {
+    if (context_menu_ == nullptr) {
+        return;
+    }
+
+    std::vector<ContextMenu::Item> items;
+    items.push_back(ContextMenu::Item{
+        "ASM",
+        [this, leaf_id]() { add_panel_to_leaf(leaf_id, SidebarPanelType::DisassemblyAsm); },
+    });
+    items.push_back(ContextMenu::Item{
+        "Hex",
+        [this, leaf_id]() { add_panel_to_leaf(leaf_id, SidebarPanelType::DisassemblyBytes); },
+    });
+
+    context_menu_->open(anchor, overlay_clip_bounds(), std::move(items));
+    context_menu_->layout(overlay_clip_bounds());
+    request_full_screen_refresh();
+}
+
+void DebugApp::show_add_workspace_menu(LayoutNodeId leaf_id, tuinator::Point anchor) {
+    if (context_menu_ == nullptr) {
+        return;
+    }
+
+    std::vector<ContextMenu::Item> items;
     items.push_back(ContextMenu::Item{
         "File Tree",
         [this, leaf_id]() { add_panel_to_leaf(leaf_id, SidebarPanelType::FileTree); },
+    });
+    items.push_back(ContextMenu::Item{
+        "Resources",
+        [this, leaf_id]() { add_panel_to_leaf(leaf_id, SidebarPanelType::Resources); },
     });
     if (const std::optional<std::pair<LayoutNodeId, int>> source_loc = find_source_panel_slot();
         !source_loc.has_value() || source_loc->first != leaf_id) {
@@ -5705,6 +5823,18 @@ void DebugApp::show_add_panel_menu(tuinator::Point anchor, LayoutNodeId leaf_id)
             [this, leaf_id]() { move_source_panel_to_leaf(leaf_id); },
         });
     }
+
+    context_menu_->open(anchor, overlay_clip_bounds(), std::move(items));
+    context_menu_->layout(overlay_clip_bounds());
+    request_full_screen_refresh();
+}
+
+void DebugApp::show_add_output_menu(LayoutNodeId leaf_id, tuinator::Point anchor) {
+    if (context_menu_ == nullptr) {
+        return;
+    }
+
+    std::vector<ContextMenu::Item> items;
     items.push_back(ContextMenu::Item{
         "REPL",
         [this, leaf_id]() { add_panel_to_leaf(leaf_id, SidebarPanelType::Repl); },
@@ -5841,6 +5971,9 @@ void DebugApp::add_panel_to_leaf(LayoutNodeId leaf_id, SidebarPanelType type, st
     if (new_slot.config.type == SidebarPanelType::FileTree) {
         sync_file_tree_slot(new_slot);
     }
+    if (new_slot.config.type == SidebarPanelType::Resources) {
+        sync_resources_slot(new_slot);
+    }
 
     auto widget = release_sidebar_slot_widget(new_slot);
     widget->set_flex(1);
@@ -5948,7 +6081,7 @@ void DebugApp::rename_dock_panel(PanelDock dock, int index, const std::string& l
 bool DebugApp::is_sidebar_focus(Focus focus) {
     return focus == Focus::Scopes || focus == Focus::Stacks || focus == Focus::Breakpoints ||
            focus == Focus::Watches || focus == Focus::Memory || focus == Focus::Disassembly ||
-           focus == Focus::RuntimeSource || focus == Focus::FileTree;
+           focus == Focus::RuntimeSource || focus == Focus::FileTree || focus == Focus::Resources;
 }
 
 Focus DebugApp::focus_for_sidebar_index(int index) {
@@ -6825,6 +6958,9 @@ void DebugApp::cycle_focus_next() {
         model_.focus = Focus::FileTree;
         break;
     case Focus::FileTree:
+        model_.focus = Focus::Resources;
+        break;
+    case Focus::Resources:
         model_.focus = Focus::Repl;
         repl_input_focused_ = true;
         break;

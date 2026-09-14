@@ -4,6 +4,7 @@
 #include "tui_debug_ui/disassembly_panel.hpp"
 #include "tui_debug_ui/memory_panel.hpp"
 #include "tui_debug_ui/file_tree_panel.hpp"
+#include "tui_debug_ui/resources_panel.hpp"
 #include "tui_debug_ui/runtime_source_panel.hpp"
 #include "tui_debug_ui/scopes_panel.hpp"
 #include "tui_debug_ui/shared_widget_host.hpp"

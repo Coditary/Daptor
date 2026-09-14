@@ -400,6 +400,7 @@ mod tests {
             capabilities: Default::default(),
             breakpoint_hits: vec![],
             exception_info: None,
+            debug_process_ids: vec![],
         };
 
         let json = snapshot_to_json(&snapshot).unwrap();

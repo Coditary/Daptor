@@ -59,6 +59,8 @@ add_executable(tui-debug-ui
     src/ui/workspace_files.cpp
     src/ui/file_picker.cpp
     src/ui/file_tree_panel.cpp
+    src/ui/resources_panel.cpp
+    src/ui/process_metrics.cpp
 )
 
 target_include_directories(tui-debug-ui

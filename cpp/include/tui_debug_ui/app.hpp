@@ -16,6 +16,7 @@
 #include "tui_debug_ui/layout_drag.hpp"
 #include "tui_debug_ui/layout_tree.hpp"
 #include "tui_debug_ui/panel_slot.hpp"
+#include "tui_debug_ui/process_metrics.hpp"
 #include "tui_debug_ui/sidebar_slot.hpp"
 #include "tui_debug_ui/step_in_selection.hpp"
 
@@ -54,6 +55,7 @@ class MemoryPanel;
 class DisassemblyPanel;
 class RuntimeSourcePanel;
 class FileTreePanel;
+class ResourcesPanel;
 class TitledScrollPane;
 class StackedPane;
 class SharedWidgetHost;
@@ -376,6 +378,8 @@ class DebugApp {
     void wire_file_tree_panel(FileTreePanel& panel);
     void sync_file_tree_slot(SidebarSlot& slot);
     void sync_file_tree_slots();
+    void sync_resources_slot(SidebarSlot& slot);
+    void tick_process_metrics();
     void process_pending_file_tree_open();
     void sync_breakpoint_slot(SidebarSlot& slot, const std::vector<BreakpointRow>& rows);
     void sync_thread_slot(SidebarSlot& slot, const std::vector<ThreadStackContent>& threads);
@@ -391,6 +395,10 @@ class DebugApp {
     void remember_threads_from_model();
     void show_add_breakpoint_menu(LayoutNodeId leaf_id, tuinator::Point anchor);
     void show_add_thread_menu(LayoutNodeId leaf_id, tuinator::Point anchor);
+    void show_add_advanced_menu(LayoutNodeId leaf_id, tuinator::Point anchor);
+    void show_add_disassembly_menu(LayoutNodeId leaf_id, tuinator::Point anchor);
+    void show_add_workspace_menu(LayoutNodeId leaf_id, tuinator::Point anchor);
+    void show_add_output_menu(LayoutNodeId leaf_id, tuinator::Point anchor);
     void add_panel_to_leaf(LayoutNodeId leaf_id, SidebarPanelType type,
                            std::optional<std::string> scope_filter = std::nullopt,
                            std::optional<BreakpointRowKind> breakpoint_filter = std::nullopt,
@@ -483,6 +491,8 @@ class DebugApp {
     bool divider_drag_active_ = false;
     std::string launch_error_;
     int spinner_frame_ = 0;
+    ProcessMetricsSampler process_metrics_sampler_;
+    std::chrono::steady_clock::time_point last_process_metrics_tick_{};
     DebugUiModel model_;
     DapUiTheme dap_theme_;
     std::unique_ptr<tuinator::Application> app_;

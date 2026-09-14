@@ -54,6 +54,8 @@ std::string DebugUiModel::focus_label() const {
         return "runtime source";
     case Focus::FileTree:
         return "file tree";
+    case Focus::Resources:
+        return "resources";
     case Focus::Repl:
         return "repl";
     case Focus::Console:

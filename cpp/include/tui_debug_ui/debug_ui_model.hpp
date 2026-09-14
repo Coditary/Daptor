@@ -24,6 +24,7 @@ enum class Focus {
     Disassembly,
     RuntimeSource,
     FileTree,
+    Resources,
     Repl,
     Console,
 };
@@ -174,6 +175,8 @@ class DebugUiModel {
         bool supports_condition = false;
     };
     std::vector<ExceptionBreakpointFilterInfo> exception_breakpoint_filters;
+    /// OS PIDs from DAP `process` events (`systemProcessId`), aggregated for resource metrics.
+    std::vector<std::uint32_t> debug_process_ids;
 
     /// Apply a JSON snapshot from the Rust session.
     void apply_snapshot_json(const std::string& json);

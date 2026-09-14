@@ -156,6 +156,19 @@ void apply_snapshot_object(DebugUiModel& model, const Json& snapshot) {
         }
     }
 
+    model.debug_process_ids.clear();
+    if (snapshot.contains("debug_process_ids") && snapshot.at("debug_process_ids").is_array()) {
+        for (const Json& pid : snapshot.at("debug_process_ids")) {
+            if (!pid.is_number_unsigned() && !pid.is_number_integer()) {
+                continue;
+            }
+            const auto value = pid.get<std::uint64_t>();
+            if (value > 0 && value <= 0xFFFF'FFFFULL) {
+                model.debug_process_ids.push_back(static_cast<std::uint32_t>(value));
+            }
+        }
+    }
+
     if (snapshot.contains("capabilities") && snapshot.at("capabilities").is_object()) {
         const Json& capabilities = snapshot.at("capabilities");
         model.supports_step_back = capabilities.value("supports_step_back", false);

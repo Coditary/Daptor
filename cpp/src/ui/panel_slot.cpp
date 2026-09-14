@@ -38,6 +38,8 @@ std::string panel_type_label(SidebarPanelType type) {
         return "Runtime Source";
     case SidebarPanelType::FileTree:
         return "File Tree";
+    case SidebarPanelType::Resources:
+        return "Resources";
     case SidebarPanelType::Repl:
         return "REPL";
     case SidebarPanelType::Console:
