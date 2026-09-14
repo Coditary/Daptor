@@ -33,4 +33,7 @@ void apply_ncurses_winsize();
 /// Match the terminal's default background to the UI theme (OSC 11).
 void set_terminal_theme_background(tuinator::Rgb background);
 
+/// Switch xterm mouse tracking between drag-only (1002) and hover (1003).
+void set_xterm_mouse_hover_tracking(bool enabled);
+
 }  // namespace tui_debug_ui

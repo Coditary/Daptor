@@ -10,5 +10,9 @@ inline constexpr const char* kUiBreakpointIcon = "\uF111";
 inline constexpr const char* kUiConditionalBreakpointIcon = "\uF192";
 // Nerd Font: nf-oct-arrow_right
 inline constexpr const char* kUiExecutionLineIcon = "\uF432";
+// Nerd Font: nf-md-folder / nf-md-folder-open / nf-md-file-outline
+inline constexpr const char* kUiFolderIcon = "\uF24B";
+inline constexpr const char* kUiFolderOpenIcon = "\uF76F";
+inline constexpr const char* kUiFileIcon = "\uF0219";
 
 }  // namespace tui_debug_ui

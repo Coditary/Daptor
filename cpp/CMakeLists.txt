@@ -56,6 +56,9 @@ add_executable(tui-debug-ui
     src/ui/controls_bar.cpp
     src/ui/navigable_list_view.cpp
     src/ui/titled_scroll_pane.cpp
+    src/ui/workspace_files.cpp
+    src/ui/file_picker.cpp
+    src/ui/file_tree_panel.cpp
 )
 
 target_include_directories(tui-debug-ui

@@ -23,6 +23,7 @@ enum class Focus {
     Memory,
     Disassembly,
     RuntimeSource,
+    FileTree,
     Repl,
     Console,
 };

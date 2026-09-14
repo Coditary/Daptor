@@ -120,9 +120,10 @@ void apply_ncurses_winsize() {
     resizeterm(static_cast<int>(ws.ws_row), static_cast<int>(ws.ws_col));
 }
 
-void set_terminal_theme_background(tuinator::Rgb background) {
-    char sequence[48];
-    std::snprintf(sequence, sizeof(sequence), "\033]11;#%02x%02x%02x\007", background.r, background.g, background.b);
+void write_tty_sequence(const char* sequence) {
+    if (sequence == nullptr || sequence[0] == '\0') {
+        return;
+    }
 
     const int tty_fd = open("/dev/tty", O_WRONLY);
     if (tty_fd < 0) {
@@ -131,6 +132,21 @@ void set_terminal_theme_background(tuinator::Rgb background) {
 
     (void)write(tty_fd, sequence, std::strlen(sequence));
     close(tty_fd);
+}
+
+void set_terminal_theme_background(tuinator::Rgb background) {
+    char sequence[48];
+    std::snprintf(sequence, sizeof(sequence), "\033]11;#%02x%02x%02x\007", background.r, background.g, background.b);
+    write_tty_sequence(sequence);
+}
+
+void set_xterm_mouse_hover_tracking(bool enabled) {
+    write_tty_sequence("\033[?1000l\033[?1002l\033[?1003l\033[?1006l");
+    if (enabled) {
+        write_tty_sequence("\033[?1000h\033[?1003h\033[?1006h");
+    } else {
+        write_tty_sequence("\033[?1000h\033[?1002h\033[?1006h");
+    }
 }
 
 }  // namespace tui_debug_ui

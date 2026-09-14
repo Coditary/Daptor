@@ -1,0 +1,45 @@
+--- a/include/tuinator/core/application.hpp
++++ b/include/tuinator/core/application.hpp
+@@ -69,6 +69,9 @@ class Application {
+     void set_alternate_screen(bool enabled);
+     void set_clear_on_shutdown(bool enabled);
+ 
++    /// When true, hover-only mouse motion is delivered to the widget tree (for menus).
++    void set_pointer_hover_tracking(bool enabled);
++
+   private:
+     struct TimerEntry {
+         TimerId id = 0;
+@@ -112,6 +115,7 @@ class Application {
+     TimerId next_timer_id_ = 1;
+     std::size_t focus_index_ = 0;
+     bool running_ = false;
++    bool pointer_hover_tracking_ = false;
+     DirtyRegion dirty_region_;
+     bool terminal_ready_ = false;
+     Widget* hovered_widget_ = nullptr;
+--- a/src/core/application.cpp
++++ b/src/core/application.cpp
+@@ -554,6 +554,10 @@ void Application::set_clear_on_shutdown(bool enabled) {
+     }
+ }
+ 
++void Application::set_pointer_hover_tracking(bool enabled) {
++    pointer_hover_tracking_ = enabled;
++}
++
+ void Application::focus_widget(Widget* widget) {
+     if (!widget) {
+         return;
+@@ -603,8 +607,9 @@ void Application::handle_event(const Event& event) {
+         if (Widget* capture = find_pointer_active_widget(root_.get())) {
+             const MouseEvent adjusted = adjust_mouse_for_widget(root_.get(), capture, *mouse);
+             handled = capture->handle_event(adjusted);
+-        } else if (root_ && (mouse->action != MouseAction::Move || mouse->left_pressed)) {
+-            // Mode 1003 reports hover motion; ignore it unless a button is held.
++        } else if (root_ &&
++                   (mouse->action != MouseAction::Move || mouse->left_pressed || pointer_hover_tracking_)) {
++            // Mode 1003 reports hover motion; ignore it unless a button is held or hover tracking is on.
+             handled = root_->handle_event(event);
+         }
+ 

@@ -28,6 +28,7 @@ enum class ListPaintMode {
     DebugSidebar,
     Breakpoints,
     Watches,
+    FileTree,
 };
 
 enum class ListRowActionLayout {
@@ -50,6 +51,16 @@ inline constexpr const char* kInlineWatchEditRow = "\x1E\x01watch";
 inline constexpr const char* kWatchAddPromptRow = "\x1E\x01watch_add";
 inline constexpr const char* kScopeExpandCollapsed = "\xe2\x96\xb8 ";
 inline constexpr const char* kScopeExpandExpanded = "\xe2\x96\xbe ";
+inline constexpr const char* kFileTreeRowMarker = "\x1E\x02";
+
+struct FileTreeRowParts {
+    int depth = 0;
+    bool is_directory = false;
+    bool expanded = false;
+    bool last_sibling = false;
+    std::vector<bool> ancestor_is_last;
+    std::string_view name;
+};
 
 struct ScopeVariableRowParts {
     int depth = 0;
@@ -75,7 +86,7 @@ class NavigableListView : public tuinator::ListView {
     bool handle_event(const tuinator::Event& event) override;
 
     /// Replace items and reset scroll so the first row stays visible.
-    void assign_items(std::vector<std::string> items);
+    void assign_items(std::vector<std::string> items, bool preserve_selection_and_scroll = false);
     void set_variable_row_show_edit(std::vector<bool> show_edit);
 
     using ActivateCallback = std::function<void(int index)>;
@@ -102,6 +113,8 @@ class NavigableListView : public tuinator::ListView {
     [[nodiscard]] static bool is_inline_watch_edit_row(const std::string& item);
     [[nodiscard]] static bool is_watch_add_prompt_row(const std::string& item);
     [[nodiscard]] static bool scope_expand_arrow_hit(const std::string& item, int local_x);
+    [[nodiscard]] static bool file_tree_expand_arrow_hit(const std::string& item, int local_x);
+    [[nodiscard]] static std::optional<FileTreeRowParts> parse_file_tree_row(std::string_view line);
     [[nodiscard]] static bool is_scope_section_header_row(const std::string& item);
     [[nodiscard]] static std::optional<ScopeVariableRowParts> parse_scope_variable_row(std::string_view line);
     [[nodiscard]] static bool is_scope_loading_row(std::string_view line);

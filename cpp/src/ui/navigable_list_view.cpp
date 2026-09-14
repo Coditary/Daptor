@@ -219,6 +219,44 @@ void draw_segment(tuinator::Canvas& canvas, int& column, int row, std::string_vi
     column += std::min(tuinator::text_display_width(text), remaining);
 }
 
+std::string file_tree_guides(const FileTreeRowParts& parts) {
+    std::string guides;
+    if (parts.depth <= 0) {
+        return guides;
+    }
+    for (int i = 0; i < parts.depth - 1; ++i) {
+        const bool ancestor_last =
+            i < static_cast<int>(parts.ancestor_is_last.size()) &&
+            parts.ancestor_is_last[static_cast<std::size_t>(i)];
+        guides += ancestor_last ? "   " : "\u2502  ";
+    }
+    guides += parts.last_sibling ? "\u2514\u2500 " : "\u251c\u2500 ";
+    return guides;
+}
+
+tuinator::Style file_tree_name_style(const FileTreeRowParts& parts, const DapUiTheme& theme) {
+    return parts.is_directory ? theme.file_tree_folder : theme.file_tree_file;
+}
+
+void paint_file_tree_row(tuinator::Canvas& canvas, int row, const FileTreeRowParts& parts, const DapUiTheme& theme,
+                         bool selected, int column, int max_width) {
+    if (selected && max_width > 0) {
+        canvas.fill_rect({0, row, max_width, 1}, ' ', theme.file_tree_row_selected);
+    }
+
+    tuinator::Style guide_style = theme.divider;
+    draw_segment(canvas, column, row, file_tree_guides(parts), guide_style, max_width);
+
+    if (parts.is_directory) {
+        draw_segment(canvas, column, row, parts.expanded ? kScopeExpandExpanded : kScopeExpandCollapsed, theme.label,
+                     max_width);
+    } else {
+        draw_segment(canvas, column, row, "   ", theme.label, max_width);
+    }
+
+    draw_segment(canvas, column, row, parts.name, file_tree_name_style(parts, theme), max_width);
+}
+
 }  // namespace
 
 NavigableListView::NavigableListView(tuinator::Style item_style, tuinator::Style selected_style,
@@ -359,6 +397,50 @@ bool NavigableListView::scope_expand_arrow_hit(const std::string& item, int loca
 
     constexpr int kHitPad = 1;
     const int arrow_x = parsed->depth * 2;
+    const int arrow_width = tuinator::text_display_width(kScopeExpandCollapsed);
+    return local_x >= arrow_x - kHitPad && local_x < arrow_x + arrow_width + kHitPad;
+}
+
+std::optional<FileTreeRowParts> NavigableListView::parse_file_tree_row(std::string_view line) {
+    if (line.size() < 6 || line.compare(0, 2, kFileTreeRowMarker) != 0) {
+        return std::nullopt;
+    }
+    line.remove_prefix(2);
+    if (line[1] != 'D' && line[1] != 'F') {
+        return std::nullopt;
+    }
+
+    FileTreeRowParts parts{};
+    parts.depth = line[0] - '0';
+    parts.is_directory = line[1] == 'D';
+    parts.expanded = line[2] == 'E';
+    parts.last_sibling = line[3] == '1';
+    line.remove_prefix(4);
+
+    const std::size_t sep = line.find('\x1F');
+    if (sep == std::string_view::npos) {
+        return std::nullopt;
+    }
+    for (const char ch : line.substr(0, sep)) {
+        if (ch == '0' || ch == '1') {
+            parts.ancestor_is_last.push_back(ch == '1');
+        }
+    }
+    parts.name = line.substr(sep + 1);
+    if (parts.name.empty()) {
+        return std::nullopt;
+    }
+    return parts;
+}
+
+bool NavigableListView::file_tree_expand_arrow_hit(const std::string& item, int local_x) {
+    const std::optional<FileTreeRowParts> parsed = parse_file_tree_row(item);
+    if (!parsed.has_value() || !parsed->is_directory) {
+        return false;
+    }
+
+    constexpr int kHitPad = 1;
+    const int arrow_x = tuinator::text_display_width(file_tree_guides(*parsed));
     const int arrow_width = tuinator::text_display_width(kScopeExpandCollapsed);
     return local_x >= arrow_x - kHitPad && local_x < arrow_x + arrow_width + kHitPad;
 }
@@ -550,12 +632,20 @@ bool NavigableListView::variable_row_allows_edit(int index) const {
     return variable_row_show_edit_[static_cast<std::size_t>(index)];
 }
 
-void NavigableListView::assign_items(std::vector<std::string> items) {
+void NavigableListView::assign_items(std::vector<std::string> items, bool preserve_selection_and_scroll) {
+    const int previous_index = preserve_selection_and_scroll ? selected_index() : -1;
+    const int previous_scroll = preserve_selection_and_scroll ? scroll_offset_ : 0;
     set_items(std::move(items));
-    scroll_offset_ = 0;
+    scroll_offset_ = previous_scroll;
     if (interactive_) {
-        set_selected_index(0);
+        if (preserve_selection_and_scroll && previous_index >= 0 &&
+            previous_index < static_cast<int>(this->items().size())) {
+            set_selected_index(previous_index);
+        } else if (!preserve_selection_and_scroll) {
+            set_selected_index(0);
+        }
     }
+    clamp_scroll_offset();
     if (scroll_parent_ != nullptr) {
         scroll_parent_->refresh_content();
     }
@@ -656,14 +746,18 @@ void NavigableListView::paint_themed(tuinator::PaintContext& ctx) const {
         return;
     }
 
-    const bool show_selection = is_focused() && paint_mode_ != ListPaintMode::Watches &&
-                                paint_mode_ != ListPaintMode::Scopes &&
-                                paint_mode_ != ListPaintMode::Breakpoints &&
-                                paint_mode_ != ListPaintMode::Stacks;
+    const bool show_marker_selection = is_focused() && paint_mode_ != ListPaintMode::Watches &&
+                                       paint_mode_ != ListPaintMode::Scopes &&
+                                       paint_mode_ != ListPaintMode::Breakpoints &&
+                                       paint_mode_ != ListPaintMode::Stacks &&
+                                       paint_mode_ != ListPaintMode::FileTree;
+    const bool show_row_selection = is_focused() && paint_mode_ == ListPaintMode::FileTree;
     const int max_width = std::max(0, bounds().width);
     for (int index = 0; index < static_cast<int>(items().size()); ++index) {
-        const bool selected = show_selection && index == selected_index();
-        const std::string prefix = selected ? "> " : (show_selection ? "  " : "");
+        const bool selected =
+            (show_marker_selection || show_row_selection) && index == selected_index();
+        const std::string prefix =
+            show_marker_selection ? (selected ? "> " : "  ") : std::string{};
         const std::string& item = items()[static_cast<std::size_t>(index)];
         paint_themed_row(canvas, index, index, item, prefix, selected, max_width);
     }
@@ -922,6 +1016,15 @@ void NavigableListView::paint_themed_row(tuinator::Canvas& canvas, int row, int 
     const int content_max_width = std::max(0, max_width - action_reserve);
 
     if (selected) {
+        if (paint_mode_ == ListPaintMode::FileTree) {
+            if (const auto parsed = parse_file_tree_row(item)) {
+                int column = 0;
+                paint_file_tree_row(canvas, row, *parsed, *theme_, true, column, content_max_width);
+                paint_row_actions(canvas, index, row, item, max_width);
+                return;
+            }
+        }
+
         if (paint_mode_ == ListPaintMode::Scopes && parse_scope_variable_row_impl(item).has_value()) {
             int column = 0;
             if (!prefix.empty()) {
@@ -1137,6 +1240,13 @@ void NavigableListView::paint_themed_row(tuinator::Canvas& canvas, int row, int 
                     parsed->second.rfind("<error:", 0) == 0 ? theme_->console_stderr : theme_->variable_value;
                 draw_segment(canvas, column, row, parsed->second, value_style, content_max_width);
                 paint_row_actions(canvas, index, row, item, max_width);
+                return;
+            }
+            break;
+        }
+        case ListPaintMode::FileTree: {
+            if (const auto parsed = parse_file_tree_row(item)) {
+                paint_file_tree_row(canvas, row, *parsed, *theme_, false, column, content_max_width);
                 return;
             }
             break;

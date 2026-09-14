@@ -16,6 +16,7 @@ class BreakpointsPanel;
 class MemoryPanel;
 class DisassemblyPanel;
 class RuntimeSourcePanel;
+class FileTreePanel;
 class SharedWidgetHost;
 
 struct SidebarSlot {
@@ -27,6 +28,7 @@ struct SidebarSlot {
     std::unique_ptr<MemoryPanel> memory;
     std::unique_ptr<DisassemblyPanel> disassembly;
     std::unique_ptr<RuntimeSourcePanel> runtime_source;
+    std::unique_ptr<FileTreePanel> file_tree;
     std::unique_ptr<SharedWidgetHost> shared_host;
     std::vector<std::string> cached_scope_rows;
     std::vector<ScopeVariableRowMeta> cached_scope_row_meta;

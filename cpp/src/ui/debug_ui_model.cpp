@@ -52,6 +52,8 @@ std::string DebugUiModel::focus_label() const {
         return "disassembly";
     case Focus::RuntimeSource:
         return "runtime source";
+    case Focus::FileTree:
+        return "file tree";
     case Focus::Repl:
         return "repl";
     case Focus::Console:

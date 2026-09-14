@@ -19,6 +19,7 @@ enum class SidebarPanelType {
     DisassemblyAsm,
     DisassemblyBytes,
     RuntimeSource,
+    FileTree,
     Repl,
     Console,
 };

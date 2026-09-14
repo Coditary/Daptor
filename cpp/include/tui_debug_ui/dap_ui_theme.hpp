@@ -63,6 +63,9 @@ struct DapUiTheme {
     tuinator::Style layout_drop_merge{tuinator::style_fg_bg(tuinator::Rgb{220, 235, 255}, tuinator::Rgb{50, 80, 150})};
     tuinator::Style layout_drop_span{tuinator::style_fg_bg(tuinator::Rgb{190, 220, 255}, tuinator::Rgb{24, 64, 110})};
     tuinator::Style layout_menu_pane{tuinator::style_fg_bg(tuinator::Rgb{170, 205, 255}, tuinator::Rgb{30, 62, 108})};
+    tuinator::Style file_tree_folder{tuinator::style_fg_bg(tuinator::Rgb{220, 160, 80}, kBackground)};
+    tuinator::Style file_tree_file{tuinator::style_fg_bg(tuinator::Rgb{120, 200, 140}, kBackground)};
+    tuinator::Style file_tree_row_selected{tuinator::style_bg(tuinator::Rgb{42, 42, 50})};
 
     [[nodiscard]] tuinator::BorderGlyphs border_glyphs() const;
     [[nodiscard]] tuinator::ScrollViewOptions scroll_view_options() const;

@@ -4,6 +4,7 @@
 #include "tui_debug_ui/data_breakpoint_info.hpp"
 #include "tui_debug_ui/function_breakpoint_info.hpp"
 #include "tui_debug_ui/context_menu.hpp"
+#include "tui_debug_ui/file_picker.hpp"
 #include "tui_debug_ui/dap_ui_theme.hpp"
 #include "tui_debug_ui/debug_ui_model.hpp"
 #include "tui_debug_ui/highlight_bridge.hpp"
@@ -22,6 +23,7 @@
 #include <tuinator/widgets/views/list_view.hpp>
 
 #include <chrono>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -51,6 +53,7 @@ class WatchesPanel;
 class MemoryPanel;
 class DisassemblyPanel;
 class RuntimeSourcePanel;
+class FileTreePanel;
 class TitledScrollPane;
 class StackedPane;
 class SharedWidgetHost;
@@ -91,6 +94,7 @@ class DebugApp {
     void poll_session();
     void maybe_refresh_source_highlight_for_scroll();
     [[nodiscard]] bool context_menu_open() const;
+    [[nodiscard]] bool file_picker_open() const;
     [[nodiscard]] bool breakpoint_prompt_active() const;
     [[nodiscard]] bool overlay_intercepts_events() const;
     bool handle_overlay_event(const tuinator::Event& event);
@@ -238,6 +242,8 @@ class DebugApp {
     std::string normalize_source_path(const std::string& path) const;
     void normalize_breakpoint_path_keys();
     void open_source_file(const std::string& path, int line, bool pin, std::int64_t source_reference = 0);
+    void open_file_picker();
+    void close_file_picker();
     void save_active_source_file_tab();
     void activate_source_file_tab(int index, int line = 0);
     void switch_source_file_tab(int index);
@@ -367,6 +373,10 @@ class DebugApp {
     void request_memory_fetch_for_slot(SidebarSlot& slot, const std::string& reference, std::int64_t offset);
     void wire_disassembly_panel(DisassemblyPanel& panel, SidebarSlot& slot);
     void wire_runtime_source_panel(RuntimeSourcePanel& panel, SidebarSlot& slot);
+    void wire_file_tree_panel(FileTreePanel& panel);
+    void sync_file_tree_slot(SidebarSlot& slot);
+    void sync_file_tree_slots();
+    void process_pending_file_tree_open();
     void sync_breakpoint_slot(SidebarSlot& slot, const std::vector<BreakpointRow>& rows);
     void sync_thread_slot(SidebarSlot& slot, const std::vector<ThreadStackContent>& threads);
     void sync_threads_list_panel();
@@ -415,6 +425,7 @@ class DebugApp {
     void on_split_drag_ended();
     void request_full_screen_refresh();
     void request_repaint();
+    void sync_overlay_mouse_tracking();
     void mark_source_view_dirty();
     void refresh_source_highlight_if_needed();
     void sync_controls_bar();
@@ -514,6 +525,9 @@ class DebugApp {
     std::unique_ptr<tuinator::Widget> console_shell_;
     std::unique_ptr<tuinator::Widget> source_content_shell_;
     std::unique_ptr<ContextMenu> context_menu_;
+    std::unique_ptr<FilePicker> file_picker_;
+    std::filesystem::path workspace_root_;
+    std::vector<std::filesystem::path> workspace_files_;
     std::unique_ptr<TitledScrollPane> source_section_;
     SourcePanel* source_panel_ = nullptr;
     SourceTabBar* source_tab_bar_ = nullptr;
@@ -626,6 +640,8 @@ class DebugApp {
         std::string access_type;
     };
     std::optional<PendingDataBreakpointRequest> pending_data_breakpoint_;
+    std::optional<std::string> pending_file_tree_open_;
+    bool overlay_hover_tracking_active_ = false;
     struct EphemeralCatchSkipBreakpoint {
         std::string path;
         int line = 0;

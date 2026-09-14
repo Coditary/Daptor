@@ -27,9 +27,11 @@ endif()
 
 set(_tuinator_mouse_patch "${CMAKE_CURRENT_LIST_DIR}/patches/tuinator-mouse-buttons.patch")
 set(_tuinator_text_input_patch "${CMAKE_CURRENT_LIST_DIR}/patches/tuinator-text-input-cursor.patch")
+set(_tuinator_pointer_hover_patch "${CMAKE_CURRENT_LIST_DIR}/patches/tuinator-pointer-hover.patch")
 set(_tuinator_patch_cmd
     patch -p1 --forward -r - < "${_tuinator_mouse_patch}" || true
     COMMAND patch -p1 --forward -r - < "${_tuinator_text_input_patch}" || true
+    COMMAND patch -p1 --forward -r - < "${_tuinator_pointer_hover_patch}" || true
 )
 
 if(EXISTS "${_tuinator_dir}/CMakeLists.txt")

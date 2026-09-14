@@ -16,6 +16,9 @@
 #include "tui_debug_ui/navigable_list_view.hpp"
 #include "tui_debug_ui/breakpoints_panel.hpp"
 #include "tui_debug_ui/context_menu.hpp"
+#include "tui_debug_ui/file_picker.hpp"
+#include "tui_debug_ui/file_tree_panel.hpp"
+#include "tui_debug_ui/workspace_files.hpp"
 #include "tui_debug_ui/stacks_panel.hpp"
 #include "tui_debug_ui/watches_panel.hpp"
 #include "tui_debug_ui/memory_panel.hpp"
@@ -1113,6 +1116,7 @@ DebugApp::DebugApp(const std::string& program_path, SessionMode mode, DebugAdapt
       program_path_(program_path),
       program_args_(std::move(program_args)),
       session_io_(std::make_unique<SessionIoThread>(mode, adapter)),
+      workspace_root_(workspace_root_for_program(program_path_)),
       app_(std::make_unique<tuinator::Application>()) {
     tuinator::Theme theme = app_->theme();
     dap_theme_.apply_to(theme);
@@ -1198,6 +1202,16 @@ void DebugApp::build_ui() {
     source_panel_ = source_panel.get();
     context_menu_ = std::make_unique<ContextMenu>(dap_theme_.panel_background, dap_theme_.label, dap_theme_.selection,
                                                   dap_theme_.border_focused);
+    file_picker_ = std::make_unique<FilePicker>(
+        dap_theme_.panel_background, dap_theme_.border_focused, dap_theme_.title_source, dap_theme_.label,
+        dap_theme_.selection, dap_theme_.variable_name, dap_theme_.frame_current, dap_theme_.label,
+        dap_theme_.divider);
+    file_picker_->set_on_select([this](const std::filesystem::path& path) {
+        open_source_file(path.string(), 1, false);
+        model_.status_message = "Opened " + relative_display(workspace_root_, path);
+        sync_status_bar();
+        request_repaint();
+    });
 
     source_panel_->set_on_toggle_breakpoint([this](int line) { toggle_breakpoint_at_line(line); });
     source_panel_->set_on_breakpoint_context([this](int line, int code_column, tuinator::Point anchor) {
@@ -1326,6 +1340,7 @@ void DebugApp::build_ui() {
         sync_watches_panel();
     }
     refresh_all_scope_slots();
+    sync_file_tree_slots();
     sync_source_stack_title();
 
     auto status = std::make_unique<tuinator::StatusBar>(format_status_bar_text(), dap_theme_.status_bar);
@@ -1991,6 +2006,8 @@ void DebugApp::handle_session_event(const SessionIoEvent& event) {
 
 void DebugApp::poll_session() {
     ensure_ui_built();
+    sync_overlay_mouse_tracking();
+    process_pending_file_tree_open();
 
     if (consume_sigint_quit_request()) {
         if (app_ != nullptr) {
@@ -2528,6 +2545,9 @@ void DebugApp::refresh_all_dap_panel_slots() {
         case SidebarPanelType::RuntimeSource:
             sync_runtime_source_slot(slot);
             break;
+        case SidebarPanelType::FileTree:
+            sync_file_tree_slot(slot);
+            break;
         default:
             break;
         }
@@ -2767,6 +2787,38 @@ void DebugApp::wire_runtime_source_panel(RuntimeSourcePanel& panel, SidebarSlot&
             }
         }
     });
+}
+
+void DebugApp::wire_file_tree_panel(FileTreePanel& panel) {
+    panel.set_on_open_file([this](const std::filesystem::path& path) {
+        pending_file_tree_open_ = path.string();
+    });
+}
+
+void DebugApp::process_pending_file_tree_open() {
+    if (!pending_file_tree_open_.has_value()) {
+        return;
+    }
+
+    const std::string path = *pending_file_tree_open_;
+    pending_file_tree_open_.reset();
+    open_source_file(path, 1, false);
+    model_.status_message = "Opened " + relative_display(workspace_root_, path);
+    sync_status_bar();
+    request_repaint();
+}
+
+void DebugApp::sync_file_tree_slot(SidebarSlot& slot) {
+    if (slot.file_tree == nullptr || slot.config.type != SidebarPanelType::FileTree) {
+        return;
+    }
+    workspace_root_ = workspace_root_for_program(program_path_);
+    workspace_files_ = list_source_files(workspace_root_);
+    slot.file_tree->set_workspace(workspace_root_, workspace_files_);
+}
+
+void DebugApp::sync_file_tree_slots() {
+    for_each_sidebar_slot([&](SidebarSlot& slot) { sync_file_tree_slot(slot); });
 }
 
 int DebugApp::highlight_line_count() const {
@@ -3459,6 +3511,7 @@ void DebugApp::reset_layout_slot_widgets() {
             slot.memory.reset();
             slot.disassembly.reset();
             slot.runtime_source.reset();
+            slot.file_tree.reset();
             if (slot.config.type == SidebarPanelType::Source || slot.config.type == SidebarPanelType::Repl ||
                 slot.config.type == SidebarPanelType::Console) {
                 slot.shared_host.reset();
@@ -5149,6 +5202,13 @@ void DebugApp::ensure_sidebar_slot_panels(SidebarSlot& slot, const tuinator::Scr
             wire_runtime_source_panel(*slot.runtime_source, slot);
         }
         break;
+    case SidebarPanelType::FileTree:
+        if (slot.file_tree == nullptr) {
+            slot.file_tree = std::make_unique<FileTreePanel>(dap_theme_, scroll_options);
+            wire_file_tree_panel(*slot.file_tree);
+            sync_file_tree_slot(slot);
+        }
+        break;
     case SidebarPanelType::Repl:
         if (repl_shell_ != nullptr && slot.shared_host == nullptr) {
             slot.shared_host = std::make_unique<SharedWidgetHost>(repl_shell_.get());
@@ -5200,6 +5260,11 @@ std::unique_ptr<tuinator::Widget> DebugApp::release_sidebar_slot_widget(SidebarS
             return slot.runtime_source->release_widget();
         }
         break;
+    case SidebarPanelType::FileTree:
+        if (slot.file_tree != nullptr) {
+            return slot.file_tree->release_widget();
+        }
+        break;
     case SidebarPanelType::Source:
     case SidebarPanelType::Repl:
     case SidebarPanelType::Console:
@@ -5236,6 +5301,8 @@ bool DebugApp::focus_matches_panel_type(Focus focus, SidebarPanelType type) {
         return focus == Focus::Disassembly;
     case SidebarPanelType::RuntimeSource:
         return focus == Focus::RuntimeSource;
+    case SidebarPanelType::FileTree:
+        return focus == Focus::FileTree;
     case SidebarPanelType::Source:
         return focus == Focus::Source;
     case SidebarPanelType::Repl:
@@ -5263,6 +5330,8 @@ Focus DebugApp::focus_for_panel_type(SidebarPanelType type) {
         return Focus::Disassembly;
     case SidebarPanelType::RuntimeSource:
         return Focus::RuntimeSource;
+    case SidebarPanelType::FileTree:
+        return Focus::FileTree;
     case SidebarPanelType::Source:
         return Focus::Source;
     case SidebarPanelType::Repl:
@@ -5625,6 +5694,10 @@ void DebugApp::show_add_panel_menu(tuinator::Point anchor, LayoutNodeId leaf_id)
         "Runtime Source",
         [this, leaf_id]() { add_panel_to_leaf(leaf_id, SidebarPanelType::RuntimeSource); },
     });
+    items.push_back(ContextMenu::Item{
+        "File Tree",
+        [this, leaf_id]() { add_panel_to_leaf(leaf_id, SidebarPanelType::FileTree); },
+    });
     if (const std::optional<std::pair<LayoutNodeId, int>> source_loc = find_source_panel_slot();
         !source_loc.has_value() || source_loc->first != leaf_id) {
         items.push_back(ContextMenu::Item{
@@ -5765,6 +5838,9 @@ void DebugApp::add_panel_to_leaf(LayoutNodeId leaf_id, SidebarPanelType type, st
         sync_runtime_source_slot(new_slot);
         maybe_request_dap_panel_data();
     }
+    if (new_slot.config.type == SidebarPanelType::FileTree) {
+        sync_file_tree_slot(new_slot);
+    }
 
     auto widget = release_sidebar_slot_widget(new_slot);
     widget->set_flex(1);
@@ -5872,7 +5948,7 @@ void DebugApp::rename_dock_panel(PanelDock dock, int index, const std::string& l
 bool DebugApp::is_sidebar_focus(Focus focus) {
     return focus == Focus::Scopes || focus == Focus::Stacks || focus == Focus::Breakpoints ||
            focus == Focus::Watches || focus == Focus::Memory || focus == Focus::Disassembly ||
-           focus == Focus::RuntimeSource;
+           focus == Focus::RuntimeSource || focus == Focus::FileTree;
 }
 
 Focus DebugApp::focus_for_sidebar_index(int index) {
@@ -6224,6 +6300,19 @@ bool DebugApp::handle_global_key(const tuinator::KeyPress& key) {
         model_.status_message = follow_execution_ ? "Follow execution on" : "Follow execution off";
         sync_status_bar();
         return true;
+    }
+
+    if (key.character == 'p' || key.character == 'P') {
+        if (file_picker_open()) {
+            close_file_picker();
+        } else {
+            open_file_picker();
+        }
+        return true;
+    }
+
+    if (file_picker_open()) {
+        return false;
     }
 
     if (is_breakpoint_input_focused() || is_scope_input_focused() || is_memory_input_focused()) {
@@ -6733,6 +6822,9 @@ void DebugApp::cycle_focus_next() {
         model_.focus = Focus::RuntimeSource;
         break;
     case Focus::RuntimeSource:
+        model_.focus = Focus::FileTree;
+        break;
+    case Focus::FileTree:
         model_.focus = Focus::Repl;
         repl_input_focused_ = true;
         break;
@@ -6807,6 +6899,9 @@ void DebugApp::apply_focus() {
         if (slot.runtime_source != nullptr && slot.runtime_source->list_widget() != nullptr) {
             widgets.push_back(slot.runtime_source->list_widget());
         }
+        if (slot.file_tree != nullptr && slot.file_tree->list_widget() != nullptr) {
+            widgets.push_back(slot.file_tree->list_widget());
+        }
     });
     if (stacks_panel_ != nullptr && stacks_panel_->list_widget() != nullptr) {
         widgets.push_back(stacks_panel_->list_widget());
@@ -6878,6 +6973,11 @@ void DebugApp::apply_focus() {
     case Focus::RuntimeSource:
         if (SidebarSlot* slot = active_slot_for_focus(); slot != nullptr && slot->runtime_source != nullptr) {
             target = slot->runtime_source->list_widget();
+        }
+        break;
+    case Focus::FileTree:
+        if (SidebarSlot* slot = active_slot_for_focus(); slot != nullptr && slot->file_tree != nullptr) {
+            target = slot->file_tree->list_widget();
         }
         break;
     case Focus::Repl:
@@ -6970,6 +7070,12 @@ void DebugApp::sync_focus_from_ui() {
             if (slot.runtime_source != nullptr && slot.runtime_source->list_widget() != nullptr &&
                 slot.runtime_source->list_widget()->is_focused()) {
                 detected = Focus::RuntimeSource;
+                panel_list_focused = true;
+                return;
+            }
+            if (slot.file_tree != nullptr && slot.file_tree->list_widget() != nullptr &&
+                slot.file_tree->list_widget()->is_focused()) {
+                detected = Focus::FileTree;
                 panel_list_focused = true;
             }
         });
@@ -7224,6 +7330,31 @@ void DebugApp::close_source_file_tab(int index) {
         next_active = std::min(index, static_cast<int>(source_file_tabs_.size()) - 1);
     }
     activate_source_file_tab(next_active, 0);
+}
+
+void DebugApp::open_file_picker() {
+    if (file_picker_ == nullptr) {
+        return;
+    }
+
+    workspace_root_ = workspace_root_for_program(program_path_);
+    workspace_files_ = list_source_files(workspace_root_);
+    sync_file_tree_slots();
+    file_picker_->open(source_context_clip_bounds(), workspace_files_, workspace_root_);
+    model_.status_message = "Open file — fuzzy search by path, Enter to open, Esc to cancel";
+    sync_status_bar();
+    request_repaint();
+}
+
+void DebugApp::close_file_picker() {
+    if (file_picker_ == nullptr || !file_picker_->is_open()) {
+        return;
+    }
+
+    file_picker_->close();
+    model_.status_message = "File picker closed";
+    sync_status_bar();
+    request_repaint();
 }
 
 void DebugApp::open_source_file(const std::string& path, int line, bool pin, std::int64_t source_reference) {
@@ -9273,13 +9404,30 @@ bool DebugApp::context_menu_open() const {
     return context_menu_ != nullptr && context_menu_->is_open();
 }
 
+bool DebugApp::file_picker_open() const {
+    return file_picker_ != nullptr && file_picker_->is_open();
+}
+
 bool DebugApp::breakpoint_prompt_active() const {
     return breakpoint_input_focused_ &&
            ((!editing_breakpoint_path_.empty() && editing_breakpoint_line_ > 0) || !editing_exception_filter_.empty());
 }
 
 bool DebugApp::overlay_intercepts_events() const {
-    return context_menu_open() || layout_drag_active();
+    return context_menu_open() || file_picker_open() || layout_drag_active();
+}
+
+void DebugApp::sync_overlay_mouse_tracking() {
+    const bool want = overlay_intercepts_events();
+    if (want == overlay_hover_tracking_active_) {
+        return;
+    }
+
+    overlay_hover_tracking_active_ = want;
+    set_xterm_mouse_hover_tracking(want);
+    if (app_ != nullptr) {
+        app_->set_pointer_hover_tracking(want);
+    }
 }
 
 void DebugApp::blur_breakpoint_input(bool cancelled) {
@@ -9305,6 +9453,17 @@ void DebugApp::blur_breakpoint_input(bool cancelled) {
 }
 
 bool DebugApp::handle_overlay_event(const tuinator::Event& event) {
+    sync_overlay_mouse_tracking();
+
+    if (file_picker_ != nullptr && file_picker_->is_open()) {
+        file_picker_->layout(overlay_clip_bounds());
+        const bool handled = file_picker_->handle_event(event);
+        if (handled) {
+            request_repaint();
+        }
+        return handled;
+    }
+
     if (context_menu_ != nullptr && context_menu_->is_open()) {
         context_menu_->layout(overlay_clip_bounds());
         const bool handled = context_menu_->handle_event(event);
@@ -9315,15 +9474,22 @@ bool DebugApp::handle_overlay_event(const tuinator::Event& event) {
         if (handled || pending_action) {
             request_repaint();
         }
-        return handled || static_cast<bool>(pending_action);
+        const bool consumed = handled || static_cast<bool>(pending_action);
+        sync_overlay_mouse_tracking();
+        return consumed;
     }
 
+    sync_overlay_mouse_tracking();
     return false;
 }
 
 void DebugApp::paint_overlay(tuinator::PaintContext& ctx) const {
     paint_layout_drag_overlay(ctx);
     paint_layout_menu_preview(ctx);
+    if (file_picker_ != nullptr && file_picker_->is_open()) {
+        file_picker_->layout(overlay_clip_bounds());
+        file_picker_->paint(ctx);
+    }
     if (context_menu_ != nullptr && context_menu_->is_open()) {
         context_menu_->layout(overlay_clip_bounds());
         context_menu_->paint(ctx);
