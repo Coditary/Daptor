@@ -1,4 +1,5 @@
 #include "tui_debug_ui/app.hpp"
+#include "tui_debug_ui/app_config.hpp"
 #include "tui_debug_ui/session_backend.hpp"
 #include "tui_debug_ui/tty_setup.hpp"
 
@@ -93,11 +94,11 @@ void print_usage(const char* argv0) {
     std::fprintf(stderr, "  --mock   Frontend-only mode (no Rust/DAP backend)\n");
     std::fprintf(stderr, "  --lldb   Force lldb-dap for native binaries\n");
     std::fprintf(stderr, "  --rr     Use rr record+replay (reverse debugging, Linux)\n");
-    std::fprintf(stderr, "  Python:  %s fixtures/step_in_demo.py\n", argv0);
-    std::fprintf(stderr, "  C/C++:   %s fixtures/reverse_demo\n", argv0);
-    std::fprintf(stderr, "  C++ ex:  %s fixtures/exception_demo 2  (build: fixtures/build-exception-demo.sh)\n", argv0);
+    std::fprintf(stderr, "  Python:  %s examples/python/step_in_demo.py\n", argv0);
+    std::fprintf(stderr, "  C/C++:   %s examples/native/reverse_demo\n", argv0);
+    std::fprintf(stderr, "  C++ ex:  %s examples/native/exception_demo 2  (build: examples/native/build.sh)\n", argv0);
     std::fprintf(stderr, "           (native ELF binaries auto-select lldb-dap)\n");
-    std::fprintf(stderr, "  Reverse: %s --rr fixtures/reverse_demo\n", argv0);
+    std::fprintf(stderr, "  Reverse: %s --rr examples/native/reverse_demo\n", argv0);
     std::fprintf(stderr, "tui-debug-ui 0.1.0\n");
 }
 
@@ -157,7 +158,7 @@ int main(int argc, char* argv[]) {
         !looks_like_elf_executable(launch_path)) {
         std::fprintf(stderr,
                      "Native debug adapters require a built executable, not a source file.\n"
-                     "Build first, e.g.: gcc -g -O0 -o fixtures/reverse_demo fixtures/reverse_demo.c\n");
+                     "Build first: examples/native/build.sh\n");
         return EXIT_FAILURE;
     }
 
@@ -184,10 +185,14 @@ int main(int argc, char* argv[]) {
     tui_debug_ui::install_sigint_quit_handler();
     tui_debug_ui::sync_terminal_size_from_tty();
 
+    const tui_debug_ui::AppConfig app_config = tui_debug_ui::load_app_config();
     if (mode == tui_debug_ui::SessionMode::Rust) {
+        if (app_config.paths.tree_sitter_dir.has_value()) {
+            tui_debug_set_tree_sitter_dir(app_config.paths.tree_sitter_dir->c_str());
+        }
         tui_debug_init();
     }
 
-    tui_debug_ui::DebugApp app(launch_path, mode, adapter, std::move(program_args));
+    tui_debug_ui::DebugApp app(launch_path, mode, adapter, std::move(program_args), app_config);
     return app.run();
 }

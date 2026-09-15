@@ -53,6 +53,13 @@ add_executable(tui-debug-ui
     src/ui/shared_widget_host.cpp
     src/ui/background_widget.cpp
     src/ui/dap_ui_theme.cpp
+    src/ui/syntax_theme.cpp
+    src/ui/xdg_paths.cpp
+    src/ui/app_config.cpp
+    src/ui/theme_loader.cpp
+    src/ui/yaml_config.cpp
+    src/ui/keybindings.cpp
+    src/ui/layout_config.cpp
     src/ui/clipboard.cpp
     src/ui/controls_bar.cpp
     src/ui/navigable_list_view.cpp

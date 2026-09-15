@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tui-debug.dev/schemas/theme.schema.json",
+  "title": "tui-debug theme",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "ui": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "background": { "$ref": "#/$defs/rgb" },
+        "text": { "$ref": "#/$defs/rgb" },
+        "muted": { "$ref": "#/$defs/rgb" },
+        "accent": { "$ref": "#/$defs/rgb" },
+        "divider": { "$ref": "#/$defs/rgb" },
+        "selected": { "$ref": "#/$defs/style" },
+        "colors": { "$ref": "#/$defs/ui_colors" }
+      }
+    },
+    "syntax": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "background": { "$ref": "#/$defs/rgb" },
+        "colors": { "$ref": "#/$defs/syntax_colors" }
+      }
+    }
+  },
+  "$defs": {
+    "rgb": {
+      "type": "array",
+      "prefixItems": [
+        { "type": "integer", "minimum": 0, "maximum": 255 },
+        { "type": "integer", "minimum": 0, "maximum": 255 },
+        { "type": "integer", "minimum": 0, "maximum": 255 }
+      ],
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "style": {
+      "oneOf": [
+        { "$ref": "#/$defs/rgb" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "fg": { "$ref": "#/$defs/rgb" },
+            "bg": { "$ref": "#/$defs/rgb" },
+            "bold": { "type": "boolean" },
+            "dim": { "type": "boolean" }
+          }
+        }
+      ]
+    },
+    "ui_colors": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "border_normal": { "$ref": "#/$defs/style" },
+        "border_focused": { "$ref": "#/$defs/style" },
+        "title_normal": { "$ref": "#/$defs/style" },
+        "title_focused": { "$ref": "#/$defs/style" },
+        "label": { "$ref": "#/$defs/style" },
+        "selection": { "$ref": "#/$defs/style" },
+        "scope_header": { "$ref": "#/$defs/style" },
+        "variable_name": { "$ref": "#/$defs/style" },
+        "variable_value": { "$ref": "#/$defs/style" },
+        "breakpoint_marker": { "$ref": "#/$defs/style" },
+        "console_stderr": { "$ref": "#/$defs/style" },
+        "console_stdout": { "$ref": "#/$defs/style" },
+        "status_bar": { "$ref": "#/$defs/style" },
+        "divider": { "$ref": "#/$defs/style" },
+        "control_play": { "$ref": "#/$defs/style" },
+        "control_step": { "$ref": "#/$defs/style" },
+        "control_stop": { "$ref": "#/$defs/style" },
+        "scrollbar_thumb": { "$ref": "#/$defs/style" },
+        "scrollbar_track": { "$ref": "#/$defs/style" }
+      }
+    },
+    "syntax_colors": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "keyword": { "$ref": "#/$defs/style" },
+        "string": { "$ref": "#/$defs/style" },
+        "comment": { "$ref": "#/$defs/style" },
+        "function": { "$ref": "#/$defs/style" },
+        "type": { "$ref": "#/$defs/style" },
+        "number": { "$ref": "#/$defs/style" },
+        "variable": { "$ref": "#/$defs/style" },
+        "default_text": { "$ref": "#/$defs/style" },
+        "line_number": { "$ref": "#/$defs/style" },
+        "execution_row": { "$ref": "#/$defs/style" },
+        "cursor_row": { "$ref": "#/$defs/style" }
+      }
+    }
+  }
+}

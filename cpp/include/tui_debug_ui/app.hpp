@@ -5,7 +5,9 @@
 #include "tui_debug_ui/function_breakpoint_info.hpp"
 #include "tui_debug_ui/context_menu.hpp"
 #include "tui_debug_ui/file_picker.hpp"
+#include "tui_debug_ui/app_config.hpp"
 #include "tui_debug_ui/dap_ui_theme.hpp"
+#include "tui_debug_ui/syntax_theme.hpp"
 #include "tui_debug_ui/debug_ui_model.hpp"
 #include "tui_debug_ui/highlight_bridge.hpp"
 #include "tui_debug_ui/source_panel.hpp"
@@ -76,7 +78,7 @@ class DebugApp {
   public:
     explicit DebugApp(const std::string& program_path, SessionMode mode = SessionMode::Rust,
                       DebugAdapter adapter = DebugAdapter::Debugpy,
-                      std::vector<std::string> program_args = {});
+                      std::vector<std::string> program_args = {}, AppConfig app_config = {});
     ~DebugApp();
 
     DebugApp(const DebugApp&) = delete;
@@ -506,7 +508,9 @@ class DebugApp {
     ProcessMetricsSampler process_metrics_sampler_;
     std::chrono::steady_clock::time_point last_process_metrics_tick_{};
     DebugUiModel model_;
+    AppConfig app_config_;
     DapUiTheme dap_theme_;
+    SyntaxTheme syntax_theme_;
     std::unique_ptr<tuinator::Application> app_;
 
     ControlsBar* controls_bar_ = nullptr;

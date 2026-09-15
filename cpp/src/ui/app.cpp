@@ -4,6 +4,8 @@
 #include "tui_debug_ui/console_panel.hpp"
 #include "tui_debug_ui/controls_bar.hpp"
 #include "tui_debug_ui/dap_ui_theme.hpp"
+#include "tui_debug_ui/layout_config.hpp"
+#include "tui_debug_ui/theme_loader.hpp"
 #include "tui_debug_ui/highlight_bridge.hpp"
 #include "tui_debug_ui/resizable_split_pane.hpp"
 #include "tui_debug_ui/panel_slot.hpp"
@@ -1116,14 +1118,26 @@ bool exception_filter_relevant_for_source(const tui_debug_ui::DebugUiModel::Exce
 namespace tui_debug_ui {
 
 DebugApp::DebugApp(const std::string& program_path, SessionMode mode, DebugAdapter adapter,
-                   std::vector<std::string> program_args)
+                   std::vector<std::string> program_args, AppConfig app_config)
     : mode_(mode),
       adapter_(adapter),
       program_path_(program_path),
       program_args_(std::move(program_args)),
       session_io_(std::make_unique<SessionIoThread>(mode, adapter)),
       workspace_root_(workspace_root_for_program(program_path_)),
+      app_config_(std::move(app_config)),
       app_(std::make_unique<tuinator::Application>()) {
+    const LoadedTheme loaded_theme = load_application_theme(app_config_);
+    dap_theme_ = loaded_theme.ui;
+    syntax_theme_ = loaded_theme.syntax;
+
+    if (app_config_.layout.sidebar_pct.has_value()) {
+        model_.layout.sidebar_pct = *app_config_.layout.sidebar_pct;
+    }
+    if (app_config_.layout.bottom_pct.has_value()) {
+        model_.layout.bottom_pct = *app_config_.layout.bottom_pct;
+    }
+
     tuinator::Theme theme = app_->theme();
     dap_theme_.apply_to(theme);
     app_->set_theme(theme);
@@ -1144,7 +1158,7 @@ DebugApp::~DebugApp() = default;
 
 int DebugApp::run() {
     sync_terminal_size_from_tty();
-    set_terminal_theme_background(DapUiTheme::kBackground);
+    set_terminal_theme_background(dap_theme_.background);
     terminal_ready_for_session_ = true;
     // Initialize ncurses and build the widget tree before the first event-loop frame.
     app_->present();
@@ -1205,7 +1219,7 @@ void DebugApp::build_ui() {
     stacks_panel_ = nullptr;
     breakpoints_panel_ = nullptr;
 
-    auto source_panel = std::make_unique<SourcePanel>();
+    auto source_panel = std::make_unique<SourcePanel>(syntax_theme_);
     source_panel_ = source_panel.get();
     context_menu_ = std::make_unique<ContextMenu>(dap_theme_.panel_background, dap_theme_.label, dap_theme_.selection,
                                                   dap_theme_.border_focused);
@@ -1531,7 +1545,7 @@ void DebugApp::handle_launch_complete() {
         } else if (model_.session_state == "exited" || model_.session_state == "Exited") {
             model_.status_message =
                 "Program exited before stopping — press Restart, or rebuild: "
-                "gcc -g -O0 -o fixtures/reverse_demo fixtures/reverse_demo.c";
+                "examples/native/build.sh";
         }
         sync_breakpoints_list_panel();
         sync_breakpoints_to_panel();
@@ -3496,6 +3510,22 @@ void DebugApp::ensure_layout_tree_initialized() {
     }
 }
 
+namespace {
+
+std::optional<LayoutDockSpec> dock_spec_for(const AppConfig& config, PanelDock dock) {
+    switch (dock) {
+    case PanelDock::Left:
+        return config.layout.left;
+    case PanelDock::Center:
+        return config.layout.center;
+    case PanelDock::Bottom:
+        return config.layout.bottom;
+    }
+    return std::nullopt;
+}
+
+}  // namespace
+
 void DebugApp::ensure_default_leaf_slots(LayoutNodeId leaf_id) {
     std::vector<SidebarSlot>& slots = leaf_slots(leaf_id);
     if (!slots.empty()) {
@@ -3508,6 +3538,12 @@ void DebugApp::ensure_default_leaf_slots(LayoutNodeId leaf_id) {
     if (layout_tree_.find_leaf_for_dock(*dock) != leaf_id) {
         return;
     }
+    if (const std::optional<LayoutDockSpec> dock_spec = dock_spec_for(app_config_, *dock);
+        dock_spec.has_value() && !dock_spec->panels.empty()) {
+        init_slots_from_layout_spec(slots, *dock_spec, next_slot_id_);
+        return;
+    }
+
     switch (*dock) {
     case PanelDock::Left:
         init_default_sidebar_slots(slots);
@@ -6465,9 +6501,11 @@ bool DebugApp::handle_panel_swap_key(const tuinator::KeyPress& key) {
     }
 
     int delta = 0;
-    if (key.character == '<' || key.character == '[') {
+    if (app_config_.keybindings.matches(key, app_config_.keybindings.panel_prev) ||
+        app_config_.keybindings.matches(key, app_config_.keybindings.panel_prev_alt)) {
         delta = -1;
-    } else if (key.character == '>' || key.character == ']') {
+    } else if (app_config_.keybindings.matches(key, app_config_.keybindings.panel_next) ||
+               app_config_.keybindings.matches(key, app_config_.keybindings.panel_next_alt)) {
         delta = 1;
     } else {
         return false;
@@ -6644,28 +6682,23 @@ bool DebugApp::handle_global_key(const tuinator::KeyPress& key) {
     }
 
     if (!key.ctrl && !key.alt) {
-        if (key.key == tuinator::Key::F9) {
+        if (app_config_.keybindings.matches(key, app_config_.keybindings.breakpoint_fn)) {
             if (source_panel_ != nullptr && !effective_source_path().empty() && source_panel_->cursor_line() > 0) {
                 toggle_breakpoint();
                 return true;
             }
         } else if (has_active_session()) {
             const char* op = nullptr;
-            switch (key.key) {
-            case tuinator::Key::F5:
+            if (app_config_.keybindings.matches(key, app_config_.keybindings.continue_fn)) {
                 op = "continue";
-                break;
-            case tuinator::Key::F10:
+            } else if (app_config_.keybindings.matches(key, app_config_.keybindings.step_over_fn)) {
                 op = "step_over";
-                break;
-            case tuinator::Key::F11:
-                op = key.shift ? "step_out" : "step_into";
-                break;
-            case tuinator::Key::F12:
+            } else if (app_config_.keybindings.matches(key, app_config_.keybindings.step_out_shift_fn)) {
                 op = "step_out";
-                break;
-            default:
-                break;
+            } else if (app_config_.keybindings.matches(key, app_config_.keybindings.step_into_fn)) {
+                op = "step_into";
+            } else if (app_config_.keybindings.matches(key, app_config_.keybindings.step_out_fn)) {
+                op = "step_out";
             }
             if (op != nullptr) {
                 send_command(op);
@@ -6789,7 +6822,7 @@ bool DebugApp::handle_global_key(const tuinator::KeyPress& key) {
         return true;
     }
 
-    if (key.character == 'r' || key.character == 'R') {
+    if (app_config_.keybindings.matches(key, app_config_.keybindings.focus_repl)) {
         model_.focus = Focus::Repl;
         const int repl_index = dock_index_for_focus(PanelDock::Bottom, Focus::Repl);
         if (repl_index >= 0) {
@@ -6808,7 +6841,7 @@ bool DebugApp::handle_global_key(const tuinator::KeyPress& key) {
         return true;
     }
 
-    if (key.character == 'f') {
+    if (app_config_.keybindings.matches(key, app_config_.keybindings.follow_execution)) {
         follow_execution_ = !follow_execution_;
         if (follow_execution_) {
             maybe_follow_execution();
@@ -6818,7 +6851,7 @@ bool DebugApp::handle_global_key(const tuinator::KeyPress& key) {
         return true;
     }
 
-    if (key.character == 'p' || key.character == 'P') {
+    if (app_config_.keybindings.matches(key, app_config_.keybindings.file_picker)) {
         if (file_picker_open()) {
             close_file_picker();
         } else {
@@ -6874,8 +6907,8 @@ bool DebugApp::handle_global_key(const tuinator::KeyPress& key) {
         }
     }
 
-    if ((key.character == 'b' || key.character == ' ') && !key.ctrl && !key.alt && source_panel_ != nullptr &&
-        model_.focus == Focus::Source) {
+    if (!key.ctrl && !key.alt && source_panel_ != nullptr && model_.focus == Focus::Source &&
+        (app_config_.keybindings.matches(key, app_config_.keybindings.breakpoint) || app_config_.keybindings.matches(key, app_config_.keybindings.breakpoint_alt))) {
         if (!source_panel_->is_focused()) {
             apply_focus();
         }
@@ -6939,19 +6972,19 @@ bool DebugApp::handle_global_key(const tuinator::KeyPress& key) {
         return false;
     }
 
-    if (key.character == 'c') {
+    if (app_config_.keybindings.matches(key, app_config_.keybindings.continue_key)) {
         send_command("continue");
         return true;
     }
-    if (key.character == 'n') {
+    if (app_config_.keybindings.matches(key, app_config_.keybindings.step_over)) {
         send_command("step_over");
         return true;
     }
-    if (key.character == 'i') {
+    if (app_config_.keybindings.matches(key, app_config_.keybindings.step_into)) {
         send_command("step_into");
         return true;
     }
-    if (key.character == 'u') {
+    if (app_config_.keybindings.matches(key, app_config_.keybindings.step_out)) {
         send_command("step_out");
         return true;
     }

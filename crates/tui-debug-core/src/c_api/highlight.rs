@@ -1,10 +1,11 @@
-use std::os::raw::c_char;
+use std::os::raw::{c_char, c_int};
+use std::path::PathBuf;
 
 use serde::Serialize;
 
 use crate::highlight::{
     HighlightKind, HighlightedLine, function_definition_line, function_name_at_line, highlight_viewport,
-    identifier_at_position, init, language_from_path, language_is_loaded, try_load_language,
+    identifier_at_position, init, language_from_path, language_is_loaded, set_tree_sitter_dir, try_load_language,
 };
 
 use super::{clear_last_error, c_str_to_rust, set_last_error, write_json_to_buffer};
@@ -38,6 +39,24 @@ fn lines_to_json(lines: &[HighlightedLine]) -> Result<String, String> {
         .collect();
 
     serde_json::to_string(&payload).map_err(|err| format!("serialize highlight JSON: {err}"))
+}
+
+/// Override the tree-sitter grammar directory for this process.
+///
+/// Must be called before [`tui_debug_init`]. Returns `0` on success, `-1` on error.
+#[no_mangle]
+pub extern "C" fn tui_debug_set_tree_sitter_dir(path: *const c_char) -> c_int {
+    match c_str_to_rust(path, "tree_sitter_dir") {
+        Ok(dir) => {
+            set_tree_sitter_dir(PathBuf::from(dir));
+            clear_last_error();
+            0
+        }
+        Err(err) => {
+            set_last_error(err);
+            -1
+        }
+    }
 }
 
 /// Initialize tree-sitter grammars (built-in Python + optional external `.so` files).

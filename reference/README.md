@@ -6,18 +6,18 @@ This directory contains upstream projects used as UI/UX reference during develop
 
 Cloned from https://github.com/rcarriga/nvim-dap-ui
 
-Key files to compare when implementing Rust panels:
+Key files to compare when implementing panels:
 
-| nvim-dap-ui element | Lua source | Rust panel |
+| nvim-dap-ui element | Lua source | C++ panel |
 |---|---|---|
-| Layout (sidebar + tray) | `lua/dapui/config/init.lua` | `src/ui/layout.rs` |
-| Scopes | `lua/dapui/elements/scopes.lua` | `src/ui/panels/scopes.rs` |
-| Stacks | `lua/dapui/elements/stacks.lua` | `src/ui/panels/stacks.rs` |
-| Breakpoints | `lua/dapui/elements/breakpoints.lua` | `src/ui/panels/breakpoints.rs` |
-| Watches | `lua/dapui/elements/watches.lua` | `src/ui/panels/watches.rs` |
-| REPL | `lua/dapui/elements/repl.lua` | `src/ui/panels/repl.rs` |
-| Console | `lua/dapui/elements/console.lua` | `src/ui/panels/console.rs` |
-| Source (standalone) | — | `src/ui/panels/source.rs` |
+| Layout (sidebar + tray) | `lua/dapui/config/init.lua` | `cpp/src/ui/app.cpp` |
+| Scopes | `lua/dapui/elements/scopes.lua` | `cpp/src/ui/scopes_panel.cpp` |
+| Stacks | `lua/dapui/elements/stacks.lua` | `cpp/src/ui/stacks_panel.cpp` |
+| Breakpoints | `lua/dapui/elements/breakpoints.lua` | `cpp/src/ui/breakpoints_panel.cpp` |
+| Watches | `lua/dapui/elements/watches.lua` | `cpp/src/ui/watches_panel.cpp` |
+| REPL | `lua/dapui/elements/repl.lua` | `cpp/src/ui/repl_panel.cpp` |
+| Console | `lua/dapui/elements/console.lua` | `cpp/src/ui/console_panel.cpp` |
+| Source (standalone) | — | `cpp/src/ui/source_panel.cpp` |
 
 Default layout from nvim-dap-ui config:
 

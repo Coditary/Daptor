@@ -2339,7 +2339,7 @@ mod lifecycle_tests {
     #[test]
     fn step_into_python_stdlib_source() {
         let program = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../fixtures/stdlib_step.py")
+            .join("../../examples/python/stdlib_step.py")
             .canonicalize()
             .expect("stdlib_step.py fixture");
 
@@ -2387,7 +2387,7 @@ mod lifecycle_tests {
     #[test]
     fn restart_while_running() {
         let program = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../fixtures/hello.py")
+            .join("../../examples/python/hello.py")
             .canonicalize()
             .expect("hello.py fixture");
 
@@ -2407,7 +2407,7 @@ mod lifecycle_tests {
     #[test]
     fn restart_while_stopped_after_step() {
         let program = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../fixtures/hello.py")
+            .join("../../examples/python/hello.py")
             .canonicalize()
             .expect("hello.py fixture");
 
@@ -2439,7 +2439,7 @@ mod lifecycle_tests {
     #[test]
     fn evaluate_watch_then_continue_with_breakpoint() {
         let program = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../fixtures/hello.py")
+            .join("../../examples/python/hello.py")
             .canonicalize()
             .expect("hello.py fixture");
 
@@ -2486,7 +2486,7 @@ mod lifecycle_tests {
     #[test]
     fn disconnect_restart_and_terminate_are_safe() {
         let program = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../fixtures/hello.py")
+            .join("../../examples/python/hello.py")
             .canonicalize()
             .expect("hello.py fixture");
 
@@ -2545,7 +2545,7 @@ mod lldb_launch_tests {
     #[test]
     fn launch_native_reverse_demo_stops_in_main() {
         let program = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../fixtures/reverse_demo")
+            .join("../../examples/native/reverse_demo")
             .canonicalize()
             .expect("reverse_demo fixture");
 
@@ -2568,7 +2568,7 @@ mod lldb_launch_tests {
     #[test]
     fn launch_native_step_over_reverse_demo() {
         let program = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../fixtures/reverse_demo")
+            .join("../../examples/native/reverse_demo")
             .canonicalize()
             .expect("reverse_demo fixture");
 
@@ -2600,7 +2600,7 @@ mod lldb_launch_tests {
     #[test]
     fn launch_native_interactive_demo_accepts_fifo_stdin() {
         let program = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../fixtures/interactive_demo")
+            .join("../../examples/native/interactive_demo")
             .canonicalize()
             .expect("interactive_demo fixture");
 

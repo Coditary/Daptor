@@ -1,0 +1,106 @@
+# YAML schema for ~/.config/tui-debug/config.yaml
+
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://tui-debug.dev/schemas/config.schema.yaml
+title: tui-debug configuration
+type: object
+additionalProperties: false
+properties:
+  theme:
+    type: object
+    additionalProperties: false
+    properties:
+      file:
+        type: string
+        default: theme.json
+  paths:
+    type: object
+    additionalProperties: false
+    properties:
+      tree_sitter_dir:
+        type: string
+        description: Directory containing per-language tree-sitter grammars and queries.
+  layout:
+    type: object
+    additionalProperties: false
+    properties:
+      sidebar_pct:
+        type: integer
+        minimum: 1
+        maximum: 99
+      bottom_pct:
+        type: integer
+        minimum: 1
+        maximum: 99
+      docks:
+        type: object
+        additionalProperties: false
+        properties:
+          left:
+            $ref: "#/$defs/panel_list"
+          center:
+            $ref: "#/$defs/panel_list"
+          bottom:
+            $ref: "#/$defs/panel_list"
+  keybindings:
+    type: object
+    additionalProperties: false
+    properties:
+      continue: { type: string }
+      step_over: { type: string }
+      step_into: { type: string }
+      step_out: { type: string }
+      breakpoint: { type: string }
+      focus_repl: { type: string }
+      follow_execution: { type: string }
+      file_picker: { type: string }
+      panel_prev: { type: string }
+      panel_next: { type: string }
+      quit: { type: string }
+      continue_fn: { type: string }
+      step_over_fn: { type: string }
+      step_into_fn: { type: string }
+      step_out_fn: { type: string }
+      breakpoint_fn: { type: string }
+$defs:
+  panel_list:
+    type: array
+    items:
+      oneOf:
+        - type: string
+        - type: object
+          additionalProperties: false
+          required: [panel]
+          properties:
+            panel:
+              type: string
+              enum:
+                - variables
+                - scopes
+                - watches
+                - threads
+                - stacks
+                - breakpoints
+                - source
+                - memory
+                - disassembly
+                - file_tree
+                - resources
+                - network
+                - repl
+                - console
+            scope:
+              type: string
+              description: Filter a variables panel to a single DAP scope name.
+            breakpoint:
+              type: string
+              enum: [source, function, data, exception]
+            thread_filter:
+              type: string
+              enum: [stopped, running]
+            thread_id:
+              type: integer
+            thread_name:
+              type: string
+            label:
+              type: string

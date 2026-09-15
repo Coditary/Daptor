@@ -1,0 +1,51 @@
+# Copy to ~/.config/tui-debug/config.yaml
+#
+# Environment overrides:
+#   TUI_DEBUG_CONFIG=/path/to/config.yaml
+#   TUI_DEBUG_THEME=/path/to/theme.json
+#   DAP_TREE_SITTER_DIR=/path/to/tree-sitter   # still supported
+
+theme:
+  file: theme.json
+
+paths:
+  tree_sitter_dir: ~/.local/share/dap/tree-sitter
+
+layout:
+  sidebar_pct: 25
+  bottom_pct: 35
+  docks:
+    left:
+      - panel: variables
+      - panel: variables
+        scope: Locals
+      - panel: variables
+        scope: Globals
+      - panel: threads
+      - panel: breakpoints
+      - panel: watches
+      - panel: resources
+    center:
+      - panel: source
+    bottom:
+      - panel: repl
+      - panel: console
+      - panel: network
+
+keybindings:
+  continue: c
+  step_over: n
+  step_into: i
+  step_out: u
+  breakpoint: b
+  focus_repl: r
+  follow_execution: f
+  file_picker: p
+  panel_prev: "["
+  panel_next: "]"
+  quit: q
+  continue_fn: f5
+  step_over_fn: f10
+  step_into_fn: f11
+  step_out_fn: f12
+  breakpoint_fn: f9

@@ -11,6 +11,7 @@ parse_deps = false
 
 [export]
 include = [
+    "tui_debug_set_tree_sitter_dir",
     "tui_debug_init",
     "tui_debug_language_from_path",
     "tui_debug_language_is_loaded",

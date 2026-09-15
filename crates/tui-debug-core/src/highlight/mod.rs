@@ -15,6 +15,6 @@ pub use language_id::{file_extension, highlight_language_candidates, language_fr
 pub use spans::{HighlightKind, HighlightedLine, StyledSpan};
 pub use tree_sitter::{
     default_tree_sitter_dir, language_is_loaded, language_setup_hint, normalize_language, parse_snippet,
-    register_language_static, try_load_language,
+    register_language_static, set_tree_sitter_dir, try_load_language,
 };
 pub use viewport::highlight_viewport;

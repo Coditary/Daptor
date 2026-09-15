@@ -18,7 +18,7 @@ struct Cli {
 enum Command {
     /// Launch the interactive TUI debugger.
     Run {
-        #[arg(long, default_value = "fixtures/hello.py")]
+        #[arg(long, default_value = "examples/python/hello.py")]
         program: PathBuf,
         /// Frontend-only mock session (no Rust/DAP backend).
         #[arg(long)]
@@ -26,7 +26,7 @@ enum Command {
     },
     /// Smoke-test the DAP server layer against debugpy + a Python program.
     Test {
-        #[arg(long, default_value = "fixtures/hello.py")]
+        #[arg(long, default_value = "examples/python/hello.py")]
         program: PathBuf,
     },
 }

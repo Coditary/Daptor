@@ -50,29 +50,34 @@ inline HighlightKind highlight_kind_from_string(std::string_view kind) {
 
 /// Maps semantic highlight kinds and gutter chrome to tuinator styles.
 struct SyntaxTheme {
-    static constexpr tuinator::Rgb kBackground{30, 30, 36};
+    static constexpr tuinator::Rgb kDefaultBackground{30, 30, 36};
 
-    tuinator::Style keyword{tuinator::style_fg_bg(tuinator::Rgb{200, 140, 220}, kBackground)};
-    tuinator::Style string{tuinator::style_fg_bg(tuinator::Rgb{180, 220, 140}, kBackground)};
-    tuinator::Style comment{tuinator::style_fg_bg(tuinator::Rgb{100, 140, 100}, kBackground)};
-    tuinator::Style function{tuinator::style_fg_bg(tuinator::Rgb{120, 180, 255}, kBackground)};
-    tuinator::Style type{tuinator::style_fg_bg(tuinator::Rgb{140, 180, 220}, kBackground)};
-    tuinator::Style number{tuinator::style_fg_bg(tuinator::Rgb{140, 200, 220}, kBackground)};
-    tuinator::Style operator_{tuinator::style_fg_bg(tuinator::Rgb{180, 180, 190}, kBackground)};
-    tuinator::Style variable{tuinator::style_fg_bg(tuinator::Rgb{180, 200, 255}, kBackground)};
-    tuinator::Style default_text{tuinator::style_fg_bg(tuinator::Rgb{220, 220, 225}, kBackground)};
+    tuinator::Rgb background{kDefaultBackground};
 
-    tuinator::Style line_number{tuinator::style_fg_bg(tuinator::Rgb{100, 100, 110}, kBackground)};
-    tuinator::Style breakpoint_marker{tuinator::style_fg_bg(tuinator::Rgb{220, 60, 60}, kBackground)};
-    tuinator::Style breakpoint_conditional_marker{tuinator::style_fg_bg(tuinator::Rgb{255, 200, 80}, kBackground)};
-    tuinator::Style execution_row{tuinator::style_fg_bg(tuinator::Rgb{255, 255, 255}, tuinator::Rgb{28, 80, 48})};
-    tuinator::Style execution_marker{tuinator::style_fg_bg(tuinator::Rgb{120, 200, 140}, kBackground)};
-    tuinator::Style cursor_row{tuinator::style_fg_bg(tuinator::Rgb{255, 255, 255}, tuinator::Rgb{45, 45, 55})};
-    tuinator::Style step_in_candidate{
-        tuinator::style_fg_bg(tuinator::Rgb{30, 25, 0}, tuinator::Rgb{200, 160, 40})};
-    tuinator::Style step_in_active{
-        tuinator::style_fg_bg(tuinator::Rgb{0, 0, 0}, tuinator::Rgb{255, 235, 80})};
-    tuinator::Style panel_background{tuinator::style_bg(tuinator::Rgb{30, 30, 36})};
+    tuinator::Style keyword;
+    tuinator::Style string;
+    tuinator::Style comment;
+    tuinator::Style function;
+    tuinator::Style type;
+    tuinator::Style number;
+    tuinator::Style operator_;
+    tuinator::Style variable;
+    tuinator::Style default_text;
+
+    tuinator::Style line_number;
+    tuinator::Style breakpoint_marker;
+    tuinator::Style breakpoint_conditional_marker;
+    tuinator::Style execution_row;
+    tuinator::Style execution_marker;
+    tuinator::Style cursor_row;
+    tuinator::Style step_in_candidate;
+    tuinator::Style step_in_active;
+    tuinator::Style panel_background;
+
+    SyntaxTheme();
+
+    void apply_defaults();
+    void finalize_styles();
 
     tuinator::Style style_for(HighlightKind kind) const {
         switch (kind) {
@@ -121,4 +126,4 @@ struct SyntaxTheme {
     }
 };
 
-} // namespace tui_debug_ui
+}  // namespace tui_debug_ui

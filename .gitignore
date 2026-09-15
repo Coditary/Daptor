@@ -4,3 +4,13 @@
 /include/tui_debug.h
 .tmp
 .cargo-target
+
+# Example build outputs
+/examples/native/reverse_demo
+/examples/native/interactive_demo
+/examples/native/exception_demo
+/examples/native/dap_panels_demo
+
+# Python
+__pycache__/
+*.py[cod]

@@ -376,7 +376,7 @@ mod tests {
         }
 
         let program = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../fixtures/reverse_demo")
+            .join("../../examples/native/reverse_demo")
             .canonicalize()
             .expect("reverse_demo fixture");
 
@@ -402,7 +402,7 @@ mod tests {
         }
 
         let program = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../fixtures/reverse_demo")
+            .join("../../examples/native/reverse_demo")
             .canonicalize()
             .expect("reverse_demo fixture");
 
@@ -426,7 +426,7 @@ mod tests {
         }
 
         let program = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../fixtures/reverse_demo")
+            .join("../../examples/native/reverse_demo")
             .canonicalize()
             .expect("reverse_demo fixture");
 

@@ -57,9 +57,9 @@ class ResourcesContentWidget : public tuinator::Widget {
   public:
     explicit ResourcesContentWidget(const DapUiTheme& theme) : theme_(theme) {
         bar_track_ = theme.row_action_muted;
-        mem_fill_ = tuinator::style_fg_bg(tuinator::Rgb{120, 190, 255}, DapUiTheme::kBackground);
-        cpu_fill_ = tuinator::style_fg_bg(tuinator::Rgb{120, 220, 140}, DapUiTheme::kBackground);
-        debug_fill_ = tuinator::style_fg_bg(tuinator::Rgb{220, 170, 110}, DapUiTheme::kBackground);
+        mem_fill_ = tuinator::style_fg_bg(tuinator::Rgb{120, 190, 255}, theme.background);
+        cpu_fill_ = tuinator::style_fg_bg(tuinator::Rgb{120, 220, 140}, theme.background);
+        debug_fill_ = tuinator::style_fg_bg(tuinator::Rgb{220, 170, 110}, theme.background);
     }
 
     void set_state(std::vector<std::uint32_t> pids, ProcessMetricsSample sample,

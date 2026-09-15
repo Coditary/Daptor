@@ -5,6 +5,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
+static TREE_SITTER_DIR_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
+
 use anyhow::{Context, Result};
 use libloading::{Library, Symbol};
 use tree_sitter::{Language, Parser, Tree};
@@ -63,8 +65,18 @@ pub const HIGHLIGHT_NAMES: &[&str] = &[
     "variable.parameter",
 ];
 
+/// Override the tree-sitter grammar directory for this process.
+///
+/// Must be called before [`crate::highlight::init`]. Later calls are ignored.
+pub fn set_tree_sitter_dir(path: PathBuf) {
+    let _ = TREE_SITTER_DIR_OVERRIDE.set(path);
+}
+
 /// Default directory for tree-sitter grammar shared libraries and queries.
 pub fn default_tree_sitter_dir() -> PathBuf {
+    if let Some(path) = TREE_SITTER_DIR_OVERRIDE.get() {
+        return path.clone();
+    }
     std::env::var("DAP_TREE_SITTER_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {

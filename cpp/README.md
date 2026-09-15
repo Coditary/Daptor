@@ -1,6 +1,8 @@
-# tui-debug-ui (C++ / Tuinator)
+# Daptor UI (C++ / Tuinator)
 
-Terminal UI binary that links **Tuinator** (C++) and **tui-debug-core** (Rust static library).
+Terminal UI for **Daptor**. Links [Tuinator](https://github.com/Coditary/Tuinator) (C++) with `tui-debug-core` (Rust static library).
+
+The build artifact is currently named `tui-debug-ui`; it will be renamed to `daptor` in a future release.
 
 ## Prerequisites
 
@@ -27,28 +29,43 @@ The executable is `cpp/build/tui-debug-ui`.
 
 ```bash
 # Full stack (Rust DAP + Tuinator UI)
-./cpp/build/tui-debug-ui fixtures/hello.py
+./cpp/build/tui-debug-ui examples/python/hello.py
 
-# Frontend-only: mock session, no debugpy/Rust at runtime
-./cpp/build/tui-debug-ui --mock fixtures/hello.py
+# Native binary (lldb-dap, auto-detected)
+./examples/native/build.sh
+./cpp/build/tui-debug-ui examples/native/reverse_demo
 
-# Or via the Rust CLI wrapper
-cargo run -p tui-debug-cli -- run --mock --program fixtures/hello.py
+# Reverse debugging (Linux + rr)
+./cpp/build/tui-debug-ui --rr examples/native/reverse_demo
+
+# Frontend-only mock session
+./cpp/build/tui-debug-ui --mock examples/python/hello.py
+
+# Via the Rust CLI wrapper
+cargo run -p tui-debug-cli -- run --program examples/python/hello.py
 ```
+
+### Theme / config
+
+Config directory: `~/.config/tui-debug/` (or `$XDG_CONFIG_HOME/tui-debug/`).
+
+See the root [README.md](../README.md) for full `config.yaml` and `theme.json` documentation.
+
+Overrides: `TUI_DEBUG_CONFIG`, `TUI_DEBUG_THEME`.
 
 ### Layout / resize
 
 - **Mouse:** drag the cyan dividers between main areas; click pane names in the header to switch views, or `◄` / `►` when not all names fit.
 - **Keyboard:** `Alt` + arrow keys resize sidebar width and bottom tray height.
-- **Panel swap:** with sidebar or bottom tray focused, press `[` / `]` (or `<` / `>`) to cycle views. When all names fit, they are shown inline (active name highlighted). Otherwise arrows and `(n/total)` are reserved first; as many names as fit are shown between `◄` and `►`. Only when fewer than two names fit does the header collapse to `◄ Name ►`.
+- **Panel swap:** with sidebar or bottom tray focused, press `[` / `]` (or `<` / `>`) to cycle views.
 
-## Layout
+## Build layout
 
 | Path | Role |
 |------|------|
 | `cmake/Tuinator.cmake` | `FetchContent` for Tuinator; links `tuinator::tuinator` |
-| `cmake/Corrosion.cmake` | `FetchContent` for [Corrosion](https://github.com/corrosion-rs/corrosion); imports crate `tui-debug-core` as CMake target `tui_debug_core` |
-| `../include/tui_debug.h` | C API header (from `cbindgen` in the Rust crate) |
+| `cmake/Corrosion.cmake` | Imports crate `tui-debug-core` as CMake target `tui_debug_core` |
+| `../include/tui_debug.h` | C API header (cbindgen) |
 | `../crates/tui-debug-core` | DAP engine / staticlib source |
 
 ## Clean rebuild
