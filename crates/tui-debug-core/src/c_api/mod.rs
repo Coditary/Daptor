@@ -10,6 +10,7 @@ use std::sync::{LazyLock, Mutex};
 use serde_json::Value;
 
 use session::CSession;
+use crate::launch::{ResolveRequest, resolve_launch, resolved_launch_from_json, resolved_launch_to_json};
 use crate::session::{DataBreakpoint, ExceptionBreakpointSetting, FunctionBreakpoint, SourceBreakpoint};
 
 static LAST_ERROR: LazyLock<Mutex<CString>> =
@@ -210,6 +211,114 @@ pub extern "C" fn tui_debug_session_launch_rr(program: *const c_char, args_json:
     };
 
     match CSession::launch_rr(program_str, &args) {
+        Ok(session) => Box::into_raw(Box::new(session)) as *mut c_void,
+        Err(err) => {
+            set_last_error(format!("{err:#}"));
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Resolve a launch profile into JSON written to `json_out`.
+///
+/// `config_path` may be null to use built-in defaults only.
+/// `request_json` describes the CLI target and optional overrides.
+///
+/// Returns `0` on success and `-1` on error.
+#[no_mangle]
+pub extern "C" fn tui_debug_resolve_launch(
+    config_path: *const c_char,
+    request_json: *const c_char,
+    json_out: *mut c_char,
+    cap: usize,
+) -> c_int {
+    clear_last_error();
+
+    if request_json.is_null() {
+        set_last_error("request_json must not be null");
+        return -1;
+    }
+
+    let request_text = match c_str_to_rust(request_json, "request_json") {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err);
+            return -1;
+        }
+    };
+
+    let request: ResolveRequest = match serde_json::from_str(request_text) {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(format!("invalid request_json: {err}"));
+            return -1;
+        }
+    };
+
+    let config_path = if config_path.is_null() {
+        None
+    } else {
+        match c_str_to_rust(config_path, "config_path") {
+            Ok(value) => Some(std::path::Path::new(value)),
+            Err(err) => {
+                set_last_error(err);
+                return -1;
+            }
+        }
+    };
+
+    let resolved = match resolve_launch(config_path, &request) {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(format!("{err:#}"));
+            return -1;
+        }
+    };
+
+    let json = match resolved_launch_to_json(&resolved) {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err.to_string());
+            return -1;
+        }
+    };
+
+    match write_json_to_buffer(&json, json_out, cap) {
+        Ok(()) => 0,
+        Err(err) => {
+            set_last_error(err);
+            -1
+        }
+    }
+}
+
+/// Launch a debug session from a resolved launch profile JSON blob.
+#[no_mangle]
+pub extern "C" fn tui_debug_session_launch_resolved(resolved_json: *const c_char) -> *mut c_void {
+    clear_last_error();
+
+    if resolved_json.is_null() {
+        set_last_error("resolved_json must not be null");
+        return ptr::null_mut();
+    }
+
+    let resolved_text = match unsafe { CStr::from_ptr(resolved_json) }.to_str() {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(format!("invalid UTF-8 in resolved_json: {err}"));
+            return ptr::null_mut();
+        }
+    };
+
+    let resolved = match resolved_launch_from_json(resolved_text) {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err.to_string());
+            return ptr::null_mut();
+        }
+    };
+
+    match CSession::launch_resolved(resolved) {
         Ok(session) => Box::into_raw(Box::new(session)) as *mut c_void,
         Err(err) => {
             set_last_error(format!("{err:#}"));

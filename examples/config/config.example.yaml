@@ -5,6 +5,8 @@
 #   TUI_DEBUG_THEME=/path/to/theme.json
 #   DAP_TREE_SITTER_DIR=/path/to/tree-sitter   # still supported
 
+definitions: definitions.yaml
+
 theme:
   file: theme.json
 

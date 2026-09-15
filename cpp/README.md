@@ -36,7 +36,7 @@ The executable is `cpp/build/tui-debug-ui`.
 ./cpp/build/tui-debug-ui examples/native/reverse_demo
 
 # Reverse debugging (Linux + rr)
-./cpp/build/tui-debug-ui --rr examples/native/reverse_demo
+./cpp/build/tui-debug-ui --profile rr examples/native/reverse_demo
 
 # Frontend-only mock session
 ./cpp/build/tui-debug-ui --mock examples/python/hello.py

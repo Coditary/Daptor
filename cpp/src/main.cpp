@@ -1,6 +1,6 @@
 #include "tui_debug_ui/app.hpp"
 #include "tui_debug_ui/app_config.hpp"
-#include "tui_debug_ui/session_backend.hpp"
+#include "tui_debug_ui/launch_plan.hpp"
 #include "tui_debug_ui/tty_setup.hpp"
 
 extern "C" {
@@ -10,95 +10,24 @@ extern "C" {
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <fstream>
+#include <filesystem>
+#include <optional>
 #include <string>
-#include <vector>
 #include <unistd.h>
+#include <vector>
 
 namespace {
 
-bool looks_like_elf_executable(const std::string& path) {
-    if (path.empty()) {
-        return false;
-    }
-    std::ifstream input(path, std::ios::binary);
-    if (!input.is_open()) {
-        return false;
-    }
-    char magic[4] = {};
-    input.read(magic, 4);
-    return input.gcount() == 4 && magic[0] == '\x7f' && magic[1] == 'E' && magic[2] == 'L' && magic[3] == 'F';
-}
-
-bool executable_exists(const std::string& path) {
-    if (path.empty()) {
-        return false;
-    }
-    return access(path.c_str(), X_OK) == 0 || looks_like_elf_executable(path);
-}
-
-std::string strip_source_extension(const std::string& path) {
-    for (const char* extension : {".c", ".cpp", ".cc", ".cxx", ".rs"}) {
-        const std::size_t ext_len = std::strlen(extension);
-        if (path.size() > ext_len && path.compare(path.size() - ext_len, ext_len, extension) == 0) {
-            return path.substr(0, path.size() - ext_len);
-        }
-    }
-    return path;
-}
-
-bool command_on_path(const char* name) {
-    if (name == nullptr || name[0] == '\0') {
-        return false;
-    }
-    const char* path_env = std::getenv("PATH");
-    if (path_env == nullptr) {
-        return false;
-    }
-    std::string prefix;
-    for (const char* cursor = path_env;; ++cursor) {
-        if (*cursor == ':' || *cursor == '\0') {
-            if (!prefix.empty()) {
-                const std::string candidate = prefix + "/" + name;
-                if (access(candidate.c_str(), X_OK) == 0) {
-                    return true;
-                }
-            } else if (access(name, X_OK) == 0) {
-                return true;
-            }
-            prefix.clear();
-            if (*cursor == '\0') {
-                break;
-            }
-            continue;
-        }
-        prefix.push_back(*cursor);
-    }
-    return false;
-}
-
-std::string resolve_native_launch_path(const std::string& program_path) {
-    if (looks_like_elf_executable(program_path)) {
-        return program_path;
-    }
-
-    const std::string candidate = strip_source_extension(program_path);
-    if (candidate != program_path && executable_exists(candidate)) {
-        return candidate;
-    }
-    return program_path;
-}
-
 void print_usage(const char* argv0) {
-    std::fprintf(stderr, "Usage: %s [--mock] [--lldb] [--rr] <program> [program-args...]\n", argv0);
-    std::fprintf(stderr, "  --mock   Frontend-only mode (no Rust/DAP backend)\n");
-    std::fprintf(stderr, "  --lldb   Force lldb-dap for native binaries\n");
-    std::fprintf(stderr, "  --rr     Use rr record+replay (reverse debugging, Linux)\n");
-    std::fprintf(stderr, "  Python:  %s examples/python/step_in_demo.py\n", argv0);
-    std::fprintf(stderr, "  C/C++:   %s examples/native/reverse_demo\n", argv0);
-    std::fprintf(stderr, "  C++ ex:  %s examples/native/exception_demo 2  (build: examples/native/build.sh)\n", argv0);
-    std::fprintf(stderr, "           (native ELF binaries auto-select lldb-dap)\n");
-    std::fprintf(stderr, "  Reverse: %s --rr examples/native/reverse_demo\n", argv0);
+    std::fprintf(stderr, "Usage: %s [options] <target> [program-args...]\n", argv0);
+    std::fprintf(stderr, "  --mock              Frontend-only mode (no Rust/DAP backend)\n");
+    std::fprintf(stderr, "  --profile <name>    Launch profile from definitions.yaml\n");
+    std::fprintf(stderr, "  --adapter <name>    Force adapter from definitions.yaml\n");
+    std::fprintf(stderr, "  --binary <path>     Override resolved binary path\n");
+    std::fprintf(stderr, "  --workspace <path>  Override workspace root\n");
+    std::fprintf(stderr, "\n");
+    std::fprintf(stderr, "Launch adapters and profiles are configured in definitions.yaml.\n");
+    std::fprintf(stderr, "Copy examples/config/definitions.example.yaml to ~/.config/tui-debug/definitions.yaml\n");
     std::fprintf(stderr, "tui-debug-ui 0.1.0\n");
 }
 
@@ -106,8 +35,11 @@ void print_usage(const char* argv0) {
 
 int main(int argc, char* argv[]) {
     tui_debug_ui::SessionMode mode = tui_debug_ui::SessionMode::Rust;
-    tui_debug_ui::DebugAdapter adapter = tui_debug_ui::DebugAdapter::Debugpy;
-    const char* program_path = nullptr;
+    std::optional<std::string> profile;
+    std::optional<std::string> adapter;
+    std::optional<std::filesystem::path> binary_override;
+    std::optional<std::filesystem::path> workspace_override;
+    const char* target_path = nullptr;
     std::vector<std::string> program_args;
 
     for (int i = 1; i < argc; ++i) {
@@ -115,12 +47,36 @@ int main(int argc, char* argv[]) {
             mode = tui_debug_ui::SessionMode::Mock;
             continue;
         }
-        if (std::strcmp(argv[i], "--lldb") == 0) {
-            adapter = tui_debug_ui::DebugAdapter::Lldb;
+        if (std::strcmp(argv[i], "--profile") == 0) {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "--profile requires a value\n");
+                return EXIT_FAILURE;
+            }
+            profile = argv[++i];
             continue;
         }
-        if (std::strcmp(argv[i], "--rr") == 0) {
-            adapter = tui_debug_ui::DebugAdapter::Rr;
+        if (std::strcmp(argv[i], "--adapter") == 0) {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "--adapter requires a value\n");
+                return EXIT_FAILURE;
+            }
+            adapter = argv[++i];
+            continue;
+        }
+        if (std::strcmp(argv[i], "--binary") == 0) {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "--binary requires a value\n");
+                return EXIT_FAILURE;
+            }
+            binary_override = argv[++i];
+            continue;
+        }
+        if (std::strcmp(argv[i], "--workspace") == 0) {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "--workspace requires a value\n");
+                return EXIT_FAILURE;
+            }
+            workspace_override = argv[++i];
             continue;
         }
         if (argv[i][0] == '-') {
@@ -128,14 +84,14 @@ int main(int argc, char* argv[]) {
             print_usage(argv[0]);
             return EXIT_FAILURE;
         }
-        if (program_path == nullptr) {
-            program_path = argv[i];
+        if (target_path == nullptr) {
+            target_path = argv[i];
             continue;
         }
         program_args.push_back(argv[i]);
     }
 
-    if (program_path == nullptr) {
+    if (target_path == nullptr) {
         print_usage(argv[0]);
         return EXIT_FAILURE;
     }
@@ -147,36 +103,30 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
 
-    std::string launch_path = resolve_native_launch_path(program_path);
-    if (mode == tui_debug_ui::SessionMode::Rust && adapter == tui_debug_ui::DebugAdapter::Debugpy &&
-        looks_like_elf_executable(launch_path)) {
-        adapter = tui_debug_ui::DebugAdapter::Lldb;
-    }
+    const tui_debug_ui::AppConfig app_config = tui_debug_ui::load_app_config();
 
-    if (mode == tui_debug_ui::SessionMode::Rust &&
-        (adapter == tui_debug_ui::DebugAdapter::Lldb || adapter == tui_debug_ui::DebugAdapter::Rr) &&
-        !looks_like_elf_executable(launch_path)) {
-        std::fprintf(stderr,
-                     "Native debug adapters require a built executable, not a source file.\n"
-                     "Build first: examples/native/build.sh\n");
-        return EXIT_FAILURE;
-    }
+    tui_debug_ui::LaunchRequest launch_request{
+        .target = target_path,
+        .args = program_args,
+        .profile = profile,
+        .adapter = adapter,
+        .binary = binary_override,
+        .workspace = workspace_override,
+    };
 
-    if (mode == tui_debug_ui::SessionMode::Rust && adapter == tui_debug_ui::DebugAdapter::Rr) {
-        if (!command_on_path("rr")) {
-            std::fprintf(stderr,
-                         "rr not found in PATH — reverse debugging requires rr.\n"
-                         "Install on Fedora: sudo dnf install rr\n"
-                         "Then run: %s --rr %s\n",
-                         argv[0], program_path);
+    std::string resolve_error;
+    std::optional<tui_debug_ui::LaunchPlan> launch_plan;
+    if (mode == tui_debug_ui::SessionMode::Rust) {
+        launch_plan = tui_debug_ui::resolve_launch_plan(app_config.config_path, launch_request, resolve_error);
+        if (!launch_plan.has_value()) {
+            std::fprintf(stderr, "%s\n", resolve_error.c_str());
             return EXIT_FAILURE;
         }
-        if (!command_on_path("gdb")) {
-            std::fprintf(stderr,
-                         "gdb not found in PATH — rr replay debugging requires gdb.\n"
-                         "Install on Fedora: sudo dnf install gdb\n");
-            return EXIT_FAILURE;
-        }
+    } else {
+        tui_debug_ui::LaunchPlan mock_plan{};
+        mock_plan.program_path = target_path;
+        mock_plan.target_path = target_path;
+        launch_plan = mock_plan;
     }
 
     tui_debug_ui::ignore_job_control_tty_signals();
@@ -185,7 +135,6 @@ int main(int argc, char* argv[]) {
     tui_debug_ui::install_sigint_quit_handler();
     tui_debug_ui::sync_terminal_size_from_tty();
 
-    const tui_debug_ui::AppConfig app_config = tui_debug_ui::load_app_config();
     if (mode == tui_debug_ui::SessionMode::Rust) {
         if (app_config.paths.tree_sitter_dir.has_value()) {
             tui_debug_set_tree_sitter_dir(app_config.paths.tree_sitter_dir->c_str());
@@ -193,6 +142,9 @@ int main(int argc, char* argv[]) {
         tui_debug_init();
     }
 
-    tui_debug_ui::DebugApp app(launch_path, mode, adapter, std::move(program_args), app_config);
+    tui_debug_ui::DebugApp app(
+        launch_plan->program_path, mode, launch_plan->ui, std::move(program_args), app_config,
+        launch_plan->resolved_json.empty() ? std::nullopt : std::optional<std::string>(launch_plan->resolved_json),
+        launch_plan->workspace, launch_plan->display_source);
     return app.run();
 }

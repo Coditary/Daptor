@@ -14,7 +14,11 @@ use crate::dap::protocol::{
 use crate::terminal::{DebuggeeIo, DebuggeeTerminal, LldbStdioChannels, parse_run_in_terminal};
 use std::sync::{Arc, Mutex};
 pub use crate::dap::protocol::{GotoTarget, StepInTarget};
-use crate::dap::{DapTransport, spawn_debugpy_adapter, spawn_lldb_dap_adapter};
+use crate::dap::{DapTransport, spawn_adapter, spawn_debugpy_adapter, spawn_lldb_dap_adapter};
+use crate::launch::{
+    LaunchBackend, ResolvedLaunch, ResolvedUiSettings, resolved_launch_from_json,
+    resolved_launch_to_json,
+};
 use crate::network::NetworkCapture;
 
 mod rr_session;
@@ -72,6 +76,7 @@ fn hex_to_bytes(hex: &str) -> Result<Vec<u8>> {
 pub enum DebugAdapterKind {
     Debugpy,
     Lldb,
+    Generic,
 }
 
 /// One enabled exception breakpoint filter (and optional per-filter condition).
@@ -401,6 +406,7 @@ pub struct DebugSession {
     supports_disassemble_request: bool,
     exception_breakpoint_filters: Vec<ExceptionBreakpointFilter>,
     adapter: DebugAdapterKind,
+    adapter_ui: ResolvedUiSettings,
     breakpoint_hit_counts: HashMap<(String, u32), u32>,
     breakpoint_ids: HashMap<i64, (String, u32)>,
     last_breakpoint_requests: HashMap<String, Vec<SourceBreakpoint>>,
@@ -408,6 +414,8 @@ pub struct DebugSession {
     /// Tracked debuggee OS PIDs from DAP `process` events (multiple for subprocesses).
     debug_process_ids: Vec<u32>,
     network_capture: Option<NetworkCapture>,
+    /// Serialized [`ResolvedLaunch`] used to relaunch configured profiles.
+    stored_launch: Option<String>,
 }
 
 fn start_network_capture() -> Option<NetworkCapture> {
@@ -480,15 +488,69 @@ impl DebugSession {
             supports_disassemble_request: false,
             exception_breakpoint_filters: Vec::new(),
             adapter: DebugAdapterKind::Debugpy,
+            adapter_ui: ResolvedUiSettings::default(),
             breakpoint_hit_counts: HashMap::new(),
             breakpoint_ids: HashMap::new(),
             last_breakpoint_requests: HashMap::new(),
             debuggee_io: Arc::new(Mutex::new(None)),
             debug_process_ids: Vec::new(),
             network_capture: start_network_capture(),
+            stored_launch: None,
         };
 
+        session.adapter_ui.debugpy_launch_defaults = true;
         session.initialize_and_launch()?;
+        Ok(session)
+    }
+
+    /// Launch a debug session from a resolved launch profile.
+    pub fn launch_from_resolved(resolved: ResolvedLaunch) -> Result<Self> {
+        if resolved.backend == LaunchBackend::Rr {
+            bail!("launch_from_resolved does not start rr sessions; use RrDebugSession");
+        }
+        let program = resolved
+            .program
+            .canonicalize()
+            .with_context(|| format!("failed to resolve program path: {}", resolved.program.display()))?;
+
+        info!(
+            "spawning adapter '{}' for profile '{}'",
+            resolved.adapter_command, resolved.profile
+        );
+        let child = spawn_adapter(&resolved.adapter_command, &resolved.adapter_args)?;
+        let transport = DapTransport::spawn(child)?;
+
+        let mut session = Self {
+            transport,
+            program,
+            program_args: resolved.program_args.clone(),
+            state: SessionState::Disconnected,
+            active_thread: None,
+            active_frame: None,
+            initial_snapshot: None,
+            supports_step_in_targets: false,
+            supports_step_back: false,
+            supports_goto_targets: false,
+            supports_data_breakpoints: false,
+            supports_function_breakpoints: false,
+            supports_completions_request: false,
+            supports_exception_info_request: false,
+            supports_read_memory_request: false,
+            supports_write_memory_request: false,
+            supports_disassemble_request: false,
+            exception_breakpoint_filters: Vec::new(),
+            adapter: DebugAdapterKind::Generic,
+            adapter_ui: resolved.ui.clone(),
+            breakpoint_hit_counts: HashMap::new(),
+            breakpoint_ids: HashMap::new(),
+            last_breakpoint_requests: HashMap::new(),
+            debuggee_io: Arc::new(Mutex::new(None)),
+            debug_process_ids: Vec::new(),
+            network_capture: start_network_capture(),
+            stored_launch: resolved_launch_to_json(&resolved).ok(),
+        };
+
+        session.initialize_and_launch_with(&resolved.initialize, &resolved.launch)?;
         Ok(session)
     }
 
@@ -528,12 +590,19 @@ impl DebugSession {
             supports_disassemble_request: false,
             exception_breakpoint_filters: Vec::new(),
             adapter: DebugAdapterKind::Lldb,
+            adapter_ui: ResolvedUiSettings {
+                lldb_stdio: true,
+                line_buffered_console: true,
+                assume_function_breakpoints: true,
+                ..ResolvedUiSettings::default()
+            },
             breakpoint_hit_counts: HashMap::new(),
             breakpoint_ids: HashMap::new(),
             last_breakpoint_requests: HashMap::new(),
             debuggee_io: Arc::new(Mutex::new(None)),
             debug_process_ids: Vec::new(),
             network_capture: start_network_capture(),
+            stored_launch: None,
         };
 
         session.initialize_and_launch()?;
@@ -584,30 +653,52 @@ impl DebugSession {
         let (adapter_id, launch_type) = match self.adapter {
             DebugAdapterKind::Debugpy => ("debugpy", "debugpy"),
             DebugAdapterKind::Lldb => ("lldb-dap", "lldb"),
+            DebugAdapterKind::Generic => ("generic", "generic"),
         };
 
-        let init_seq = self.transport.send_request(
-            "initialize",
-            json!({
-                "clientID": "tui-debug",
-                "clientName": "tui-debug",
-                "adapterID": adapter_id,
-                "pathFormat": "path",
-                "linesStartAt1": true,
-                "columnsStartAt1": true,
-                "supportsVariableType": true,
-                "supportsVariablePaging": false,
-                "supportsSetVariable": true,
-                "supportsRunInTerminalRequest": true,
-                "supportsMemoryReferences": true,
-                "supportsMemoryEvent": true,
-            }),
-        )?;
+        let initialize = json!({
+            "clientID": "tui-debug",
+            "clientName": "tui-debug",
+            "adapterID": adapter_id,
+            "pathFormat": "path",
+            "linesStartAt1": true,
+            "columnsStartAt1": true,
+            "supportsVariableType": true,
+            "supportsVariablePaging": false,
+            "supportsSetVariable": true,
+            "supportsRunInTerminalRequest": true,
+            "supportsMemoryReferences": true,
+            "supportsMemoryEvent": true,
+        });
+
+        let mut launch_args = json!({
+            "type": launch_type,
+            "request": "launch",
+            "program": self.program.to_string_lossy(),
+            "stopOnEntry": match self.adapter {
+                DebugAdapterKind::Lldb => false,
+                DebugAdapterKind::Debugpy | DebugAdapterKind::Generic => true,
+            },
+        });
+
+        if !self.program_args.is_empty() {
+            launch_args["args"] = json!(self.program_args);
+        }
+
+        self.initialize_and_launch_with(&initialize, &launch_args)?;
+        Ok(())
+    }
+
+    fn initialize_and_launch_with(
+        &mut self,
+        initialize: &Value,
+        launch_template: &Value,
+    ) -> Result<()> {
+        let init_seq = self.transport.send_request("initialize", initialize.clone())?;
         let init_body = self.wait_dap_response(init_seq, REQUEST_TIMEOUT)?;
         self.merge_capabilities_from_value(&init_body);
-        if self.adapter == DebugAdapterKind::Lldb {
+        if self.adapter_ui.assume_function_breakpoints {
             if !self.supports_function_breakpoints {
-                // lldb-dap supports setFunctionBreakpoints even when initialize omits the flag.
                 self.supports_function_breakpoints = true;
             }
             if !self.supports_read_memory_request {
@@ -630,17 +721,14 @@ impl DebugSession {
 
         // debugpy expects launch in-flight before configurationDone; initialized may
         // arrive before or after configurationDone and is queued for later handling.
-        let mut launch_args = json!({
-            "type": launch_type,
-            "request": "launch",
-            "program": self.program.to_string_lossy(),
-            "stopOnEntry": match self.adapter {
-                DebugAdapterKind::Lldb => false,
-                DebugAdapterKind::Debugpy => true,
-            },
-        });
-
-        if !self.program_args.is_empty() {
+        let mut launch_args = launch_template.clone();
+        if launch_args.get("program").is_none() {
+            launch_args["program"] = json!(self.program.to_string_lossy());
+        }
+        if launch_args.get("request").is_none() {
+            launch_args["request"] = json!("launch");
+        }
+        if launch_args.get("args").is_none() && !self.program_args.is_empty() {
             launch_args["args"] = json!(self.program_args);
         }
 
@@ -648,39 +736,7 @@ impl DebugSession {
             inject_network_proxy_env(&mut launch_args, capture);
         }
 
-        match self.adapter {
-            DebugAdapterKind::Debugpy => {
-                launch_args["console"] = json!(if cfg!(test) {
-                    "internalConsole"
-                } else {
-                    "integratedTerminal"
-                });
-                launch_args["redirectOutput"] = json!(false);
-                if let Some(extras) = adapter_launch_extras().as_object() {
-                    launch_args
-                        .as_object_mut()
-                        .expect("launch payload object")
-                        .extend(extras.clone());
-                }
-            }
-            DebugAdapterKind::Lldb => {
-                let channels = LldbStdioChannels::open()?;
-                let stdin = channels.stdin_path();
-                {
-                    let mut guard = self
-                        .debuggee_io
-                        .lock()
-                        .expect("debuggee io lock poisoned");
-                    *guard = Some(DebuggeeIo::LldbStdio(channels));
-                }
-                // Redirect only stdin; null keeps stdout/stderr on lldb's DAP output channel.
-                launch_args["stdio"] = json!([stdin, Value::Null, Value::Null]);
-                launch_args["initCommands"] = json!(lldb_init_breakpoint_commands(&self.program));
-                if let Some(parent) = self.program.parent() {
-                    launch_args["cwd"] = json!(parent);
-                }
-            }
-        }
+        self.apply_adapter_launch_extras(&mut launch_args)?;
 
         let launch_seq = self.transport.send_request("launch", launch_args)?;
         let cfg_seq = self.transport.send_request("configurationDone", json!({}))?;
@@ -692,6 +748,52 @@ impl DebugSession {
         if let Some(snapshot) = self.poll_until_stopped()? {
             self.initial_snapshot = Some(snapshot);
         }
+        Ok(())
+    }
+
+    fn apply_adapter_launch_extras(&mut self, launch_args: &mut Value) -> Result<()> {
+        if self.adapter_ui.debugpy_launch_defaults {
+            if launch_args.get("console").is_none() {
+                launch_args["console"] = json!(if cfg!(test) {
+                    "internalConsole"
+                } else {
+                    "integratedTerminal"
+                });
+            }
+            if launch_args.get("redirectOutput").is_none() {
+                launch_args["redirectOutput"] = json!(false);
+            }
+            if let Some(extras) = adapter_launch_extras().as_object() {
+                launch_args
+                    .as_object_mut()
+                    .expect("launch payload object")
+                    .extend(extras.clone());
+            }
+        }
+
+        if self.adapter_ui.lldb_stdio {
+            if launch_args.get("stdio").is_none() {
+                let channels = LldbStdioChannels::open()?;
+                let stdin = channels.stdin_path();
+                {
+                    let mut guard = self
+                        .debuggee_io
+                        .lock()
+                        .expect("debuggee io lock poisoned");
+                    *guard = Some(DebuggeeIo::LldbStdio(channels));
+                }
+                launch_args["stdio"] = json!([stdin, Value::Null, Value::Null]);
+            }
+            if launch_args.get("initCommands").is_none() {
+                launch_args["initCommands"] = json!(lldb_init_breakpoint_commands(&self.program));
+            }
+            if launch_args.get("cwd").is_none() {
+                if let Some(parent) = self.program.parent() {
+                    launch_args["cwd"] = json!(parent);
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -1366,7 +1468,9 @@ impl DebugSession {
     pub fn dispatch_goto_line(&mut self, path: &str, line: i64) -> Result<()> {
         match self.adapter {
             DebugAdapterKind::Lldb => {}
-            DebugAdapterKind::Debugpy => bail!("jump to line is not supported for Python debug sessions"),
+            DebugAdapterKind::Debugpy | DebugAdapterKind::Generic => {
+                bail!("jump to line is not supported for this debug session")
+            }
         }
 
         let frame_id = self.active_frame.context("no active frame")?;
@@ -1994,9 +2098,16 @@ impl DebugSession {
         let program_args = self.program_args.clone();
         let adapter = self.adapter;
         let _ = self.shutdown();
+        if let Some(stored_launch) = self.stored_launch.clone() {
+            let resolved = resolved_launch_from_json(&stored_launch)?;
+            *self = Self::launch_from_resolved(resolved)?;
+            return Ok(());
+        }
+
         *self = match adapter {
             DebugAdapterKind::Debugpy => Self::launch_python_with_args(&program, &program_args)?,
             DebugAdapterKind::Lldb => Self::launch_native_with_args(&program, &program_args)?,
+            DebugAdapterKind::Generic => bail!("cannot relaunch generic session without stored launch profile"),
         };
         Ok(())
     }

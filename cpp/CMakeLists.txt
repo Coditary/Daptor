@@ -56,6 +56,7 @@ add_executable(tui-debug-ui
     src/ui/syntax_theme.cpp
     src/ui/xdg_paths.cpp
     src/ui/app_config.cpp
+    src/ui/launch_plan.cpp
     src/ui/theme_loader.cpp
     src/ui/yaml_config.cpp
     src/ui/keybindings.cpp

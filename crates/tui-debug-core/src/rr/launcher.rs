@@ -16,7 +16,7 @@ pub fn ensure_rr_available() -> Result<()> {
         .stderr(Stdio::null())
         .status()
         .context(
-            "rr not found — install it first (Fedora: sudo dnf install rr, then retry with --rr)",
+            "rr not found — install it first (Fedora: sudo dnf install rr, then retry with --profile rr)",
         )?;
     Ok(())
 }

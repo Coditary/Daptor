@@ -42,6 +42,20 @@ properties:
             $ref: "#/$defs/panel_list"
           bottom:
             $ref: "#/$defs/panel_list"
+  definitions:
+    type: string
+    description: Path to launch definitions YAML (default definitions.yaml in the config directory).
+  default_profile:
+    type: string
+    description: Profile used when auto-selection does not match.
+  adapters:
+    type: object
+    additionalProperties:
+      $ref: "#/$defs/adapter"
+  profiles:
+    type: object
+    additionalProperties:
+      $ref: "#/$defs/profile"
   keybindings:
     type: object
     additionalProperties: false
@@ -63,6 +77,53 @@ properties:
       step_out_fn: { type: string }
       breakpoint_fn: { type: string }
 $defs:
+  adapter:
+    type: object
+    required: [command]
+    additionalProperties: false
+    properties:
+      command: { type: string }
+      args:
+        type: array
+        items: { type: string }
+      transport: { type: string, enum: [stdio] }
+      ui_adapter: { type: string, enum: [debugpy, lldb, generic] }
+      initialize: { type: object }
+      launch: { type: object }
+  profile:
+    type: object
+    additionalProperties: false
+    properties:
+      backend: { type: string, enum: [dap, rr] }
+      adapter: { type: string }
+      priority: { type: integer }
+      match:
+        type: object
+        properties:
+          extensions:
+            type: array
+            items: { type: string }
+          files:
+            type: array
+            items: { type: string }
+          executable: { type: boolean }
+          go_binary: { type: boolean }
+      resolve:
+        type: object
+        additionalProperties: { type: string }
+      launch: { type: object }
+      prelaunch:
+        type: array
+        items: { type: string }
+      workspace: { type: string }
+      path_map:
+        type: array
+        items:
+          type: object
+          required: [from, to]
+          properties:
+            from: { type: string }
+            to: { type: string }
   panel_list:
     type: array
     items:

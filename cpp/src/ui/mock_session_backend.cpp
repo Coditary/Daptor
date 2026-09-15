@@ -136,13 +136,32 @@ std::optional<std::int64_t> json_target_id(const std::string& json) {
 
 class MockSessionBackend final : public SessionBackend {
   public:
-    void launch(const std::string& program_path, const std::vector<std::string>& program_args) override {
-        program_path_ = program_path;
-        program_args_ = program_args;
-        source_text_ = read_file(program_path);
+    void launch(const std::string& resolved_launch_json) override {
+        program_path_ = resolved_launch_json;
+        const std::string marker = "\"program\":\"";
+        if (const std::size_t start = resolved_launch_json.find(marker); start != std::string::npos) {
+            std::size_t cursor = start + marker.size();
+            std::string path;
+            while (cursor < resolved_launch_json.size()) {
+                const char ch = resolved_launch_json[cursor++];
+                if (ch == '"') {
+                    break;
+                }
+                if (ch == '\\' && cursor < resolved_launch_json.size()) {
+                    path.push_back(resolved_launch_json[cursor++]);
+                    continue;
+                }
+                path.push_back(ch);
+            }
+            if (!path.empty()) {
+                program_path_ = std::move(path);
+            }
+        }
+        program_args_.clear();
+        source_text_ = read_file(program_path_);
         current_line_ = 1;
         step_index_ = 0;
-        if (program_path.find("step_in_demo") != std::string::npos) {
+        if (program_path_.find("step_in_demo") != std::string::npos) {
             current_line_ = 17;
             step_index_ = mock_line_index(current_line_);
         }
@@ -224,7 +243,7 @@ class MockSessionBackend final : public SessionBackend {
 
         if (session_state_ == "exited" || session_state_ == "disconnected") {
             if (op == "restart") {
-                launch(program_path_, program_args_);
+                launch("{\"program\":\"" + program_path_ + "\"}");
                 return true;
             }
             if (op == "terminate") {

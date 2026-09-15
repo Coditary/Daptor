@@ -5,6 +5,7 @@ fn main() {
     println!("cargo:rerun-if-changed=src/c_api/mod.rs");
     println!("cargo:rerun-if-changed=src/c_api/session.rs");
     println!("cargo:rerun-if-changed=src/c_api/highlight.rs");
+    println!("cargo:rerun-if-changed=src/launch/mod.rs");
 
     let crate_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let config_path = crate_dir.join("cbindgen.toml");

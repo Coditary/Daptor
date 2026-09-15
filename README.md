@@ -12,7 +12,7 @@ Terminal debugger built on the [Debug Adapter Protocol](https://microsoft.github
 |--------------------|---------|------------|
 | Python | [debugpy](https://github.com/microsoft/debugpy) | `./cpp/build/tui-debug-ui examples/python/hello.py` |
 | C / C++ (native ELF) | [lldb-dap](https://github.com/llvm/llvm-project) | Auto-selected for binaries, or `--lldb` |
-| Reverse debugging (Linux) | [rr](https://rr-project.org/) | `--rr examples/native/reverse_demo` |
+| Reverse debugging (Linux) | [rr](https://rr-project.org/) | `--profile rr examples/native/reverse_demo` |
 
 ## Prerequisites
 
@@ -34,6 +34,11 @@ Tree-sitter grammars under `~/.local/share/dap/tree-sitter/<language>/` (or set 
 ## Quick start
 
 ```bash
+# Launch definitions (adapters + profiles)
+mkdir -p ~/.config/tui-debug
+cp examples/config/config.example.yaml ~/.config/tui-debug/config.yaml
+cp examples/config/definitions.example.yaml ~/.config/tui-debug/definitions.yaml
+
 # Engine + CLI
 cargo build -p tui-debug-cli
 

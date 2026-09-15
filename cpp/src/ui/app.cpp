@@ -1117,14 +1117,20 @@ bool exception_filter_relevant_for_source(const tui_debug_ui::DebugUiModel::Exce
 
 namespace tui_debug_ui {
 
-DebugApp::DebugApp(const std::string& program_path, SessionMode mode, DebugAdapter adapter,
-                   std::vector<std::string> program_args, AppConfig app_config)
+DebugApp::DebugApp(const std::string& program_path, SessionMode mode, LaunchUiSettings launch_ui,
+                   std::vector<std::string> program_args, AppConfig app_config,
+                   std::optional<std::string> resolved_launch_json,
+                   std::optional<std::filesystem::path> workspace_override,
+                   std::optional<std::string> display_source_override)
     : mode_(mode),
-      adapter_(adapter),
+      launch_ui_(std::move(launch_ui)),
       program_path_(program_path),
       program_args_(std::move(program_args)),
-      session_io_(std::make_unique<SessionIoThread>(mode, adapter)),
-      workspace_root_(workspace_root_for_program(program_path_)),
+      resolved_launch_json_(std::move(resolved_launch_json)),
+      display_source_override_(std::move(display_source_override)),
+      session_io_(std::make_unique<SessionIoThread>(mode)),
+      workspace_root_(workspace_override.has_value() ? *workspace_override
+                                                       : workspace_root_for_program(program_path_)),
       app_config_(std::move(app_config)),
       app_(std::make_unique<tuinator::Application>()) {
     const LoadedTheme loaded_theme = load_application_theme(app_config_);
@@ -1144,12 +1150,12 @@ DebugApp::DebugApp(const std::string& program_path, SessionMode mode, DebugAdapt
 
     if (mode_ == SessionMode::Mock) {
         model_.status_message = "Mock UI mode (no Rust backend)";
-    } else if (adapter_ == DebugAdapter::Lldb) {
-        model_.status_message = "Connecting to lldb-dap…";
-    } else if (adapter_ == DebugAdapter::Rr) {
+    } else if (launch_ui_.is_rr_backend) {
         model_.status_message = "Recording with rr…";
+    } else if (!launch_ui_.adapter_label.empty()) {
+        model_.status_message = "Connecting to " + launch_ui_.adapter_label + "…";
     } else {
-        model_.status_message = "Connecting to debugpy…";
+        model_.status_message = "Connecting to debug adapter…";
     }
 
 }
@@ -1330,7 +1336,7 @@ void DebugApp::build_ui() {
     auto console_panel = std::make_unique<ConsolePanel>(dap_theme_);
     console_panel_ = console_panel.get();
 
-    console_panel_->set_line_buffered_input(adapter_ == DebugAdapter::Lldb);
+    console_panel_->set_line_buffered_input(launch_ui_.line_buffered_console);
     console_panel_->set_on_activate([this]() {
         model_.focus = Focus::Console;
         apply_focus();
@@ -1340,7 +1346,7 @@ void DebugApp::build_ui() {
             return;
         }
         session_io_->post_terminal_input(bytes);
-        if (adapter_ == DebugAdapter::Lldb && is_session_stopped() && model_.session_state != "running" &&
+        if (launch_ui_.line_buffered_console && is_session_stopped() && model_.session_state != "running" &&
             !bytes.empty() && bytes.back() == '\n') {
             session_io_->post_command("continue");
         }
@@ -1449,7 +1455,11 @@ void DebugApp::maybe_start_launch() {
     launch_posted_ = true;
     cached_thread_stack_contents_.clear();
     prefetch_program_source_highlight();
-    session_io_->start_launch(program_path_, program_args_);
+    if (resolved_launch_json_.has_value() && !resolved_launch_json_->empty()) {
+        session_io_->start_launch(*resolved_launch_json_);
+    } else if (mode_ == SessionMode::Mock) {
+        session_io_->start_launch("{\"program\":\"" + program_path_ + "\"}");
+    }
 }
 
 void DebugApp::prefetch_program_source_highlight() {
@@ -1484,15 +1494,15 @@ bool DebugApp::update_connecting_spinner() {
     last_spinner_update_ = now;
 
     static constexpr char kSpinner[] = "|/-\\";
-    const char* adapter_label = "debugpy";
+    const char* spinner_adapter_label = "debug adapter";
     if (mode_ == SessionMode::Mock) {
-        adapter_label = "mock session";
-    } else if (adapter_ == DebugAdapter::Lldb) {
-        adapter_label = "lldb-dap";
-    } else if (adapter_ == DebugAdapter::Rr) {
-        adapter_label = "rr replay";
+        spinner_adapter_label = "mock session";
+    } else if (launch_ui_.is_rr_backend) {
+        spinner_adapter_label = "rr replay";
+    } else if (!launch_ui_.adapter_label.empty()) {
+        spinner_adapter_label = launch_ui_.adapter_label.c_str();
     }
-    const std::string message = std::string("Connecting to ") + adapter_label + "… "
+    const std::string message = std::string("Connecting to ") + spinner_adapter_label + "… "
                               + kSpinner[static_cast<std::size_t>(spinner_frame_++ % 4)];
     if (message == model_.status_message) {
         return false;
@@ -1568,7 +1578,7 @@ void DebugApp::apply_snapshot_json_payload(const std::string& json) {
     }
     remember_scope_names_from_model();
     remember_threads_from_model();
-    if (adapter_ == DebugAdapter::Lldb) {
+    if (launch_ui_.line_buffered_console) {
         model_.supports_function_breakpoints = true;
     }
     apply_exception_filter_defaults();
@@ -3300,7 +3310,8 @@ void DebugApp::finalize_text_cursor(tuinator::PaintContext& ctx) const {
 }
 
 void DebugApp::maybe_apply_reverse_continue_hint() {
-    if (reverse_continue_hint_shown_ || mode_ == SessionMode::Mock || adapter_ != DebugAdapter::Lldb ||
+    if (reverse_continue_hint_shown_ || mode_ == SessionMode::Mock ||
+        !launch_ui_.show_reverse_continue_hint ||
         model_.supports_step_back || !is_session_stopped()) {
         return;
     }
@@ -8692,7 +8703,7 @@ void DebugApp::push_function_breakpoints_to_session() {
 void DebugApp::flush_function_breakpoints_to_session() { push_function_breakpoints_to_session(); }
 
 bool DebugApp::adapter_supports_function_breakpoints() const {
-    return model_.supports_function_breakpoints || adapter_ == DebugAdapter::Lldb;
+    return model_.supports_function_breakpoints || launch_ui_.assume_function_breakpoints;
 }
 
 bool DebugApp::has_function_breakpoint(const std::string& name) const {
@@ -10203,7 +10214,7 @@ void DebugApp::begin_source_context_menu(const std::string& path, int line, int 
     }
 
     const bool probe_goto =
-        adapter_ != DebugAdapter::Rr && is_session_stopped() && session_io_ != nullptr && session_io_->is_active();
+        !launch_ui_.is_rr_backend && is_session_stopped() && session_io_ != nullptr && session_io_->is_active();
 
     if (!probe_goto) {
         open_source_context_menu(path, line, anchor, source_identifier, {}, false);
@@ -10288,7 +10299,7 @@ void DebugApp::handle_goto_targets_payload(const SessionIoEvent& event) {
     }
 
     const bool offer_lldb_line_jump =
-        goto_targets.empty() && adapter_ == DebugAdapter::Lldb && pending.line > 0 &&
+        goto_targets.empty() && launch_ui_.lldb_goto_line_fallback && pending.line > 0 &&
         static_cast<std::uint32_t>(pending.line) != model_.execution_line;
 
     open_source_context_menu(pending.path, pending.line, pending.anchor, pending.source_identifier,

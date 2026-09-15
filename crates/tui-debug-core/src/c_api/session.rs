@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::launch::ResolvedLaunch;
 use crate::session::{
     DataBreakpoint, DebugSession, ExceptionBreakpointSetting, FunctionBreakpoint, RrDebugSession,
     SessionSnapshot, SessionState, SourceBreakpoint,
@@ -42,6 +43,18 @@ impl CSession {
         Ok(Self {
             inner: SessionEngine::Rr(inner),
         })
+    }
+
+    pub fn launch_resolved(resolved: ResolvedLaunch) -> Result<Self> {
+        use crate::launch::LaunchBackend;
+
+        let inner = match resolved.backend {
+            LaunchBackend::Dap => SessionEngine::Dap(DebugSession::launch_from_resolved(resolved)?),
+            LaunchBackend::Rr => SessionEngine::Rr(
+                RrDebugSession::launch_with_args(&resolved.program, &resolved.program_args)?,
+            ),
+        };
+        Ok(Self { inner })
     }
 
     pub fn poll_json(&mut self) -> Result<Option<String>> {

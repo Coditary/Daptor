@@ -15,8 +15,8 @@ constexpr auto kBreakpointDebounce = std::chrono::milliseconds(150);
 
 }  // namespace
 
-SessionIoThread::SessionIoThread(SessionMode mode, DebugAdapter adapter)
-    : backend_(create_session_backend(mode, adapter)) {
+SessionIoThread::SessionIoThread(SessionMode mode)
+    : backend_(create_session_backend(mode)) {
     thread_ = std::thread([this]() { thread_main(); });
 }
 
@@ -40,25 +40,19 @@ void SessionIoThread::maybe_begin_launch() {
         return;
     }
 
-    std::string path;
+    std::string resolved_launch_json;
     {
         std::lock_guard lock(mutex_);
-        if (program_path_.empty()) {
+        if (resolved_launch_json_.empty()) {
             return;
         }
-        path = program_path_;
+        resolved_launch_json = resolved_launch_json_;
         launch_started_.store(true, std::memory_order_release);
     }
 
-    std::vector<std::string> args;
-    {
-        std::lock_guard lock(mutex_);
-        args = program_args_;
-    }
-
-    launch_worker_ = std::thread([this, path = std::move(path), args = std::move(args)]() {
+    launch_worker_ = std::thread([this, resolved_launch_json = std::move(resolved_launch_json)]() {
         try {
-            backend_->launch(path, args);
+            backend_->launch(resolved_launch_json);
             const bool active = backend_->is_active();
             backend_active_.store(active, std::memory_order_release);
             adapter_live_.store(active, std::memory_order_release);
@@ -86,12 +80,10 @@ void SessionIoThread::maybe_begin_launch() {
     });
 }
 
-void SessionIoThread::start_launch(const std::string& program_path,
-                                   const std::vector<std::string>& program_args) {
+void SessionIoThread::start_launch(const std::string& resolved_launch_json) {
     {
         std::lock_guard lock(mutex_);
-        program_path_ = program_path;
-        program_args_ = program_args;
+        resolved_launch_json_ = resolved_launch_json;
     }
     cv_.notify_all();
 }
@@ -1207,7 +1199,7 @@ void SessionIoThread::thread_main() {
                        disassembly_fetch_request_.has_value() || runtime_source_fetch_request_.has_value() ||
                        write_memory_request_.has_value() || step_in_targets_frame_.has_value() ||
                        goto_targets_request_.has_value() || network_compose_send_request_.has_value() ||
-                       (!launch_started_.load(std::memory_order_acquire) && !program_path_.empty());
+                       (!launch_started_.load(std::memory_order_acquire) && !resolved_launch_json_.empty());
             });
         } catch (const std::exception& ex) {
             push_event(SessionIoEvent{SessionIoEventKind::CommandFinished, false, "worker", ex.what()});

@@ -27,10 +27,13 @@ enum PendingResponse {
     Failure { command: String, message: String },
 }
 
-/// Spawn the `lldb-dap` binary and return the child process.
-pub fn spawn_lldb_dap_adapter() -> Result<Child> {
-    let mut command = Command::new("lldb-dap");
-    command
+/// Spawn a DAP adapter process over stdio.
+pub fn spawn_adapter(command: &str, args: &[String]) -> Result<Child> {
+    let mut process = Command::new(command);
+    if !args.is_empty() {
+        process.args(args);
+    }
+    process
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -39,7 +42,7 @@ pub fn spawn_lldb_dap_adapter() -> Result<Child> {
     {
         use std::os::unix::process::CommandExt;
         unsafe {
-            command.pre_exec(|| {
+            process.pre_exec(|| {
                 if libc::setsid() == -1 {
                     return Err(std::io::Error::last_os_error());
                 }
@@ -48,42 +51,30 @@ pub fn spawn_lldb_dap_adapter() -> Result<Child> {
         }
     }
 
-    let child = command.spawn().context(
-        "failed to spawn lldb-dap — install the LLVM lldb package (provides /usr/bin/lldb-dap)",
-    )?;
-
+    let child = process
+        .spawn()
+        .with_context(|| format!("failed to spawn adapter '{command}'"))?;
     Ok(child)
+}
+
+/// Spawn the `lldb-dap` binary and return the child process.
+pub fn spawn_lldb_dap_adapter() -> Result<Child> {
+    spawn_adapter("lldb-dap", &[]).context(
+        "failed to spawn lldb-dap — install the LLVM lldb package (provides /usr/bin/lldb-dap)",
+    )
 }
 
 /// Spawn `python3 -m debugpy.adapter` and return the child process.
 pub fn spawn_debugpy_adapter() -> Result<Child> {
-    let mut command = Command::new("python3");
-    command
-        .args(["-u", "-m", "debugpy.adapter"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        unsafe {
-            command.pre_exec(|| {
-                // Detach debugpy from the controlling terminal entirely so ^C / keyboard
-                // events routed to the TUI never become KeyboardInterrupt in pydevd.
-                if libc::setsid() == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-    }
-
-    let child = command.spawn().context(
-        "failed to spawn debugpy adapter — install with: python3 -m pip install debugpy",
-    )?;
-
-    Ok(child)
+    spawn_adapter(
+        "python3",
+        &[
+            "-u".to_string(),
+            "-m".to_string(),
+            "debugpy.adapter".to_string(),
+        ],
+    )
+    .context("failed to spawn debugpy adapter — install with: python3 -m pip install debugpy")
 }
 
 /// Low-level DAP transport bound to a child process stdio.

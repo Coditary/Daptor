@@ -11,6 +11,7 @@
 #include "tui_debug_ui/debug_ui_model.hpp"
 #include "tui_debug_ui/highlight_bridge.hpp"
 #include "tui_debug_ui/source_panel.hpp"
+#include "tui_debug_ui/launch_plan.hpp"
 #include "tui_debug_ui/session_backend.hpp"
 #include "tui_debug_ui/repl_panel.hpp"
 #include "tui_debug_ui/session_io_thread.hpp"
@@ -77,8 +78,11 @@ struct SourceFileTab {
 class DebugApp {
   public:
     explicit DebugApp(const std::string& program_path, SessionMode mode = SessionMode::Rust,
-                      DebugAdapter adapter = DebugAdapter::Debugpy,
-                      std::vector<std::string> program_args = {}, AppConfig app_config = {});
+                      LaunchUiSettings launch_ui = {}, std::vector<std::string> program_args = {},
+                      AppConfig app_config = {},
+                      std::optional<std::string> resolved_launch_json = std::nullopt,
+                      std::optional<std::filesystem::path> workspace_override = std::nullopt,
+                      std::optional<std::string> display_source_override = std::nullopt);
     ~DebugApp();
 
     DebugApp(const DebugApp&) = delete;
@@ -493,9 +497,11 @@ class DebugApp {
     void maybe_apply_reverse_continue_hint();
 
     SessionMode mode_;
-    DebugAdapter adapter_;
+    LaunchUiSettings launch_ui_;
     std::string program_path_;
     std::vector<std::string> program_args_;
+    std::optional<std::string> resolved_launch_json_;
+    std::optional<std::string> display_source_override_;
     std::unique_ptr<SessionIoThread> session_io_;
     bool launch_complete_handled_ = false;
     bool launch_posted_ = false;

@@ -13,18 +13,12 @@ enum class SessionMode {
     Mock,
 };
 
-enum class DebugAdapter {
-    Debugpy,
-    Lldb,
-    Rr,
-};
-
 /// Abstraction over the Rust C API (or a mock for frontend-only development).
 class SessionBackend {
   public:
     virtual ~SessionBackend() = default;
 
-    virtual void launch(const std::string& program_path, const std::vector<std::string>& program_args) = 0;
+    virtual void launch(const std::string& resolved_launch_json) = 0;
     virtual void shutdown() = 0;
     virtual bool is_active() const = 0;
     virtual std::string last_error() const { return {}; }
@@ -79,7 +73,6 @@ class SessionBackend {
                                                           std::string& error_out) = 0;
 };
 
-std::unique_ptr<SessionBackend> create_session_backend(SessionMode mode,
-                                                       DebugAdapter adapter = DebugAdapter::Debugpy);
+std::unique_ptr<SessionBackend> create_session_backend(SessionMode mode);
 
 }  // namespace tui_debug_ui

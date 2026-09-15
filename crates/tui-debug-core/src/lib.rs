@@ -1,6 +1,7 @@
 pub mod c_api;
 pub mod dap;
 pub mod highlight;
+pub mod launch;
 pub mod mi;
 pub mod network;
 pub mod rr;

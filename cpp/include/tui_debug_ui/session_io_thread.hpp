@@ -67,13 +67,13 @@ struct SessionIoEvent {
 /// Owns the SessionBackend on a worker thread so the Tuinator UI never blocks on DAP I/O.
 class SessionIoThread {
   public:
-    explicit SessionIoThread(SessionMode mode, DebugAdapter adapter = DebugAdapter::Debugpy);
+    explicit SessionIoThread(SessionMode mode);
     ~SessionIoThread();
 
     SessionIoThread(const SessionIoThread&) = delete;
     SessionIoThread& operator=(const SessionIoThread&) = delete;
 
-    void start_launch(const std::string& program_path, const std::vector<std::string>& program_args);
+    void start_launch(const std::string& resolved_launch_json);
     bool launch_finished() const;
     bool is_active() const;
     bool adapter_live() const;
@@ -164,8 +164,7 @@ class SessionIoThread {
 
     mutable std::mutex mutex_;
     std::condition_variable cv_;
-    std::string program_path_;
-    std::vector<std::string> program_args_;
+    std::string resolved_launch_json_;
     std::string pending_command_;
     bool has_pending_command_ = false;
     std::optional<std::string> pending_evaluate_;

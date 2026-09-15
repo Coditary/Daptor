@@ -34,7 +34,7 @@ Sample programs and config templates for **Daptor**. Nothing here is required at
 ```bash
 ./examples/native/build.sh
 ./cpp/build/tui-debug-ui examples/native/reverse_demo
-./cpp/build/tui-debug-ui --rr examples/native/reverse_demo
+./cpp/build/tui-debug-ui --profile rr examples/native/reverse_demo
 ./cpp/build/tui-debug-ui examples/native/exception_demo 2
 ```
 
