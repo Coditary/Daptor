@@ -380,6 +380,159 @@ pub extern "C" fn tui_debug_drain_console(
     }
 }
 
+/// Drain newly captured HTTP exchanges into `json_out`.
+///
+/// JSON shape: `{"proxy_address":"127.0.0.1:PORT","intercept_enabled":false,"exchanges":[...]}`
+///
+/// Returns `0` when data was written, `1` when nothing new is available, and `-1` on error.
+#[no_mangle]
+pub extern "C" fn tui_debug_drain_network(
+    session: *mut c_void,
+    json_out: *mut c_char,
+    cap: usize,
+) -> c_int {
+    clear_last_error();
+
+    let Some(session) = session_from_ptr(session) else {
+        return -1;
+    };
+
+    match session.drain_network_json() {
+        Ok(json) => {
+            if json.is_empty() {
+                return 1;
+            }
+            match write_json_to_buffer(&json, json_out, cap) {
+                Ok(()) => 0,
+                Err(err) => {
+                    set_last_error(err);
+                    -1
+                }
+            }
+        }
+        Err(err) => {
+            set_last_error(err.to_string());
+            -1
+        }
+    }
+}
+
+/// Send a real HTTP request from the Compose tab and return captured exchange JSON.
+///
+/// `session` may be null to send without an active debug session.
+///
+/// Returns `0` on success, and `-1` on error.
+#[no_mangle]
+pub extern "C" fn tui_debug_send_network_compose(
+    session: *mut c_void,
+    method: *const c_char,
+    url: *const c_char,
+    headers: *const c_char,
+    body: *const c_char,
+    timeout_ms: i32,
+    json_out: *mut c_char,
+    cap: usize,
+) -> c_int {
+    clear_last_error();
+
+    let method = match c_str_to_rust(method, "method") {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err);
+            return -1;
+        }
+    };
+    let url = match c_str_to_rust(url, "url") {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err);
+            return -1;
+        }
+    };
+    let headers = match c_str_to_rust(headers, "headers") {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err);
+            return -1;
+        }
+    };
+    let body = match c_str_to_rust(body, "body") {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err);
+            return -1;
+        }
+    };
+
+    let json = if session.is_null() {
+        match crate::network::send_compose_request(None, method, url, headers, body, timeout_ms) {
+            Ok(exchange) => {
+                let drain = crate::network::NetworkDrain {
+                    proxy_address: String::new(),
+                    intercept_enabled: false,
+                    exchanges: vec![exchange],
+                };
+                match serde_json::to_string(&drain) {
+                    Ok(json) => json,
+                    Err(err) => {
+                        set_last_error(err.to_string());
+                        return -1;
+                    }
+                }
+            }
+            Err(err) => {
+                set_last_error(err.to_string());
+                return -1;
+            }
+        }
+    } else if let Some(session) = session_from_ptr(session) {
+        match session.send_network_compose_json(method, url, headers, body, timeout_ms) {
+            Ok(json) => json,
+            Err(err) => {
+                set_last_error(err.to_string());
+                return -1;
+            }
+        }
+    } else {
+        return -1;
+    };
+
+    match write_json_to_buffer(&json, json_out, cap) {
+        Ok(()) => 0,
+        Err(err) => {
+            set_last_error(err);
+            -1
+        }
+    }
+}
+
+/// Return the active network capture proxy address, if any.
+///
+/// Returns `0` on success, `1` when no proxy is active, and `-1` on error.
+#[no_mangle]
+pub extern "C" fn tui_debug_network_proxy_address(
+    session: *mut c_void,
+    address_out: *mut c_char,
+    cap: usize,
+) -> c_int {
+    clear_last_error();
+
+    let Some(session) = session_from_ptr(session) else {
+        return -1;
+    };
+
+    match session.network_proxy_address() {
+        Some(address) => match write_json_to_buffer(&address, address_out, cap) {
+            Ok(()) => 0,
+            Err(err) => {
+                set_last_error(err);
+                -1
+            }
+        },
+        None => 1,
+    }
+}
+
 /// Write raw bytes to the debuggee stdin (integrated terminal PTY).
 ///
 /// Returns `0` on success and `-1` on error.

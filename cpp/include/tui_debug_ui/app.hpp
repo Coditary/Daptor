@@ -56,6 +56,7 @@ class DisassemblyPanel;
 class RuntimeSourcePanel;
 class FileTreePanel;
 class ResourcesPanel;
+class NetworkPanel;
 class TitledScrollPane;
 class StackedPane;
 class SharedWidgetHost;
@@ -125,6 +126,7 @@ class DebugApp {
     void blur_repl_input();
     bool handle_stacked_pane_rename_key(const tuinator::Event& event);
     void handle_pointer_pick(const tuinator::MouseEvent& mouse);
+    void sync_controls_hover(tuinator::Point position);
     bool handle_layout_drag_mouse(const tuinator::MouseEvent& mouse);
     [[nodiscard]] bool layout_drag_active() const;
 
@@ -163,6 +165,8 @@ class DebugApp {
     void clear_scope_value_overrides();
     std::string build_scope_variables_signature() const;
     void apply_console_json_payload(const std::string& json);
+    void apply_network_json_payload(const std::string& json);
+    void refresh_network_panel();
     void apply_snapshot_json_payload(const std::string& json);
     void cycle_focus_next();
     void apply_focus();
@@ -270,8 +274,13 @@ class DebugApp {
     bool has_active_session() const;
     bool handle_layout_resize_key(const tuinator::KeyPress& key);
     bool handle_panel_swap_key(const tuinator::KeyPress& key);
+    bool handle_tab_navigation_key(const tuinator::KeyPress& key);
     void cycle_sidebar_stack(int delta);
     void cycle_bottom_stack(int delta);
+    void cycle_active_leaf_tabs(int delta);
+    void cycle_focused_layout_leaf(int delta);
+    [[nodiscard]] LayoutNodeId find_leaf_id_for_focus() const;
+    void sync_focused_layout_leaf();
     void sync_stack_panes_to_focus();
     void ensure_layout_tree_initialized();
     void ensure_default_leaf_slots(LayoutNodeId leaf_id);
@@ -351,6 +360,7 @@ class DebugApp {
     [[nodiscard]] static bool focus_matches_panel_type(Focus focus, SidebarPanelType type);
     [[nodiscard]] static Focus focus_for_panel_type(SidebarPanelType type);
     [[nodiscard]] int dock_index_for_focus(PanelDock dock, Focus focus) const;
+    [[nodiscard]] bool is_panel_type_active(SidebarPanelType type) const;
     void sync_dock_stack_to_focus(PanelDock dock);
     [[nodiscard]] SidebarSlot* active_slot_for_focus();
     [[nodiscard]] SidebarSlot* find_memory_slot();
@@ -379,6 +389,8 @@ class DebugApp {
     void sync_file_tree_slot(SidebarSlot& slot);
     void sync_file_tree_slots();
     void sync_resources_slot(SidebarSlot& slot);
+    void sync_network_slot(SidebarSlot& slot);
+    void wire_network_panel(NetworkPanel& panel);
     void tick_process_metrics();
     void process_pending_file_tree_open();
     void sync_breakpoint_slot(SidebarSlot& slot, const std::vector<BreakpointRow>& rows);
@@ -533,6 +545,10 @@ class DebugApp {
     std::uint64_t next_slot_id_ = 1;
     std::unique_ptr<tuinator::Widget> repl_shell_;
     std::unique_ptr<tuinator::Widget> console_shell_;
+    NetworkPanel* network_panel_ = nullptr;
+    bool network_select_last_on_refresh_ = false;
+    bool compose_send_pending_ = false;
+    std::unique_ptr<tuinator::Widget> network_shell_;
     std::unique_ptr<tuinator::Widget> source_content_shell_;
     std::unique_ptr<ContextMenu> context_menu_;
     std::unique_ptr<FilePicker> file_picker_;

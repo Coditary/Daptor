@@ -25,6 +25,8 @@
 #include "tui_debug_ui/disassembly_panel.hpp"
 #include "tui_debug_ui/runtime_source_panel.hpp"
 #include "tui_debug_ui/resources_panel.hpp"
+#include "tui_debug_ui/network_mock_data.hpp"
+#include "tui_debug_ui/network_panel.hpp"
 #include "tui_debug_ui/dap_view_formatters.hpp"
 #include "tui_debug_ui/repl_panel.hpp"
 #include "tui_debug_ui/titled_scroll_pane.hpp"
@@ -703,6 +705,9 @@ class DebugChromeRoot : public tuinator::Widget {
             if (is_mouse_position_tracking_action(mouse->action) && bounds_.contains(mouse->position)) {
                 last_mouse_position_ = mouse->position;
             }
+            if (debug_app_ != nullptr && mouse->action == tuinator::MouseAction::Move) {
+                debug_app_->sync_controls_hover(mouse->position);
+            }
 
             if (is_wheel_action(mouse->action)) {
                 tuinator::MouseEvent routed = *mouse;
@@ -1192,6 +1197,7 @@ void DebugApp::build_ui() {
     auto controls = std::make_unique<ControlsBar>(dap_theme_);
     controls_bar_ = controls.get();
     controls->set_on_action([this](const std::string& op) { send_command(op.c_str()); });
+    controls->set_on_hover_changed([this]() { request_repaint(); });
 
     const auto scroll_options = dap_theme_.scroll_view_options();
     scopes_panel_ = nullptr;
@@ -1333,6 +1339,17 @@ void DebugApp::build_ui() {
     console_shell_ = console_section->release_widget();
     console_shell_->set_flex(1);
 
+    network_panel_ = nullptr;
+    auto network_panel = std::make_unique<NetworkPanel>(dap_theme_, scroll_options);
+    network_panel_ = network_panel.get();
+    network_panel_->set_workspace_root(workspace_root_);
+    wire_network_panel(*network_panel_);
+    network_shell_ = std::move(network_panel);
+    network_shell_->set_flex(1);
+    if (network_panel_ != nullptr) {
+        network_panel_->refresh_scroll_content();
+    }
+
     auto content_split = build_layout_content_widget();
 
     update_active_panel_pointers();
@@ -1352,6 +1369,7 @@ void DebugApp::build_ui() {
     set_debug_chrome_root(root.get());
 
     app_->set_root(std::move(root));
+    sync_overlay_mouse_tracking();
     sync_ui_from_model();
     sync_controls_bar();
     sync_breakpoints_list_panel();
@@ -1402,6 +1420,9 @@ void DebugApp::refresh_scroll_views(bool include_source) {
         refresh(source_scroll_view_);
     }
     refresh(console_scroll_view_);
+    if (network_panel_ != nullptr) {
+        network_panel_->refresh_scroll_content();
+    }
 }
 
 void DebugApp::maybe_start_launch() {
@@ -1475,6 +1496,13 @@ void DebugApp::handle_launch_complete() {
             model_.status_message =
                 mode_ == SessionMode::Mock ? "Mock session ready" : "Connected";
         }
+        if (mode_ == SessionMode::Rust && !model_.network_capture_live) {
+            model_.network_show_mock_fallback = true;
+            if (model_.status_message == "Connected") {
+                model_.status_message = "Connected — network capture unavailable, showing demo traffic";
+            }
+        }
+        refresh_network_panel();
     } else {
         model_.connection_state = ConnectionState::Failed;
         model_.status_message = launch_error_.empty() ? "Failed to launch debug session" : launch_error_;
@@ -1575,6 +1603,99 @@ void DebugApp::apply_snapshot_json_payload(const std::string& json) {
         normalize_breakpoint_path_keys();
         flush_breakpoints_to_session();
         breakpoints_flushed_after_launch_ = true;
+    }
+}
+
+void DebugApp::apply_network_json_payload(const std::string& json) {
+    if (compose_send_pending_) {
+        NetworkExchange compose_result;
+        if (apply_compose_send_json(compose_result, json)) {
+            compose_send_pending_ = false;
+            model_.network_session.exchanges.push_back(compose_result);
+            model_.network_capture_live = true;
+            model_.network_show_mock_fallback = false;
+            if (network_panel_ != nullptr) {
+                network_panel_->set_compose_pending(false);
+                network_panel_->set_compose_result(compose_result);
+                network_panel_->set_view(NetworkPanelView::Traffic);
+            }
+            if (compose_result.state == NetworkExchangeState::Dropped) {
+                model_.status_message = "Request failed: " + compose_result.response_body;
+            } else {
+                model_.status_message = "Sent " + compose_result.method + " " + compose_result.path;
+                if (compose_result.status_code > 0) {
+                    model_.status_message += " -> " + std::to_string(compose_result.status_code);
+                }
+            }
+            sync_status_bar();
+            refresh_network_panel();
+            if (network_panel_ != nullptr) {
+                network_panel_->select_last_exchange();
+            }
+            request_repaint();
+            return;
+        }
+        compose_send_pending_ = false;
+        if (network_panel_ != nullptr) {
+            network_panel_->set_compose_pending(false);
+        }
+    }
+
+    const bool changed = apply_network_json(model_, json);
+    if (!changed) {
+        return;
+    }
+    refresh_network_panel();
+    request_repaint();
+}
+
+void DebugApp::refresh_network_panel() {
+    if (network_panel_ == nullptr) {
+        return;
+    }
+
+    auto live_traffic_session = [](const NetworkMockSession& session) {
+        NetworkMockSession filtered = session;
+        std::erase_if(filtered.exchanges, [](const NetworkExchange& exchange) {
+            return exchange.origin == NetworkExchangeOrigin::Demo;
+        });
+        return filtered;
+    };
+
+    const char* force_mock = std::getenv("TUI_DEBUG_NETWORK_MOCK");
+    if ((mode_ == SessionMode::Mock ||
+         (force_mock != nullptr && force_mock[0] != '\0' && std::strcmp(force_mock, "0") != 0)) &&
+        !model_.network_capture_live) {
+        network_panel_->set_session(make_demo_network_session());
+        if (network_select_last_on_refresh_) {
+            network_panel_->select_last_exchange();
+            network_select_last_on_refresh_ = false;
+        }
+        return;
+    }
+
+    if (model_.network_capture_live && !model_.network_show_mock_fallback) {
+        network_panel_->set_session(live_traffic_session(model_.network_session));
+        if (network_select_last_on_refresh_) {
+            network_panel_->select_last_exchange();
+            network_select_last_on_refresh_ = false;
+        }
+        return;
+    }
+
+    if (model_.network_show_mock_fallback) {
+        network_panel_->set_session(make_demo_network_session());
+        if (network_select_last_on_refresh_) {
+            network_panel_->select_last_exchange();
+            network_select_last_on_refresh_ = false;
+        }
+        return;
+    }
+
+    network_panel_->set_session(live_traffic_session(model_.network_session));
+    if (network_select_last_on_refresh_) {
+        network_panel_->select_last_exchange();
+        network_select_last_on_refresh_ = false;
     }
 }
 
@@ -1724,6 +1845,20 @@ void DebugApp::handle_session_event(const SessionIoEvent& event) {
     case SessionIoEventKind::ConsoleJson:
         if (event.success) {
             apply_console_json_payload(event.payload);
+        }
+        break;
+    case SessionIoEventKind::NetworkJson:
+        if (event.success) {
+            apply_network_json_payload(event.payload);
+        } else {
+            compose_send_pending_ = false;
+            if (network_panel_ != nullptr) {
+                network_panel_->set_compose_pending(false);
+            }
+            if (!event.payload.empty()) {
+                model_.status_message = "Request failed: " + event.payload;
+                sync_status_bar();
+            }
         }
         break;
     case SessionIoEventKind::ScopeVariablesReady:
@@ -2011,6 +2146,9 @@ void DebugApp::handle_session_event(const SessionIoEvent& event) {
 void DebugApp::poll_session() {
     ensure_ui_built();
     tick_process_metrics();
+    if (controls_bar_ != nullptr) {
+        controls_bar_->tick_hover();
+    }
     sync_overlay_mouse_tracking();
     process_pending_file_tree_open();
 
@@ -2571,6 +2709,44 @@ void DebugApp::sync_resources_slot(SidebarSlot& slot) {
     slot.resources->set_metrics(process_metrics_sampler_.latest(), process_metrics_sampler_);
 }
 
+void DebugApp::sync_network_slot(SidebarSlot& slot) {
+    static_cast<void>(slot);
+    refresh_network_panel();
+}
+
+void DebugApp::wire_network_panel(NetworkPanel& panel) {
+    panel.set_on_message([this](const std::string& message) {
+        model_.status_message = message;
+        sync_status_bar();
+    });
+    panel.set_on_compose_send([this](const NetworkComposeTemplate& item) {
+        if (session_io_ == nullptr) {
+            model_.status_message = "No active session for Compose send";
+            sync_status_bar();
+            return false;
+        }
+        compose_send_pending_ = true;
+        network_panel_->set_compose_pending(true);
+        session_io_->post_network_compose_send(item.method, item.url, item.headers, item.body, item.timeout_ms);
+        model_.status_message = "Waiting for " + item.method + " " + item.url + " (" +
+                                std::to_string(item.timeout_ms / 1000) + "s timeout)…";
+        sync_status_bar();
+        return true;
+    });
+    panel.set_on_action([this](const std::string& action, const NetworkExchange& exchange) {
+        if (action == "forward") {
+            model_.status_message = "Forwarded " + exchange.method + " " + exchange.path;
+        } else if (action == "drop") {
+            model_.status_message = "Dropped " + exchange.method + " " + exchange.path;
+        } else if (action == "edit") {
+            model_.status_message = "Edit request: " + exchange.method + " " + exchange.path + " (mock)";
+        } else if (action == "replay") {
+            model_.status_message = "Replay " + exchange.method + " " + exchange.path + " (mock)";
+        }
+        sync_status_bar();
+    });
+}
+
 void DebugApp::tick_process_metrics() {
     if (!launch_complete_handled_) {
         return;
@@ -3120,6 +3296,15 @@ void DebugApp::maybe_apply_reverse_continue_hint() {
         "Reverse continue unavailable on this system (LLDB trace). Step Over/Into/Out still work.";
 }
 
+void DebugApp::sync_controls_hover(tuinator::Point position) {
+    if (controls_bar_ == nullptr) {
+        return;
+    }
+    if (!controls_bar_->bounds().contains(position)) {
+        controls_bar_->clear_hover();
+    }
+}
+
 void DebugApp::sync_controls_bar() {
     if (controls_bar_ == nullptr) {
         return;
@@ -3372,6 +3557,7 @@ int& DebugApp::leaf_stack_index(LayoutNodeId leaf_id) {
 
 std::unique_ptr<StackedPane> DebugApp::build_stacked_pane_for_leaf(LayoutNodeId leaf_id) {
     const auto scroll_options = dap_theme_.scroll_view_options();
+    ensure_default_leaf_slots(leaf_id);
     std::vector<SidebarSlot>& slots = leaf_slots(leaf_id);
 
     std::vector<StackedPane::Entry> entries;
@@ -3422,6 +3608,11 @@ std::unique_ptr<StackedPane> DebugApp::build_stacked_pane_for_leaf(LayoutNodeId 
         }
         if (model_.focus == Focus::Repl) {
             repl_input_focused_ = false;
+        }
+        if (SidebarSlot* slot = leaf_slot_at(leaf_id, index);
+            slot != nullptr && slot->config.type == SidebarPanelType::Network && network_panel_ != nullptr) {
+            network_panel_->refresh_scroll_content();
+            network_panel_->mark_dirty();
         }
         update_active_panel_pointers();
         apply_focus();
@@ -3558,8 +3749,9 @@ void DebugApp::reset_layout_slot_widgets() {
             slot.disassembly.reset();
             slot.runtime_source.reset();
             slot.file_tree.reset();
+            slot.resources.reset();
             if (slot.config.type == SidebarPanelType::Source || slot.config.type == SidebarPanelType::Repl ||
-                slot.config.type == SidebarPanelType::Console) {
+                slot.config.type == SidebarPanelType::Console || slot.config.type == SidebarPanelType::Network) {
                 slot.shared_host.reset();
             }
         }
@@ -5262,6 +5454,11 @@ void DebugApp::ensure_sidebar_slot_panels(SidebarSlot& slot, const tuinator::Scr
             sync_resources_slot(slot);
         }
         break;
+    case SidebarPanelType::Network:
+        if (network_shell_ != nullptr && slot.shared_host == nullptr) {
+            slot.shared_host = std::make_unique<SharedWidgetHost>(network_shell_.get());
+        }
+        break;
     case SidebarPanelType::Repl:
         if (repl_shell_ != nullptr && slot.shared_host == nullptr) {
             slot.shared_host = std::make_unique<SharedWidgetHost>(repl_shell_.get());
@@ -5323,6 +5520,7 @@ std::unique_ptr<tuinator::Widget> DebugApp::release_sidebar_slot_widget(SidebarS
             return slot.resources->release_widget();
         }
         break;
+    case SidebarPanelType::Network:
     case SidebarPanelType::Source:
     case SidebarPanelType::Repl:
     case SidebarPanelType::Console:
@@ -5363,6 +5561,8 @@ bool DebugApp::focus_matches_panel_type(Focus focus, SidebarPanelType type) {
         return focus == Focus::FileTree;
     case SidebarPanelType::Resources:
         return focus == Focus::Resources;
+    case SidebarPanelType::Network:
+        return focus == Focus::Network;
     case SidebarPanelType::Source:
         return focus == Focus::Source;
     case SidebarPanelType::Repl:
@@ -5394,6 +5594,8 @@ Focus DebugApp::focus_for_panel_type(SidebarPanelType type) {
         return Focus::FileTree;
     case SidebarPanelType::Resources:
         return Focus::Resources;
+    case SidebarPanelType::Network:
+        return Focus::Network;
     case SidebarPanelType::Source:
         return Focus::Source;
     case SidebarPanelType::Repl:
@@ -5417,6 +5619,22 @@ int DebugApp::dock_index_for_focus(PanelDock dock, Focus focus) const {
         }
     }
     return -1;
+}
+
+bool DebugApp::is_panel_type_active(SidebarPanelType type) const {
+    for (LayoutNodeId leaf_id : layout_tree_.leaf_ids()) {
+        const StackedPane* stack = layout_stack(leaf_id);
+        if (stack == nullptr) {
+            continue;
+        }
+        const std::vector<SidebarSlot>& slots = layout_tree_.node(leaf_id).leaf.slots;
+        const int index = stack->active_index();
+        if (index >= 0 && index < static_cast<int>(slots.size()) &&
+            slots[static_cast<std::size_t>(index)].config.type == type) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void DebugApp::sync_dock_stack_to_focus(PanelDock dock) {
@@ -5836,6 +6054,10 @@ void DebugApp::show_add_output_menu(LayoutNodeId leaf_id, tuinator::Point anchor
 
     std::vector<ContextMenu::Item> items;
     items.push_back(ContextMenu::Item{
+        "Network",
+        [this, leaf_id]() { add_panel_to_leaf(leaf_id, SidebarPanelType::Network); },
+    });
+    items.push_back(ContextMenu::Item{
         "REPL",
         [this, leaf_id]() { add_panel_to_leaf(leaf_id, SidebarPanelType::Repl); },
     });
@@ -5974,6 +6196,9 @@ void DebugApp::add_panel_to_leaf(LayoutNodeId leaf_id, SidebarPanelType type, st
     if (new_slot.config.type == SidebarPanelType::Resources) {
         sync_resources_slot(new_slot);
     }
+    if (new_slot.config.type == SidebarPanelType::Network) {
+        sync_network_slot(new_slot);
+    }
 
     auto widget = release_sidebar_slot_widget(new_slot);
     widget->set_flex(1);
@@ -6002,7 +6227,8 @@ void DebugApp::add_panel_to_dock(PanelDock dock, SidebarPanelType type, std::opt
 }
 
 void DebugApp::init_default_bottom_slots(std::vector<SidebarSlot>& slots) {
-    for (SidebarPanelType type : {SidebarPanelType::Repl, SidebarPanelType::Console}) {
+    for (SidebarPanelType type :
+         {SidebarPanelType::Repl, SidebarPanelType::Console, SidebarPanelType::Network}) {
         PanelSlotConfig config;
         config.type = type;
         config.id = next_slot_id_++;
@@ -6118,6 +6344,117 @@ void DebugApp::cycle_bottom_stack(int delta) {
     }
 }
 
+LayoutNodeId DebugApp::find_leaf_id_for_focus() const {
+    for (LayoutNodeId leaf_id : layout_tree_.leaf_ids()) {
+        const std::vector<SidebarSlot>& slots = layout_tree_.node(leaf_id).leaf.slots;
+        for (const SidebarSlot& slot : slots) {
+            if (focus_matches_panel_type(model_.focus, slot.config.type)) {
+                return leaf_id;
+            }
+        }
+    }
+    if (model_.focus == Focus::Source) {
+        if (const std::optional<LayoutNodeId> center = layout_tree_.find_leaf_for_dock(PanelDock::Center);
+            center.has_value()) {
+            return *center;
+        }
+    }
+    if (focused_layout_leaf_ != 0 && layout_tree_.has_node(focused_layout_leaf_)) {
+        return focused_layout_leaf_;
+    }
+    const std::vector<LayoutNodeId> leaves = layout_tree_.leaf_ids();
+    return leaves.empty() ? 0 : leaves.front();
+}
+
+void DebugApp::sync_focused_layout_leaf() {
+    const LayoutNodeId leaf_id = find_leaf_id_for_focus();
+    if (leaf_id != 0) {
+        focused_layout_leaf_ = leaf_id;
+    }
+}
+
+void DebugApp::cycle_active_leaf_tabs(int delta) {
+    if (delta == 0) {
+        return;
+    }
+    sync_focused_layout_leaf();
+    if (focused_layout_leaf_ == 0) {
+        return;
+    }
+    StackedPane* stack = layout_stack(focused_layout_leaf_);
+    if (stack == nullptr || stack->count() <= 1) {
+        return;
+    }
+    stack->cycle(delta);
+    model_.status_message = "Tab: " + stack->active_label();
+    sync_status_bar();
+    request_repaint();
+}
+
+void DebugApp::cycle_focused_layout_leaf(int delta) {
+    const std::vector<LayoutNodeId> leaves = layout_tree_.leaf_ids();
+    if (leaves.empty() || delta == 0) {
+        return;
+    }
+    if (leaves.size() == 1) {
+        focused_layout_leaf_ = leaves.front();
+        return;
+    }
+
+    sync_focused_layout_leaf();
+    auto it = std::find(leaves.begin(), leaves.end(), focused_layout_leaf_);
+    const int current = it == leaves.end() ? 0 : static_cast<int>(std::distance(leaves.begin(), it));
+    const int count = static_cast<int>(leaves.size());
+    const int next = ((current + delta) % count + count) % count;
+    focused_layout_leaf_ = leaves[static_cast<std::size_t>(next)];
+
+    StackedPane* stack = layout_stack(focused_layout_leaf_);
+    if (stack == nullptr) {
+        return;
+    }
+
+    const int active = stack->active_index();
+    if (SidebarSlot* slot = leaf_slot_at(focused_layout_leaf_, active); slot != nullptr) {
+        model_.focus = focus_for_panel_type(slot->config.type);
+    } else if (const std::optional<PanelDock> dock = layout_tree_.node(focused_layout_leaf_).leaf.dock) {
+        if (*dock == PanelDock::Center) {
+            model_.focus = Focus::Source;
+        } else if (*dock == PanelDock::Bottom) {
+            model_.focus = Focus::Repl;
+        }
+    }
+
+    apply_focus();
+    model_.status_message = "Window " + std::to_string(next + 1) + "/" + std::to_string(count) + ": " +
+                            (stack != nullptr ? stack->active_label() : "");
+    sync_status_bar();
+    request_repaint();
+}
+
+bool DebugApp::handle_tab_navigation_key(const tuinator::KeyPress& key) {
+    if (key.key != tuinator::Key::Tab) {
+        return false;
+    }
+
+    if (is_watch_input_focused() || is_repl_input_focused() || is_breakpoint_input_focused() ||
+        is_scope_input_focused() || is_memory_input_focused() ||
+        (network_panel_ != nullptr && network_panel_->is_compose_input_focused())) {
+        return false;
+    }
+    if (model_.focus == Focus::Memory && memory_toolbar_focused_) {
+        return false;
+    }
+
+    const int delta = key.shift ? -1 : 1;
+    if (key.ctrl) {
+        cycle_focused_layout_leaf(delta);
+        return true;
+    }
+
+    cycle_active_leaf_tabs(delta);
+    return true;
+}
+
 bool DebugApp::handle_panel_swap_key(const tuinator::KeyPress& key) {
     if (key.ctrl || key.alt) {
         return false;
@@ -6140,7 +6477,7 @@ bool DebugApp::handle_panel_swap_key(const tuinator::KeyPress& key) {
         cycle_sidebar_stack(delta);
         return true;
     }
-    if (model_.focus == Focus::Repl || model_.focus == Focus::Console) {
+    if (model_.focus == Focus::Repl || model_.focus == Focus::Console || model_.focus == Focus::Network) {
         cycle_bottom_stack(delta);
         return true;
     }
@@ -6306,7 +6643,42 @@ bool DebugApp::handle_global_key(const tuinator::KeyPress& key) {
         return true;
     }
 
+    if (!key.ctrl && !key.alt) {
+        if (key.key == tuinator::Key::F9) {
+            if (source_panel_ != nullptr && !effective_source_path().empty() && source_panel_->cursor_line() > 0) {
+                toggle_breakpoint();
+                return true;
+            }
+        } else if (has_active_session()) {
+            const char* op = nullptr;
+            switch (key.key) {
+            case tuinator::Key::F5:
+                op = "continue";
+                break;
+            case tuinator::Key::F10:
+                op = "step_over";
+                break;
+            case tuinator::Key::F11:
+                op = key.shift ? "step_out" : "step_into";
+                break;
+            case tuinator::Key::F12:
+                op = "step_out";
+                break;
+            default:
+                break;
+            }
+            if (op != nullptr) {
+                send_command(op);
+                return true;
+            }
+        }
+    }
+
     if (handle_panel_swap_key(key)) {
+        return true;
+    }
+
+    if (handle_tab_navigation_key(key)) {
         return true;
     }
 
@@ -6322,7 +6694,8 @@ bool DebugApp::handle_global_key(const tuinator::KeyPress& key) {
     }
 
     if (is_watch_input_focused() || is_repl_input_focused() || is_breakpoint_input_focused() ||
-        is_scope_input_focused() || is_memory_input_focused()) {
+        is_scope_input_focused() || is_memory_input_focused() ||
+        (network_panel_ != nullptr && network_panel_->is_compose_input_focused())) {
         if (key.alt && handle_layout_resize_key(key)) {
             return true;
         }
@@ -6331,6 +6704,27 @@ bool DebugApp::handle_global_key(const tuinator::KeyPress& key) {
 
     if (handle_layout_resize_key(key)) {
         return true;
+    }
+
+    if (model_.focus == Focus::Network && !key.ctrl && !key.alt && network_panel_ != nullptr) {
+        const char action = static_cast<char>(std::tolower(static_cast<unsigned char>(key.character)));
+        if (action == 'v') {
+            network_panel_->cycle_view();
+            model_.status_message = network_panel_->active_view() == NetworkPanelView::Compose
+                                        ? "Network: Compose tab"
+                                        : "Network: Traffic tab";
+            sync_status_bar();
+            apply_focus();
+            request_repaint();
+            return true;
+        }
+        if (!network_panel_->is_compose_input_focused() &&
+            (action == 'f' || action == 'd' || action == 'e' || action == 'r' || action == 's' || action == 'n')) {
+            if (network_panel_->perform_action(action)) {
+                request_repaint();
+            }
+            return true;
+        }
     }
 
     if (key.ctrl || key.alt) {
@@ -6395,25 +6789,14 @@ bool DebugApp::handle_global_key(const tuinator::KeyPress& key) {
         return true;
     }
 
-    if (key.key == tuinator::Key::Tab) {
-        if (model_.focus == Focus::Memory && memory_toolbar_focused_) {
-            return false;
-        }
-        if (model_.focus == Focus::Memory && !memory_toolbar_focused_) {
-            if (SidebarSlot* slot = memory_slot_for_focus(); slot != nullptr && slot->memory != nullptr) {
-                activate_memory_toolbar(slot->config.id);
-                return true;
-            }
-        }
-        cycle_focus_next();
-        return true;
-    }
-
     if (key.character == 'r' || key.character == 'R') {
         model_.focus = Focus::Repl;
-        dock_stack_index(PanelDock::Bottom) = 0;
-        if (StackedPane* bottom_stack = dock_stack(PanelDock::Bottom); bottom_stack != nullptr) {
-            bottom_stack->set_active_index(0);
+        const int repl_index = dock_index_for_focus(PanelDock::Bottom, Focus::Repl);
+        if (repl_index >= 0) {
+            dock_stack_index(PanelDock::Bottom) = repl_index;
+            if (StackedPane* bottom_stack = dock_stack(PanelDock::Bottom); bottom_stack != nullptr) {
+                bottom_stack->set_active_index(repl_index);
+            }
         }
         repl_input_focused_ = true;
         apply_focus();
@@ -6961,6 +7344,9 @@ void DebugApp::cycle_focus_next() {
         model_.focus = Focus::Resources;
         break;
     case Focus::Resources:
+        model_.focus = Focus::Network;
+        break;
+    case Focus::Network:
         model_.focus = Focus::Repl;
         repl_input_focused_ = true;
         break;
@@ -6978,6 +7364,7 @@ void DebugApp::cycle_focus_next() {
 
 void DebugApp::apply_focus() {
     sync_stack_panes_to_focus();
+    sync_focused_layout_leaf();
 
     if (model_.focus != Focus::Watches) {
         watch_input_focused_ = false;
@@ -7059,6 +7446,9 @@ void DebugApp::apply_focus() {
     if (console_panel_ != nullptr) {
         widgets.push_back(console_panel_);
     }
+    if (network_panel_ != nullptr) {
+        network_panel_->collect_focusable(widgets);
+    }
 
     for (tuinator::Widget* widget : widgets) {
         widget->set_focused(false);
@@ -7114,6 +7504,11 @@ void DebugApp::apply_focus() {
     case Focus::FileTree:
         if (SidebarSlot* slot = active_slot_for_focus(); slot != nullptr && slot->file_tree != nullptr) {
             target = slot->file_tree->list_widget();
+        }
+        break;
+    case Focus::Network:
+        if (network_panel_ != nullptr) {
+            target = network_panel_->focus_widget();
         }
         break;
     case Focus::Repl:
@@ -7213,22 +7608,35 @@ void DebugApp::sync_focus_from_ui() {
                 slot.file_tree->list_widget()->is_focused()) {
                 detected = Focus::FileTree;
                 panel_list_focused = true;
+                return;
+            }
+            if (network_panel_ != nullptr && is_panel_type_active(SidebarPanelType::Network) &&
+                network_panel_->list_widget() != nullptr && network_panel_->list_widget()->is_focused()) {
+                detected = Focus::Network;
+                panel_list_focused = true;
+                return;
+            }
+            if (network_panel_ != nullptr && is_panel_type_active(SidebarPanelType::Network) &&
+                network_panel_->is_compose_input_focused()) {
+                detected = Focus::Network;
+                panel_list_focused = true;
             }
         });
         if (!panel_list_focused) {
-            if (repl_panel_ != nullptr && repl_panel_->input_widget() != nullptr &&
-                       repl_panel_->input_widget()->is_focused()) {
+            if (repl_panel_ != nullptr && is_panel_type_active(SidebarPanelType::Repl) &&
+                repl_panel_->input_widget() != nullptr && repl_panel_->input_widget()->is_focused()) {
                 detected = Focus::Repl;
                 repl_input_focused_ = repl_panel_->input_active();
-            } else if (repl_panel_ != nullptr && repl_panel_->shell_widget() != nullptr &&
-                       repl_panel_->shell_widget()->is_focused()) {
+            } else if (repl_panel_ != nullptr && is_panel_type_active(SidebarPanelType::Repl) &&
+                       repl_panel_->shell_widget() != nullptr && repl_panel_->shell_widget()->is_focused()) {
                 detected = Focus::Repl;
                 repl_input_focused_ = repl_panel_->input_active();
-            } else if (repl_panel_ != nullptr && repl_panel_->history_widget() != nullptr &&
-                       repl_panel_->history_widget()->is_focused()) {
+            } else if (repl_panel_ != nullptr && is_panel_type_active(SidebarPanelType::Repl) &&
+                       repl_panel_->history_widget() != nullptr && repl_panel_->history_widget()->is_focused()) {
                 detected = Focus::Repl;
                 repl_input_focused_ = false;
-            } else if (console_panel_ != nullptr && console_panel_->is_focused()) {
+            } else if (console_panel_ != nullptr && is_panel_type_active(SidebarPanelType::Console) &&
+                       console_panel_->is_focused()) {
                 detected = Focus::Console;
             } else if (source_panel_ != nullptr && source_panel_->is_focused()) {
                 detected = Focus::Source;
@@ -9554,7 +9962,9 @@ bool DebugApp::overlay_intercepts_events() const {
 }
 
 void DebugApp::sync_overlay_mouse_tracking() {
-    const bool want = overlay_intercepts_events();
+    // xterm mode 1003 + Tuinator pointer_hover_tracking: required for toolbar tooltips,
+    // context-menu hover, and other pointer-move UI without holding a mouse button.
+    constexpr bool want = true;
     if (want == overlay_hover_tracking_active_) {
         return;
     }
@@ -9620,6 +10030,9 @@ bool DebugApp::handle_overlay_event(const tuinator::Event& event) {
 }
 
 void DebugApp::paint_overlay(tuinator::PaintContext& ctx) const {
+    if (controls_bar_ != nullptr) {
+        controls_bar_->paint_tooltip(ctx, overlay_clip_bounds());
+    }
     paint_layout_drag_overlay(ctx);
     paint_layout_menu_preview(ctx);
     if (file_picker_ != nullptr && file_picker_->is_open()) {

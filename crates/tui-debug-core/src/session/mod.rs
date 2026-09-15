@@ -15,6 +15,7 @@ use crate::terminal::{DebuggeeIo, DebuggeeTerminal, LldbStdioChannels, parse_run
 use std::sync::{Arc, Mutex};
 pub use crate::dap::protocol::{GotoTarget, StepInTarget};
 use crate::dap::{DapTransport, spawn_debugpy_adapter, spawn_lldb_dap_adapter};
+use crate::network::NetworkCapture;
 
 mod rr_session;
 pub use rr_session::RrDebugSession;
@@ -406,6 +407,33 @@ pub struct DebugSession {
     debuggee_io: Arc<Mutex<Option<DebuggeeIo>>>,
     /// Tracked debuggee OS PIDs from DAP `process` events (multiple for subprocesses).
     debug_process_ids: Vec<u32>,
+    network_capture: Option<NetworkCapture>,
+}
+
+fn start_network_capture() -> Option<NetworkCapture> {
+    match NetworkCapture::start() {
+        Ok(capture) => {
+            info!("network capture proxy listening on {}", capture.proxy_address());
+            Some(capture)
+        }
+        Err(error) => {
+            warn!("network capture unavailable: {error:#}");
+            None
+        }
+    }
+}
+
+fn inject_network_proxy_env(launch_args: &mut Value, capture: &NetworkCapture) {
+    let proxy = format!("http://{}", capture.proxy_address());
+    let ca = capture.ca_cert_path().to_string_lossy();
+    launch_args["env"] = json!({
+        "HTTP_PROXY": proxy,
+        "HTTPS_PROXY": proxy,
+        "http_proxy": proxy,
+        "https_proxy": proxy,
+        "SSL_CERT_FILE": ca,
+        "REQUESTS_CA_BUNDLE": ca,
+    });
 }
 
 impl DebugSession {
@@ -450,6 +478,7 @@ impl DebugSession {
             last_breakpoint_requests: HashMap::new(),
             debuggee_io: Arc::new(Mutex::new(None)),
             debug_process_ids: Vec::new(),
+            network_capture: start_network_capture(),
         };
 
         session.initialize_and_launch()?;
@@ -497,6 +526,7 @@ impl DebugSession {
             last_breakpoint_requests: HashMap::new(),
             debuggee_io: Arc::new(Mutex::new(None)),
             debug_process_ids: Vec::new(),
+            network_capture: start_network_capture(),
         };
 
         session.initialize_and_launch()?;
@@ -605,6 +635,10 @@ impl DebugSession {
 
         if !self.program_args.is_empty() {
             launch_args["args"] = json!(self.program_args);
+        }
+
+        if let Some(capture) = &self.network_capture {
+            inject_network_proxy_env(&mut launch_args, capture);
         }
 
         match self.adapter {
@@ -2094,6 +2128,41 @@ impl DebugSession {
             return Ok(());
         }
         self.shutdown()
+    }
+
+    pub fn network_proxy_address(&self) -> Option<String> {
+        self.network_capture
+            .as_ref()
+            .map(|capture| capture.proxy_address().to_string())
+    }
+
+    pub fn drain_network_json(&mut self) -> Result<String> {
+        let Some(capture) = &self.network_capture else {
+            return Ok(String::new());
+        };
+        let drain = capture.drain();
+        if drain.exchanges.is_empty() {
+            return Ok(String::new());
+        }
+        serde_json::to_string(&drain).context("failed to serialize network capture drain")
+    }
+
+    pub fn send_network_compose_json(
+        &mut self,
+        method: &str,
+        url: &str,
+        headers: &str,
+        body: &str,
+        timeout_ms: i32,
+    ) -> Result<String> {
+        let exchange =
+            crate::network::send_compose_request(None, method, url, headers, body, timeout_ms)?;
+        let drain = crate::network::NetworkDrain {
+            proxy_address: String::new(),
+            intercept_enabled: false,
+            exchanges: vec![exchange],
+        };
+        serde_json::to_string(&drain).context("failed to serialize compose network result")
     }
 
     /// Buffered program stdout/stderr from DAP output events and the debuggee PTY.

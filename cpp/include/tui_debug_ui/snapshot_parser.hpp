@@ -25,6 +25,12 @@ bool apply_poll_json(DebugUiModel& model, const std::string& json);
 /// Returns `true` when parsed successfully (including an empty array).
 bool apply_console_json(DebugUiModel& model, const std::string& json);
 
+/// Merge captured HTTP exchanges from the network proxy drain payload.
+bool apply_network_json(DebugUiModel& model, const std::string& json);
+
+/// Apply a Compose-tab send result. Returns true when a compose exchange was parsed.
+bool apply_compose_send_json(NetworkExchange& exchange_out, const std::string& json);
+
 /// Parse a DAP variables array: `[{"name":"x","value":"1","variablesReference":0}]`.
 std::vector<VariableInfo> parse_variables_json(const std::string& json);
 

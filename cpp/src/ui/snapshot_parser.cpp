@@ -540,6 +540,108 @@ bool apply_poll_json(DebugUiModel& model, const std::string& json) {
 #endif
 }
 
+NetworkExchangeState parse_network_exchange_state(const std::string& state) {
+    if (state == "pending") {
+        return NetworkExchangeState::Pending;
+    }
+    if (state == "dropped") {
+        return NetworkExchangeState::Dropped;
+    }
+    return NetworkExchangeState::Completed;
+}
+
+bool apply_compose_send_json(NetworkExchange& exchange_out, const std::string& json) {
+#ifdef TUI_DEBUG_UI_HAS_NLOHMANN_JSON
+    try {
+        const Json root = Json::parse(json);
+        if (!root.is_object() || !root.contains("exchanges") || !root["exchanges"].is_array() ||
+            root["exchanges"].empty()) {
+            return false;
+        }
+
+        const Json& entry = root["exchanges"].front();
+        if (!entry.is_object()) {
+            return false;
+        }
+
+        NetworkExchange exchange{};
+        exchange.id = entry.value("id", std::string{});
+        exchange.state = parse_network_exchange_state(entry.value("state", std::string{"completed"}));
+        exchange.origin = network_exchange_origin_from_string(entry.value("origin", std::string{"compose"}));
+        exchange.method = entry.value("method", std::string{});
+        exchange.status_code = entry.value("status_code", 0);
+        exchange.duration_ms = entry.value("duration_ms", 0);
+        exchange.path = entry.value("path", std::string{});
+        exchange.summary = entry.value("summary", std::string{});
+        exchange.request_headers = entry.value("request_headers", std::string{});
+        exchange.request_body = entry.value("request_body", std::string{});
+        exchange.response_headers = entry.value("response_headers", std::string{});
+        exchange.response_body = entry.value("response_body", std::string{});
+        exchange_out = std::move(exchange);
+        return true;
+    } catch (const Json::exception&) {
+        return false;
+    }
+#else
+    (void)exchange_out;
+    (void)json;
+    return false;
+#endif
+}
+
+bool apply_network_json(DebugUiModel& model, const std::string& json) {
+#ifdef TUI_DEBUG_UI_HAS_NLOHMANN_JSON
+    try {
+        const Json root = Json::parse(json);
+        if (!root.is_object()) {
+            return false;
+        }
+
+        if (root.contains("proxy_address")) {
+            model.network_session.proxy_address = root.value("proxy_address", std::string{});
+        }
+        if (root.contains("intercept_enabled")) {
+            model.network_session.intercept_enabled = root.value("intercept_enabled", false);
+        }
+
+        if (root.contains("exchanges") && root["exchanges"].is_array()) {
+            for (const Json& entry : root["exchanges"]) {
+                NetworkExchange exchange{};
+                exchange.id = entry.value("id", std::string{});
+                exchange.state = parse_network_exchange_state(entry.value("state", std::string{"completed"}));
+                exchange.origin =
+                    network_exchange_origin_from_string(entry.value("origin", std::string{"captured"}));
+                if (exchange.origin == NetworkExchangeOrigin::Compose) {
+                    continue;
+                }
+                exchange.method = entry.value("method", std::string{});
+                exchange.status_code = entry.value("status_code", 0);
+                exchange.duration_ms = entry.value("duration_ms", 0);
+                exchange.path = entry.value("path", std::string{});
+                exchange.summary = entry.value("summary", std::string{});
+                exchange.request_headers = entry.value("request_headers", std::string{});
+                exchange.request_body = entry.value("request_body", std::string{});
+                exchange.response_headers = entry.value("response_headers", std::string{});
+                exchange.response_body = entry.value("response_body", std::string{});
+                model.network_session.exchanges.push_back(std::move(exchange));
+            }
+        }
+
+        if (!model.network_session.proxy_address.empty() || !model.network_session.exchanges.empty()) {
+            model.network_capture_live = true;
+            model.network_show_mock_fallback = false;
+        }
+        return true;
+    } catch (const Json::exception&) {
+        return false;
+    }
+#else
+    (void)model;
+    (void)json;
+    return false;
+#endif
+}
+
 bool apply_console_json(DebugUiModel& model, const std::string& json) {
 #ifdef TUI_DEBUG_UI_HAS_NLOHMANN_JSON
     try {

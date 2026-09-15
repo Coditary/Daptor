@@ -53,6 +53,7 @@ add_executable(tui-debug-ui
     src/ui/shared_widget_host.cpp
     src/ui/background_widget.cpp
     src/ui/dap_ui_theme.cpp
+    src/ui/clipboard.cpp
     src/ui/controls_bar.cpp
     src/ui/navigable_list_view.cpp
     src/ui/titled_scroll_pane.cpp
@@ -61,6 +62,9 @@ add_executable(tui-debug-ui
     src/ui/file_tree_panel.cpp
     src/ui/resources_panel.cpp
     src/ui/process_metrics.cpp
+    src/ui/network_panel.cpp
+    src/ui/network_mock_data.cpp
+    src/ui/compose_templates.cpp
 )
 
 target_include_directories(tui-debug-ui

@@ -22,6 +22,7 @@ enum class SessionIoEventKind {
     SnapshotJson,
     PollJson,
     ConsoleJson,
+    NetworkJson,
     ScopeVariablesReady,
     VariableChildrenReady,
     SourceReady,
@@ -103,6 +104,8 @@ class SessionIoThread {
                            std::uint64_t slot_id);
     void request_step_in_targets(std::int64_t frame_id);
     void request_goto_targets(const std::string& path, int line, int column);
+    void post_network_compose_send(const std::string& method, const std::string& url, const std::string& headers,
+                                   const std::string& body, int timeout_ms);
 
     bool try_pop_event(SessionIoEvent& out);
     [[nodiscard]] bool has_pending_execution_command() const;
@@ -136,6 +139,7 @@ class SessionIoThread {
     void process_write_memory();
     void process_step_in_targets_fetch();
     void process_goto_targets_fetch();
+    void process_network_compose_send();
     void process_terminal_input();
     bool process_pending_set_variable();
     void maybe_begin_launch();
@@ -236,6 +240,14 @@ class SessionIoThread {
         int column = -1;
     };
     std::optional<GotoTargetsRequest> goto_targets_request_;
+    struct NetworkComposeSendRequest {
+        std::string method;
+        std::string url;
+        std::string headers;
+        std::string body;
+        int timeout_ms = 30000;
+    };
+    std::optional<NetworkComposeSendRequest> network_compose_send_request_;
     std::string pending_terminal_input_;
 
     std::mutex events_mutex_;

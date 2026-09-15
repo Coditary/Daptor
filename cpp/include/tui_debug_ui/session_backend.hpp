@@ -33,6 +33,14 @@ class SessionBackend {
     /// Returns 0 when an event was written, 1 when idle, -1 on error.
     virtual int poll_json(std::string& json_out) = 0;
     virtual std::optional<std::string> drain_console_json() = 0;
+    virtual std::optional<std::string> drain_network_json() { return std::nullopt; }
+    virtual bool send_network_compose(const std::string& method, const std::string& url,
+                                      const std::string& headers, const std::string& body, int timeout_ms,
+                                      std::string& json_out, std::string& error_out) {
+        error_out = "network compose send is not supported";
+        return false;
+    }
+    virtual std::optional<std::string> network_proxy_address() { return std::nullopt; }
     virtual bool terminal_write(const std::string& bytes, std::string& error_out) = 0;
 
     virtual bool send_command(const std::string& op, std::string& error_out) = 0;

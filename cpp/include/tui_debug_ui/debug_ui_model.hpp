@@ -1,5 +1,7 @@
 #pragma once
 
+#include "tui_debug_ui/network_mock_data.hpp"
+
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -25,6 +27,7 @@ enum class Focus {
     RuntimeSource,
     FileTree,
     Resources,
+    Network,
     Repl,
     Console,
 };
@@ -153,6 +156,9 @@ class DebugUiModel {
     /// Variables keyed by DAP `variablesReference` (lazy-loaded per scope).
     std::unordered_map<std::int64_t, std::vector<VariableInfo>> scope_variables;
     std::vector<ConsoleLine> console_lines;
+    NetworkMockSession network_session;
+    bool network_capture_live = false;
+    bool network_show_mock_fallback = false;
     std::vector<std::string> repl_history;
     std::vector<WatchEntry> watches;
     std::uint64_t next_watch_id = 1;

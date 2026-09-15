@@ -40,6 +40,8 @@ std::string panel_type_label(SidebarPanelType type) {
         return "File Tree";
     case SidebarPanelType::Resources:
         return "Resources";
+    case SidebarPanelType::Network:
+        return "Network";
     case SidebarPanelType::Repl:
         return "REPL";
     case SidebarPanelType::Console:

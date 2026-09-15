@@ -69,6 +69,51 @@ impl CSession {
         snapshot_to_json(&snapshot)
     }
 
+    pub fn network_proxy_address(&self) -> Option<String> {
+        match &self.inner {
+            SessionEngine::Dap(session) => session.network_proxy_address(),
+            SessionEngine::Rr(_) => None,
+        }
+    }
+
+    pub fn drain_network_json(&mut self) -> Result<String> {
+        match &mut self.inner {
+            SessionEngine::Dap(session) => session.drain_network_json(),
+            SessionEngine::Rr(_) => Ok(String::new()),
+        }
+    }
+
+    pub fn send_network_compose_json(
+        &mut self,
+        method: &str,
+        url: &str,
+        headers: &str,
+        body: &str,
+        timeout_ms: i32,
+    ) -> Result<String> {
+        match &mut self.inner {
+            SessionEngine::Dap(session) => {
+                session.send_network_compose_json(method, url, headers, body, timeout_ms)
+            }
+            SessionEngine::Rr(_) => {
+                let exchange = crate::network::send_compose_request(
+                    None,
+                    method,
+                    url,
+                    headers,
+                    body,
+                    timeout_ms,
+                )?;
+                let drain = crate::network::NetworkDrain {
+                    proxy_address: String::new(),
+                    intercept_enabled: false,
+                    exchanges: vec![exchange],
+                };
+                serde_json::to_string(&drain).context("failed to serialize compose network result")
+            }
+        }
+    }
+
     pub fn drain_console_json(&mut self) -> Result<String> {
         let entries: Vec<_> = match &mut self.inner {
             SessionEngine::Dap(session) => session

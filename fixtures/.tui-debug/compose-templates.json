@@ -1,0 +1,26 @@
+[
+  {
+    "body": "",
+    "headers": "Accept: application/json",
+    "method": "GET",
+    "name": "GET default",
+    "timeout_ms": 30000,
+    "url": "https://httpbin.org/get"
+  },
+  {
+    "body": "{\"hello\":\"world\"}",
+    "headers": "Content-Type: application/json",
+    "method": "POST",
+    "name": "POST echo",
+    "timeout_ms": 30000,
+    "url": "https://httpbin.org/post"
+  },
+  {
+    "body": "",
+    "headers": "",
+    "method": "GET",
+    "name": "Custom",
+    "timeout_ms": 30000,
+    "url": "http://localhost:8080/"
+  }
+]

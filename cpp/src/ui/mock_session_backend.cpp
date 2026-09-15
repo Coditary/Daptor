@@ -1,6 +1,10 @@
 #include "tui_debug_ui/session_backend.hpp"
 #include "tui_debug_ui/step_in_selection.hpp"
 
+extern "C" {
+#include "tui_debug.h"
+}
+
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
@@ -177,6 +181,21 @@ class MockSessionBackend final : public SessionBackend {
         std::string json = console_pending_.front();
         console_pending_.erase(console_pending_.begin());
         return json;
+    }
+
+    bool send_network_compose(const std::string& method, const std::string& url, const std::string& headers,
+                              const std::string& body, int timeout_ms, std::string& json_out,
+                              std::string& error_out) override {
+        char buffer[262144];
+        const int rc = tui_debug_send_network_compose(nullptr, method.c_str(), url.c_str(), headers.c_str(),
+                                                      body.c_str(), timeout_ms, buffer, sizeof(buffer));
+        if (rc == 0) {
+            json_out = buffer;
+            return true;
+        }
+        const char* message = tui_debug_last_error();
+        error_out = message != nullptr ? message : "compose send failed";
+        return false;
     }
 
     bool terminal_write(const std::string& /*bytes*/, std::string& /*error_out*/) override { return true; }

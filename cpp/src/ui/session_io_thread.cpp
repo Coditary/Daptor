@@ -371,6 +371,36 @@ void SessionIoThread::request_goto_targets(const std::string& path, int line, in
     cv_.notify_all();
 }
 
+void SessionIoThread::post_network_compose_send(const std::string& method, const std::string& url,
+                                                const std::string& headers, const std::string& body,
+                                                int timeout_ms) {
+    {
+        std::lock_guard lock(mutex_);
+        network_compose_send_request_ =
+            NetworkComposeSendRequest{method, url, headers, body, timeout_ms};
+    }
+    cv_.notify_all();
+}
+
+void SessionIoThread::process_network_compose_send() {
+    NetworkComposeSendRequest request;
+    {
+        std::lock_guard lock(mutex_);
+        if (!network_compose_send_request_.has_value()) {
+            return;
+        }
+        request = std::move(*network_compose_send_request_);
+        network_compose_send_request_.reset();
+    }
+
+    std::string json;
+    std::string error;
+    const bool ok =
+        backend_->send_network_compose(request.method, request.url, request.headers, request.body,
+                                       request.timeout_ms, json, error);
+    push_event(SessionIoEvent{SessionIoEventKind::NetworkJson, ok, ok ? std::move(json) : std::move(error)});
+}
+
 void SessionIoThread::process_step_in_targets_fetch() {
     if (!adapter_live_.load(std::memory_order_acquire)) {
         return;
@@ -436,6 +466,11 @@ void SessionIoThread::sync_initial_state() {
 
     if (const auto json = backend_->drain_console_json()) {
         push_event(SessionIoEvent{SessionIoEventKind::ConsoleJson, true, *json});
+    }
+
+    if (const auto proxy = backend_->network_proxy_address()) {
+        push_event(SessionIoEvent{SessionIoEventKind::NetworkJson, true,
+                                  R"({"proxy_address":")" + *proxy + R"(","intercept_enabled":false,"exchanges":[]})"});
     }
 }
 
@@ -1106,6 +1141,13 @@ void SessionIoThread::run_poll_cycle() {
         }
         push_event(SessionIoEvent{SessionIoEventKind::ConsoleJson, true, *json});
     }
+
+    if (const auto json = backend_->drain_network_json()) {
+        if (debug_events) {
+            std::fprintf(stderr, "session-event: NetworkJson %.200s\n", json->c_str());
+        }
+        push_event(SessionIoEvent{SessionIoEventKind::NetworkJson, true, *json});
+    }
 }
 
 void SessionIoThread::thread_main() {
@@ -1121,6 +1163,8 @@ void SessionIoThread::thread_main() {
                 process_runtime_source_fetch();
                 process_write_memory();
             }
+
+            process_network_compose_send();
 
             if (backend_active_.load(std::memory_order_acquire)) {
                 process_terminal_input();
@@ -1162,7 +1206,7 @@ void SessionIoThread::thread_main() {
                        source_fetch_reference_.has_value() || memory_fetch_request_.has_value() ||
                        disassembly_fetch_request_.has_value() || runtime_source_fetch_request_.has_value() ||
                        write_memory_request_.has_value() || step_in_targets_frame_.has_value() ||
-                       goto_targets_request_.has_value() ||
+                       goto_targets_request_.has_value() || network_compose_send_request_.has_value() ||
                        (!launch_started_.load(std::memory_order_acquire) && !program_path_.empty());
             });
         } catch (const std::exception& ex) {

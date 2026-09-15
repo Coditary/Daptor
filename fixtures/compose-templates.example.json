@@ -1,0 +1,18 @@
+[
+  {
+    "name": "Local health",
+    "method": "GET",
+    "url": "http://localhost:3000/api/health",
+    "headers": "Accept: application/json",
+    "body": "",
+    "timeout_ms": 30000
+  },
+  {
+    "name": "POST item",
+    "method": "POST",
+    "url": "http://localhost:3000/api/items",
+    "headers": "Content-Type: application/json",
+    "body": "{\"title\":\"example\"}",
+    "timeout_ms": 10000
+  }
+]

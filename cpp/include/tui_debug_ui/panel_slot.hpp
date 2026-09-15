@@ -21,6 +21,7 @@ enum class SidebarPanelType {
     RuntimeSource,
     FileTree,
     Resources,
+    Network,
     Repl,
     Console,
 };

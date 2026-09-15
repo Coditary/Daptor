@@ -101,6 +101,44 @@ class RustSessionBackend final : public SessionBackend {
         return json;
     }
 
+    std::optional<std::string> drain_network_json() override {
+        if (session_ == nullptr) {
+            return std::nullopt;
+        }
+        char buffer[262144];
+        const int rc = tui_debug_drain_network(session_, buffer, sizeof(buffer));
+        if (rc == 0) {
+            return std::string(buffer);
+        }
+        return std::nullopt;
+    }
+
+    std::optional<std::string> network_proxy_address() override {
+        if (session_ == nullptr) {
+            return std::nullopt;
+        }
+        char buffer[256];
+        const int rc = tui_debug_network_proxy_address(session_, buffer, sizeof(buffer));
+        if (rc == 0) {
+            return std::string(buffer);
+        }
+        return std::nullopt;
+    }
+
+    bool send_network_compose(const std::string& method, const std::string& url, const std::string& headers,
+                              const std::string& body, int timeout_ms, std::string& json_out,
+                              std::string& error_out) override {
+        char buffer[262144];
+        const int rc = tui_debug_send_network_compose(session_, method.c_str(), url.c_str(), headers.c_str(),
+                                                      body.c_str(), timeout_ms, buffer, sizeof(buffer));
+        if (rc == 0) {
+            json_out = buffer;
+            return true;
+        }
+        error_out = adapter_last_error();
+        return false;
+    }
+
     bool terminal_write(const std::string& bytes, std::string& error_out) override {
         if (session_ == nullptr) {
             error_out = "no session";
