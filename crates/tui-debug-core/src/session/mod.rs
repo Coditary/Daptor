@@ -411,6 +411,9 @@ pub struct DebugSession {
 }
 
 fn start_network_capture() -> Option<NetworkCapture> {
+    if cfg!(test) {
+        return None;
+    }
     match NetworkCapture::start() {
         Ok(capture) => {
             info!("network capture proxy listening on {}", capture.proxy_address());
@@ -425,15 +428,19 @@ fn start_network_capture() -> Option<NetworkCapture> {
 
 fn inject_network_proxy_env(launch_args: &mut Value, capture: &NetworkCapture) {
     let proxy = format!("http://{}", capture.proxy_address());
-    let ca = capture.ca_cert_path().to_string_lossy();
-    launch_args["env"] = json!({
-        "HTTP_PROXY": proxy,
-        "HTTPS_PROXY": proxy,
-        "http_proxy": proxy,
-        "https_proxy": proxy,
-        "SSL_CERT_FILE": ca,
-        "REQUESTS_CA_BUNDLE": ca,
-    });
+    let ca = capture.ca_cert_path().to_string_lossy().to_string();
+    let env = launch_args
+        .as_object_mut()
+        .expect("launch payload object")
+        .entry("env")
+        .or_insert_with(|| json!({}));
+    let env_map = env.as_object_mut().expect("launch env object");
+    env_map.insert("HTTP_PROXY".into(), json!(proxy));
+    env_map.insert("HTTPS_PROXY".into(), json!(proxy));
+    env_map.insert("http_proxy".into(), json!(proxy));
+    env_map.insert("https_proxy".into(), json!(proxy));
+    env_map.insert("SSL_CERT_FILE".into(), json!(ca));
+    env_map.insert("REQUESTS_CA_BUNDLE".into(), json!(ca));
 }
 
 impl DebugSession {
@@ -643,7 +650,11 @@ impl DebugSession {
 
         match self.adapter {
             DebugAdapterKind::Debugpy => {
-                launch_args["console"] = json!("integratedTerminal");
+                launch_args["console"] = json!(if cfg!(test) {
+                    "internalConsole"
+                } else {
+                    "integratedTerminal"
+                });
                 launch_args["redirectOutput"] = json!(false);
                 if let Some(extras) = adapter_launch_extras().as_object() {
                     launch_args
@@ -2327,6 +2338,7 @@ fn handle_adapter_request(
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
+    use crate::test_support::integration_test_lock;
     use serde_json::json;
 
     #[test]
@@ -2337,7 +2349,30 @@ mod lifecycle_tests {
     }
 
     #[test]
+    fn inject_network_proxy_env_merges_existing_launch_env() {
+        let capture = NetworkCapture::start().expect("network capture for env merge test");
+        let mut launch_args = json!({
+            "type": "debugpy",
+            "env": {
+                "PATH": "/usr/bin",
+                "CUSTOM": "keep-me"
+            }
+        });
+        inject_network_proxy_env(&mut launch_args, &capture);
+
+        let env = launch_args
+            .get("env")
+            .and_then(Value::as_object)
+            .expect("launch env");
+        assert_eq!(env.get("PATH").and_then(Value::as_str), Some("/usr/bin"));
+        assert_eq!(env.get("CUSTOM").and_then(Value::as_str), Some("keep-me"));
+        assert!(env.contains_key("HTTP_PROXY"));
+        assert!(env.contains_key("SSL_CERT_FILE"));
+    }
+
+    #[test]
     fn step_into_python_stdlib_source() {
+        let _guard = integration_test_lock();
         let program = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../examples/python/stdlib_step.py")
             .canonicalize()
@@ -2386,6 +2421,7 @@ mod lifecycle_tests {
 
     #[test]
     fn restart_while_running() {
+        let _guard = integration_test_lock();
         let program = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../examples/python/hello.py")
             .canonicalize()
@@ -2406,6 +2442,7 @@ mod lifecycle_tests {
 
     #[test]
     fn restart_while_stopped_after_step() {
+        let _guard = integration_test_lock();
         let program = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../examples/python/hello.py")
             .canonicalize()
@@ -2438,6 +2475,7 @@ mod lifecycle_tests {
 
     #[test]
     fn evaluate_watch_then_continue_with_breakpoint() {
+        let _guard = integration_test_lock();
         let program = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../examples/python/hello.py")
             .canonicalize()
@@ -2485,6 +2523,7 @@ mod lifecycle_tests {
 
     #[test]
     fn disconnect_restart_and_terminate_are_safe() {
+        let _guard = integration_test_lock();
         let program = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../examples/python/hello.py")
             .canonicalize()
@@ -2540,14 +2579,16 @@ mod breakpoint_hit_count_tests {
 #[cfg(test)]
 mod lldb_launch_tests {
     use super::*;
-    use std::path::PathBuf;
+    use crate::test_support::{ensure_native_binary, integration_test_lock, lldb_dap_available};
 
     #[test]
     fn launch_native_reverse_demo_stops_in_main() {
-        let program = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../examples/native/reverse_demo")
-            .canonicalize()
-            .expect("reverse_demo fixture");
+        let _guard = integration_test_lock();
+        if !lldb_dap_available() {
+            eprintln!("SKIP: lldb-dap not installed");
+            return;
+        }
+        let program = ensure_native_binary("reverse_demo");
 
         let mut session = DebugSession::launch_native(&program).expect("lldb launch");
         let snap = session.snapshot_for_sync().expect("snapshot");
@@ -2567,10 +2608,12 @@ mod lldb_launch_tests {
 
     #[test]
     fn launch_native_step_over_reverse_demo() {
-        let program = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../examples/native/reverse_demo")
-            .canonicalize()
-            .expect("reverse_demo fixture");
+        let _guard = integration_test_lock();
+        if !lldb_dap_available() {
+            eprintln!("SKIP: lldb-dap not installed");
+            return;
+        }
+        let program = ensure_native_binary("reverse_demo");
 
         let mut session = DebugSession::launch_native(&program).expect("lldb launch");
         let snap = session.step_over().expect("step over");
@@ -2599,10 +2642,12 @@ mod lldb_launch_tests {
 
     #[test]
     fn launch_native_interactive_demo_accepts_fifo_stdin() {
-        let program = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../examples/native/interactive_demo")
-            .canonicalize()
-            .expect("interactive_demo fixture");
+        let _guard = integration_test_lock();
+        if !lldb_dap_available() {
+            eprintln!("SKIP: lldb-dap not installed");
+            return;
+        }
+        let program = ensure_native_binary("interactive_demo");
 
         let mut session = DebugSession::launch_native(&program).expect("lldb launch");
         session.dispatch_continue().expect("continue from main");

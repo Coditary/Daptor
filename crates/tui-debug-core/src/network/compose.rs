@@ -148,8 +148,50 @@ fn format_compose_request_headers(method: &Method, url: &str, headers: &str) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reqwest::Method;
 
     #[test]
+    fn parse_method_rejects_empty_and_unknown() {
+        assert!(parse_method("").is_err());
+        assert!(parse_method("   ").is_err());
+        assert!(parse_method("GET POST").is_err());
+        assert_eq!(parse_method("get").unwrap(), Method::GET);
+        assert_eq!(parse_method("POST").unwrap(), Method::POST);
+    }
+
+    #[test]
+    fn parse_headers_skips_host_and_malformed_lines() {
+        let map = parse_headers(
+            "Host: example.com\nAccept: application/json\nbroken-line\nX-Test: 1\n",
+        )
+        .expect("headers");
+        assert!(!map.contains_key("host"));
+        assert_eq!(map.get("accept").and_then(|v| v.to_str().ok()), Some("application/json"));
+        assert_eq!(map.get("x-test").and_then(|v| v.to_str().ok()), Some("1"));
+    }
+
+    #[test]
+    fn normalize_timeout_ms_clamps_and_defaults() {
+        assert_eq!(normalize_timeout_ms(0), DEFAULT_TIMEOUT_MS);
+        assert_eq!(normalize_timeout_ms(-5), DEFAULT_TIMEOUT_MS);
+        assert_eq!(normalize_timeout_ms(500), MIN_TIMEOUT_MS);
+        assert_eq!(normalize_timeout_ms(999_999), MAX_TIMEOUT_MS);
+        assert_eq!(normalize_timeout_ms(5_000), 5_000);
+    }
+
+    #[test]
+    fn format_compose_request_headers_includes_method_and_custom_headers() {
+        let formatted = format_compose_request_headers(
+            &Method::POST,
+            "https://api.example.com/v1/items",
+            "Content-Type: application/json\n",
+        );
+        assert!(formatted.starts_with("POST https://api.example.com/v1/items\n"));
+        assert!(formatted.contains("Content-Type: application/json"));
+    }
+
+    #[test]
+    #[ignore = "requires network access to httpbin.org"]
     fn send_compose_request_hits_real_http_endpoint() {
         let exchange = send_compose_request(
             None,

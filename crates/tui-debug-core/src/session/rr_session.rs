@@ -366,19 +366,17 @@ fn map_stop_reason(stop: &MiStopReason) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    use crate::test_support::{ensure_native_binary, integration_test_lock};
 
     #[test]
     fn launch_rr_reverse_demo() {
+        let _guard = integration_test_lock();
         if ensure_rr_available().is_err() || ensure_gdb_available().is_err() {
             eprintln!("skipping launch_rr_reverse_demo: rr and gdb must be installed");
             return;
         }
 
-        let program = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../examples/native/reverse_demo")
-            .canonicalize()
-            .expect("reverse_demo fixture");
+        let program = ensure_native_binary("reverse_demo");
 
         let mut session = RrDebugSession::launch(&program).expect("rr launch");
         let snap = session.snapshot_for_sync().expect("snapshot");
@@ -396,15 +394,13 @@ mod tests {
 
     #[test]
     fn rr_locals_populated_after_step() {
+        let _guard = integration_test_lock();
         if ensure_rr_available().is_err() || ensure_gdb_available().is_err() {
             eprintln!("skipping rr_locals_populated_after_step: rr and gdb must be installed");
             return;
         }
 
-        let program = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../examples/native/reverse_demo")
-            .canonicalize()
-            .expect("reverse_demo fixture");
+        let program = ensure_native_binary("reverse_demo");
 
         let mut session = RrDebugSession::launch(&program).expect("rr launch");
         session.dispatch_step("next").expect("step");
@@ -420,15 +416,13 @@ mod tests {
 
     #[test]
     fn rr_step_back_reverses_line() {
+        let _guard = integration_test_lock();
         if ensure_rr_available().is_err() || ensure_gdb_available().is_err() {
             eprintln!("skipping rr_step_back_reverses_line: rr and gdb must be installed");
             return;
         }
 
-        let program = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../examples/native/reverse_demo")
-            .canonicalize()
-            .expect("reverse_demo fixture");
+        let program = ensure_native_binary("reverse_demo");
 
         let mut session = RrDebugSession::launch(&program).expect("rr launch");
 

@@ -64,3 +64,34 @@ fn read_message_bytes<R: BufRead>(reader: &mut R) -> Result<Vec<u8>> {
         .context("failed to read DAP message body")?;
     Ok(body)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::io::Cursor;
+
+    #[test]
+    fn round_trip_message_framing() {
+        let payload = json!({
+            "seq": 1,
+            "type": "request",
+            "command": "initialize",
+            "arguments": {}
+        });
+
+        let mut buffer = Vec::new();
+        write_message(&mut buffer, &payload).expect("write");
+
+        let mut reader = Cursor::new(buffer);
+        let decoded = read_message(&mut reader).expect("read");
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn read_message_rejects_missing_content_length() {
+        let mut reader = Cursor::new(b"\r\n{}");
+        let error = read_message(&mut reader).expect_err("missing header");
+        assert!(error.to_string().contains("Content-Length"));
+    }
+}

@@ -152,7 +152,7 @@ mod tests {
     #[test]
     fn falls_back_to_plain_spans_without_grammar() {
         let source = "fn main() {\n}\n";
-        let lines = highlight_viewport("rust", source, 1, 2);
+        let lines = highlight_viewport("__no_grammar__", source, 1, 2);
 
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].spans.len(), 1);

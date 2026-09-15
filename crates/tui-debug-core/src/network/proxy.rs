@@ -242,3 +242,25 @@ pub(crate) fn truncate_body(bytes: &bytes::Bytes) -> String {
     truncated.push_str("\n… (truncated)");
     truncated
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uri_path_extracts_path_and_query() {
+        assert_eq!(uri_path("https://example.com/api/v1?q=1"), "/api/v1?q=1");
+        assert_eq!(uri_path("/local/path"), "/local/path");
+    }
+
+    #[test]
+    fn truncate_body_keeps_short_text_and_marks_long_text() {
+        let short = bytes::Bytes::from_static(b"hello");
+        assert_eq!(truncate_body(&short), "hello");
+
+        let long = bytes::Bytes::from("x".repeat(MAX_BODY_CHARS + 10));
+        let truncated = truncate_body(&long);
+        assert!(truncated.ends_with("… (truncated)"));
+        assert!(truncated.len() > MAX_BODY_CHARS);
+    }
+}

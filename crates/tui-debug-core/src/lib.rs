@@ -7,4 +7,7 @@ pub mod rr;
 pub mod session;
 pub mod terminal;
 
+#[cfg(test)]
+pub mod test_support;
+
 pub use session::{DebugSession, SessionSnapshot, SessionState, print_snapshot};
