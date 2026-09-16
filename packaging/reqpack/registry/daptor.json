@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "name": "daptor",
+  "version": "0.1.0",
+  "source": "https://github.com/Coditary/Daptor/releases/latest/download/index.json",
+  "description": "Terminal debugger (DAP engine + Tuinator UI) packaged as ReqPack artifact.",
+  "role": "package",
+  "targetSystem": "rqp",
+  "capabilities": [],
+  "ecosystemScopes": ["rqp"],
+  "writeScopes": [],
+  "networkScopes": [],
+  "privilegeLevel": "none",
+  "scriptSha256": "",
+  "bootstrapSha256": "",
+  "aliases": []
+}

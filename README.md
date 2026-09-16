@@ -226,14 +226,36 @@ GitHub Actions runs the same checks on push/PR to `main`. Integration tests (deb
 
 ### Release
 
-Tag a version to publish a Linux tarball:
+Tag a version to publish binaries for Linux and macOS (x86_64 + aarch64):
 
 ```bash
 git tag v0.1.0
 git push origin v0.1.0
 ```
 
-The release workflow builds `daptor` (UI) and `daptor-cli`, bundles config templates, and attaches `daptor-<version>-linux-x86_64.tar.gz` to the GitHub release.
+The release workflow uploads:
+
+- `daptor-<version>-<platform>-<arch>.tar.gz` — UI + CLI + config templates
+- `daptor-<version>-<platform>-<arch>.rqp` — ReqPack package
+- `index.json` — ReqPack repository index
+
+### Install with ReqPack
+
+After the `daptor` registry entry is published in [Coditary/registry](https://github.com/Coditary/registry):
+
+```bash
+rqp install daptor
+```
+
+This installs `~/.local/bin/daptor` (UI) and `~/.local/bin/daptor-cli` (Rust launcher).
+
+Direct install from a release artifact:
+
+```bash
+rqp install rqp https://github.com/Coditary/Daptor/releases/download/v0.1.0/daptor-0.1.0-linux-x86_64.rqp
+```
+
+Registry metadata template: [`packaging/reqpack/registry/daptor.json`](packaging/reqpack/registry/daptor.json)
 
 ## License
 

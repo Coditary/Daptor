@@ -4,23 +4,39 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build-linux:
-    name: Build (${{ matrix.target }})
-    runs-on: ubuntu-latest
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-unknown-linux-gnu
-            artifact: linux-x86_64
+          - name: linux-x86_64
+            runner: ubuntu-24.04
+            platform: linux
+            arch: x86_64
+          - name: linux-aarch64
+            runner: ubuntu-24.04-arm
+            platform: linux
+            arch: aarch64
+          - name: macos-x86_64
+            runner: macos-15-intel
+            platform: macos
+            arch: x86_64
+          - name: macos-aarch64
+            runner: macos-15
+            platform: macos
+            arch: aarch64
+
     steps:
       - uses: actions/checkout@v4
 
@@ -28,8 +44,13 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install build dependencies
-        run: bash scripts/ci/install-apt-build-deps.sh
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: bash scripts/ci/install-apt-release-deps.sh
+
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: bash scripts/ci/install-brew-build-deps.sh
 
       - name: Build Rust CLI
         run: cargo build --release -p daptor-cli
@@ -37,42 +58,77 @@ jobs:
       - name: Build UI
         run: |
           cmake -S cpp -B cpp/build -DCMAKE_BUILD_TYPE=Release
-          cmake --build cpp/build -j"$(nproc)"
+          cmake --build cpp/build -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
+
+      - name: Smoke test CLI
+        run: ./target/release/daptor --help
+
+      - name: Verify UI binary
+        run: test -x cpp/build/daptor
 
       - name: Package release archive
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          STAGING="daptor-${VERSION}-${{ matrix.artifact }}"
-          mkdir -p "${STAGING}/bin" "${STAGING}/config" "${STAGING}/schemas"
-          cp cpp/build/daptor "${STAGING}/bin/daptor"
-          cp target/release/daptor "${STAGING}/bin/daptor-cli"
-          cp config/config.yaml config/definitions.yaml config/theme.json "${STAGING}/config/"
-          cp schemas/config.schema.yaml schemas/theme.schema.json "${STAGING}/schemas/"
-          cp README.md "${STAGING}/"
-          tar -czf "${STAGING}.tar.gz" "${STAGING}"
-          echo "ARCHIVE=${STAGING}.tar.gz" >> "$GITHUB_ENV"
-          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+          python3 scripts/ci/package_binary.py \
+            --version "$GITHUB_REF_NAME" \
+            --platform "${{ matrix.platform }}" \
+            --arch "${{ matrix.arch }}" \
+            --ui-binary cpp/build/daptor \
+            --cli-binary target/release/daptor \
+            --output-dir dist
+
+      - name: Package ReqPack artifact
+        run: |
+          python3 scripts/ci/package_reqpack.py \
+            --version "$GITHUB_REF_NAME" \
+            --platform "${{ matrix.platform }}" \
+            --arch "${{ matrix.arch }}" \
+            --ui-binary cpp/build/daptor \
+            --cli-binary target/release/daptor \
+            --output-dir dist
 
       - uses: actions/upload-artifact@v4
         with:
-          name: daptor-${{ matrix.artifact }}
-          path: daptor-*-*.tar.gz
+          name: release-${{ matrix.platform }}-${{ matrix.arch }}
+          path: |
+            dist/*.tar.gz
+            dist/*.rqp
           if-no-files-found: error
 
   release:
     name: Publish GitHub Release
-    runs-on: ubuntu-latest
-    needs: [build-linux]
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/download-artifact@v4
+      - name: Download packaged artifacts
+        uses: actions/download-artifact@v4
         with:
-          pattern: daptor-*
+          pattern: release-*
           merge-multiple: true
+          path: dist
 
-      - name: Create release
-        uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
-          files: daptor-*-*.tar.gz
+      - name: Build ReqPack repository index
+        run: python3 scripts/ci/build_reqpack_index.py --dist-dir dist --output dist/index.json
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          NOTES="Automated release for daptor ${VERSION}.
+
+          Includes tar.gz archives and ReqPack .rqp packages for Linux and macOS (x86_64 and aarch64).
+          Install with ReqPack: \`rqp install daptor\`
+
+          Each bundle ships the Tuinator UI (\`daptor\`), the Rust launcher (\`daptor-cli\`), and starter config templates."
+          if ! gh release view "$GITHUB_REF_NAME" --repo "$GH_REPO" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --repo "$GH_REPO" --title "daptor ${VERSION}" --notes "$NOTES"
+          fi
+          gh release edit "$GITHUB_REF_NAME" --repo "$GH_REPO" --draft=false --latest --title "daptor ${VERSION}" --notes "$NOTES"
+          gh release upload "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.rqp dist/index.json --repo "$GH_REPO" --clobber

@@ -1,0 +1,29 @@
+{
+  "formatVersion": 1,
+  "name": "daptor",
+  "indexName": "daptor",
+  "version": @VERSION@,
+  "release": 1,
+  "revision": 0,
+  "summary": "Terminal debugger (DAP + Tuinator UI)",
+  "description": "Daptor pairs a Rust DAP engine with a terminal UI for Python, native, and rr-backed debugging.",
+  "license": "MIT",
+  "architecture": @ARCHITECTURE@,
+  "system": [@SYSTEM@],
+  "vendor": "Coditary",
+  "maintainerEmail": "Matographo@gmail.com",
+  "url": @URL@,
+  "homepage": "https://github.com/Coditary/Daptor",
+  "sourceUrl": "https://github.com/Coditary/Daptor",
+  "buildDate": @BUILD_DATE@,
+  "tags": ["cli", "debugger", "dap", "tui", "daptor"],
+  "payload": {
+    "path": "payload/payload.tar.zst",
+    "archive": "tar",
+    "compression": "zstd",
+    "hashAlgorithm": "sha256",
+    "hashFile": "hashes/payload.sha256",
+    "sizeCompressed": @SIZE_COMPRESSED@,
+    "sizeInstalledExpected": @SIZE_INSTALLED_EXPECTED@
+  }
+}
