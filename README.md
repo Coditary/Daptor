@@ -4,15 +4,15 @@ Terminal debugger built on the [Debug Adapter Protocol](https://microsoft.github
 
 **Daptor** pairs a Rust DAP engine with a C++/[Tuinator](https://github.com/Coditary/Tuinator) terminal UI — fast stepping, scopes, breakpoints, REPL, and a layout you can shape to your workflow.
 
-> **Early development (0.1).** Crate and binary names still use the `tui-debug` prefix internally; the product name is **Daptor**.
+> **Early development (0.1).**
 
 ## Supported targets
 
 | Language / runtime | Adapter | How to run |
 |--------------------|---------|------------|
-| Python | [debugpy](https://github.com/microsoft/debugpy) | `./cpp/build/tui-debug-ui examples/python/hello.py` |
+| Python | [debugpy](https://github.com/microsoft/debugpy) | `./cpp/build/daptor path/to/script.py` |
 | C / C++ (native ELF) | [lldb-dap](https://github.com/llvm/llvm-project) | Auto-selected for binaries, or `--lldb` |
-| Reverse debugging (Linux) | [rr](https://rr-project.org/) | `--profile rr examples/native/reverse_demo` |
+| Reverse debugging (Linux) | [rr](https://rr-project.org/) | `--profile rr path/to/binary` |
 
 ## Prerequisites
 
@@ -35,55 +35,50 @@ Tree-sitter grammars under `~/.local/share/dap/tree-sitter/<language>/` (or set 
 
 ```bash
 # Launch definitions (adapters + profiles)
-mkdir -p ~/.config/tui-debug
-cp examples/config/config.example.yaml ~/.config/tui-debug/config.yaml
-cp examples/config/definitions.example.yaml ~/.config/tui-debug/definitions.yaml
+mkdir -p ~/.config/daptor
+cp config/config.yaml ~/.config/daptor/config.yaml
+cp config/definitions.yaml ~/.config/daptor/definitions.yaml
 
 # Engine + CLI
-cargo build -p tui-debug-cli
+cargo build -p daptor-cli
 
 # UI (first run fetches Tuinator + Corrosion)
 cmake -S cpp -B cpp/build
 cmake --build cpp/build
 
 # Debug a Python script
-./cpp/build/tui-debug-ui examples/python/hello.py
+./cpp/build/daptor path/to/script.py
 
 # Or via the Rust launcher
-cargo run -p tui-debug-cli -- run --program examples/python/hello.py
+cargo run -p daptor-cli -- run path/to/script.py
 
 # Frontend-only mock (no debugpy)
-./cpp/build/tui-debug-ui --mock examples/python/hello.py
-```
-
-**Native C/C++ example**
-
-```bash
-./examples/native/build.sh
-./cpp/build/tui-debug-ui examples/native/reverse_demo
+./cpp/build/daptor --mock path/to/script.py
 ```
 
 **Headless DAP smoke test** (Rust only, no UI):
 
 ```bash
-cargo run -p tui-debug-cli -- test
+cargo run -p daptor-cli -- test path/to/script.py
 ```
 
 ## Configuration
 
-User config: `~/.config/tui-debug/` (or `$XDG_CONFIG_HOME/tui-debug/`).
+User config: `~/.config/daptor/` (or `$XDG_CONFIG_HOME/daptor/`).
 
 | File | Purpose |
 |------|---------|
 | `config.yaml` | Theme, layout, keybindings, paths |
+| `definitions.yaml` | Launch adapters and profiles |
 | `theme.json` | UI + syntax colors |
 
-Copy the examples:
+Starter templates live in [`config/`](config/):
 
 ```bash
-mkdir -p ~/.config/tui-debug
-cp examples/config/config.example.yaml ~/.config/tui-debug/config.yaml
-cp examples/config/theme.example.json ~/.config/tui-debug/theme.json
+mkdir -p ~/.config/daptor
+cp config/config.yaml ~/.config/daptor/config.yaml
+cp config/definitions.yaml ~/.config/daptor/definitions.yaml
+cp config/theme.json ~/.config/daptor/theme.json
 ```
 
 **`config.yaml` highlights**
@@ -126,8 +121,8 @@ keybindings:
 
 | Variable | Effect |
 |----------|--------|
-| `TUI_DEBUG_CONFIG` | Path to `config.yaml` |
-| `TUI_DEBUG_THEME` | Path to `theme.json` |
+| `DAPTOR_CONFIG` | Path to `config.yaml` |
+| `DAPTOR_THEME` | Path to `theme.json` |
 | `DAP_TREE_SITTER_DIR` | Tree-sitter grammar directory |
 
 Schemas: [`schemas/config.schema.yaml`](schemas/config.schema.yaml), [`schemas/theme.schema.json`](schemas/theme.schema.json).
@@ -175,29 +170,27 @@ Daptor is one product with two build trees:
 
 ```
 crates/                 # Rust — engine + CLI launcher
-  tui-debug-core/       # DAP client, session, tree-sitter, C API
-  tui-debug-cli/        # `cargo run` wrapper → starts the UI binary
+  daptor-core/          # DAP client, session, tree-sitter, C API
+  daptor-cli/           # `cargo run` wrapper → starts the UI binary
 
 cpp/                    # C++ — terminal UI (Tuinator)
   include/tui_debug_ui/ # Panels, theme, layout
-  src/ui/               # Application shell → builds `tui-debug-ui`
+  src/ui/               # Application shell → builds `daptor`
 
-examples/               # Demos & config templates (not shipped)
+config/                 # Starter templates for user config
 schemas/                # JSON/YAML schemas for user config
 reference/nvim-dap-ui/  # Upstream UX reference (git submodule)
 ```
-
-Internal names (`tui-debug-*`) will be renamed to `daptor` in a future release.
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────┐
-│  tui-debug-ui  (C++ / Tuinator)     │  panels, input, layout, theme
+│  daptor  (C++ / Tuinator)           │  panels, input, layout, theme
 ├─────────────────────────────────────┤
 │  tui_debug.h C API                  │
 ├─────────────────────────────────────┤
-│  tui-debug-core  (Rust)             │  DAP client, session, highlight
+│  daptor-core  (Rust)                │  DAP client, session, highlight
 └─────────────────────────────────────┘
          │ debugpy / lldb-dap / rr
          ▼
@@ -219,6 +212,28 @@ Internal names (`tui-debug-*`) will be renamed to `daptor` in a future release.
 | `tui_debug_fetch_variables` | Lazy-load scope variables |
 | `tui_debug_highlight_viewport` | Tree-sitter spans as JSON |
 | `tui_debug_set_tree_sitter_dir` | Override grammar search path |
+
+## Development
+
+### CI checks (local)
+
+```bash
+./scripts/ci/check.sh      # fmt, clippy, tests, C++ build
+./scripts/ci/format.sh     # auto-format Rust (+ C++ if clang-format is installed)
+```
+
+GitHub Actions runs the same checks on push/PR to `main`. Integration tests (debugpy, lldb-dap, rr) run in a separate job with `--ignored`.
+
+### Release
+
+Tag a version to publish a Linux tarball:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The release workflow builds `daptor` (UI) and `daptor-cli`, bundles config templates, and attaches `daptor-<version>-linux-x86_64.tar.gz` to the GitHub release.
 
 ## License
 

@@ -16,7 +16,7 @@ extern "C" {
 
 #if __has_include(<nlohmann/json.hpp>)
 #include <nlohmann/json.hpp>
-#define TUI_DEBUG_UI_HAS_NLOHMANN_JSON 1
+#define DAPTOR_UI_HAS_NLOHMANN_JSON 1
 #endif
 
 namespace tui_debug_ui {
@@ -76,7 +76,7 @@ inline std::vector<HighlightedLine> build_plain_viewport_lines(const std::string
 /// `[{"line":1,"spans":[{"text":"def","kind":"keyword"}]}]`
 /// `line_number` is accepted as an alias for `line`.
 inline std::vector<HighlightedLine> parse_highlight_json(std::string_view json) {
-#ifdef TUI_DEBUG_UI_HAS_NLOHMANN_JSON
+#ifdef DAPTOR_UI_HAS_NLOHMANN_JSON
     const nlohmann::json root = nlohmann::json::parse(json);
     if (!root.is_array()) {
         throw std::runtime_error("highlight JSON root must be an array");

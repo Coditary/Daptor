@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  rust-fmt:
+    name: Rust fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  rust-clippy:
+    name: Rust clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  rust-test:
+    name: Rust tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install g++ (native fixture profile test)
+        run: sudo apt-get update && sudo apt-get install -y g++
+      - run: cargo test -p daptor-core --lib
+      - run: cargo test -p daptor-core --test launch_resolve
+      - run: cargo test -p daptor-core --test highlight_smoke
+      - run: cargo build -p daptor-cli
+
+  cpp-build:
+    name: C++ UI build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake pkg-config libncursesw6-dev g++
+      - name: Configure and build
+        run: |
+          cmake -S cpp -B cpp/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build cpp/build -j"$(nproc)"
+      - name: Verify artifacts
+        run: |
+          test -x cpp/build/daptor
+          test -f include/tui_debug.h
+
+  integration:
+    name: Integration tests
+    runs-on: ubuntu-latest
+    needs: [rust-test]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install adapters and build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++ python3 python3-pip lldb gdb
+          python3 -m pip install --user debugpy
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Install rr (optional reverse-debugging tests)
+        continue-on-error: true
+        run: |
+          sudo apt-get install -y rr || true
+      - name: Run ignored integration tests
+        run: cargo test -p daptor-core --lib -- --ignored --test-threads=1

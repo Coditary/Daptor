@@ -1,0 +1,20 @@
+[package]
+name = "daptor-cli"
+description = "CLI entry for daptor (test subcommand + launcher)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "daptor"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+daptor-core = { path = "../daptor-core" }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

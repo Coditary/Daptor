@@ -1,8 +1,8 @@
 # Daptor UI (C++ / Tuinator)
 
-Terminal UI for **Daptor**. Links [Tuinator](https://github.com/Coditary/Tuinator) (C++) with `tui-debug-core` (Rust static library).
+Terminal UI for **Daptor**. Links [Tuinator](https://github.com/Coditary/Tuinator) (C++) with `daptor-core` (Rust static library).
 
-The build artifact is currently named `tui-debug-ui`; it will be renamed to `daptor` in a future release.
+The build artifact is `cpp/build/daptor`.
 
 ## Prerequisites
 
@@ -23,35 +23,34 @@ cmake -S cpp -B cpp/build
 cmake --build cpp/build
 ```
 
-The executable is `cpp/build/tui-debug-ui`.
+The executable is `cpp/build/daptor`.
 
 ## Run
 
 ```bash
 # Full stack (Rust DAP + Tuinator UI)
-./cpp/build/tui-debug-ui examples/python/hello.py
+./cpp/build/daptor path/to/script.py
 
 # Native binary (lldb-dap, auto-detected)
-./examples/native/build.sh
-./cpp/build/tui-debug-ui examples/native/reverse_demo
+./cpp/build/daptor path/to/binary
 
 # Reverse debugging (Linux + rr)
-./cpp/build/tui-debug-ui --profile rr examples/native/reverse_demo
+./cpp/build/daptor --profile rr path/to/binary
 
 # Frontend-only mock session
-./cpp/build/tui-debug-ui --mock examples/python/hello.py
+./cpp/build/daptor --mock path/to/script.py
 
 # Via the Rust CLI wrapper
-cargo run -p tui-debug-cli -- run --program examples/python/hello.py
+cargo run -p daptor-cli -- run path/to/script.py
 ```
 
 ### Theme / config
 
-Config directory: `~/.config/tui-debug/` (or `$XDG_CONFIG_HOME/tui-debug/`).
+Config directory: `~/.config/daptor/` (or `$XDG_CONFIG_HOME/daptor/`).
 
-See the root [README.md](../README.md) for full `config.yaml` and `theme.json` documentation.
+See the root [README.md](../README.md) for full `config.yaml` and `theme.json` documentation. Starter templates are in [`config/`](../config/).
 
-Overrides: `TUI_DEBUG_CONFIG`, `TUI_DEBUG_THEME`.
+Overrides: `DAPTOR_CONFIG`, `DAPTOR_THEME`.
 
 ### Layout / resize
 
@@ -64,9 +63,9 @@ Overrides: `TUI_DEBUG_CONFIG`, `TUI_DEBUG_THEME`.
 | Path | Role |
 |------|------|
 | `cmake/Tuinator.cmake` | `FetchContent` for Tuinator; links `tuinator::tuinator` |
-| `cmake/Corrosion.cmake` | Imports crate `tui-debug-core` as CMake target `tui_debug_core` |
+| `cmake/Corrosion.cmake` | Imports crate `daptor-core` as CMake target `daptor_core` |
 | `../include/tui_debug.h` | C API header (cbindgen) |
-| `../crates/tui-debug-core` | DAP engine / staticlib source |
+| `../crates/daptor-core` | DAP engine / staticlib source |
 
 ## Clean rebuild
 

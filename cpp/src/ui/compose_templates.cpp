@@ -7,13 +7,13 @@
 
 #if __has_include(<nlohmann/json.hpp>)
 #include <nlohmann/json.hpp>
-#define TUI_DEBUG_UI_HAS_NLOHMANN_JSON 1
+#define DAPTOR_UI_HAS_NLOHMANN_JSON 1
 #endif
 
 namespace tui_debug_ui {
 namespace {
 
-#ifdef TUI_DEBUG_UI_HAS_NLOHMANN_JSON
+#ifdef DAPTOR_UI_HAS_NLOHMANN_JSON
 using Json = nlohmann::json;
 
 NetworkComposeTemplate parse_compose_template(const Json& entry) {
@@ -40,7 +40,7 @@ Json compose_template_to_json(const NetworkComposeTemplate& item) {
 #endif
 
 std::filesystem::path path_from_env() {
-    const char* env = std::getenv("TUI_DEBUG_COMPOSE_TEMPLATES");
+    const char* env = std::getenv("DAPTOR_COMPOSE_TEMPLATES");
     if (env == nullptr || env[0] == '\0') {
         return {};
     }
@@ -53,7 +53,7 @@ std::filesystem::path compose_templates_path(const std::filesystem::path& worksp
     if (const std::filesystem::path env_path = path_from_env(); !env_path.empty()) {
         return env_path;
     }
-    return workspace_root / ".tui-debug" / "compose-templates.json";
+    return workspace_root / ".daptor" / "compose-templates.json";
 }
 
 std::vector<NetworkComposeTemplate> default_compose_templates() {
@@ -76,7 +76,7 @@ ComposeTemplatesLoadResult load_compose_templates(const std::filesystem::path& w
         .loaded_from_file = false,
     };
 
-#ifdef TUI_DEBUG_UI_HAS_NLOHMANN_JSON
+#ifdef DAPTOR_UI_HAS_NLOHMANN_JSON
     if (result.path.empty()) {
         return result;
     }
@@ -119,7 +119,7 @@ ComposeTemplatesLoadResult load_compose_templates(const std::filesystem::path& w
 bool save_compose_templates(const std::filesystem::path& path,
                             const std::vector<NetworkComposeTemplate>& templates,
                             std::string& error_out) {
-#ifdef TUI_DEBUG_UI_HAS_NLOHMANN_JSON
+#ifdef DAPTOR_UI_HAS_NLOHMANN_JSON
     if (path.empty()) {
         error_out = "compose templates path is empty";
         return false;

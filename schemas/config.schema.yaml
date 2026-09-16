@@ -1,8 +1,8 @@
-# YAML schema for ~/.config/tui-debug/config.yaml
+# YAML schema for ~/.config/daptor/config.yaml
 
 $schema: https://json-schema.org/draft/2020-12/schema
-$id: https://tui-debug.dev/schemas/config.schema.yaml
-title: tui-debug configuration
+$id: https://daptor.dev/schemas/config.schema.yaml
+title: daptor configuration
 type: object
 additionalProperties: false
 properties:

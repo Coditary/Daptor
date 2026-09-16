@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="${ROOT}/cpp/build"
-UI_BIN="${BUILD_DIR}/tui-debug-ui"
+UI_BIN="${BUILD_DIR}/daptor"
 export TMPDIR="${ROOT}/.tmp"
 mkdir -p "${TMPDIR}" "${BUILD_DIR}"
 
@@ -15,7 +15,7 @@ if [[ "${1:-}" == "run" ]]; then
         exit 1
     fi
     if [[ ! -t 0 ]]; then
-        echo "tui-debug-ui requires an interactive terminal (stdin must be a TTY)." >&2
+        echo "daptor requires an interactive terminal (stdin must be a TTY)." >&2
         echo "Run this directly in a terminal, not via a pipe or background job." >&2
         exit 1
     fi
@@ -26,5 +26,5 @@ cmake --build "${BUILD_DIR}" "$@"
 echo ""
 echo "Built ${UI_BIN}"
 echo "Start the debugger in a terminal:"
-echo "  ${BASH_SOURCE[0]} run examples/python/hello.py"
-echo "  ${BASH_SOURCE[0]} run --mock examples/python/hello.py"
+echo "  ${BASH_SOURCE[0]} run /path/to/program.py"
+echo "  ${BASH_SOURCE[0]} run --mock /path/to/program.py"

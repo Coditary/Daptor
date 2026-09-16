@@ -1,0 +1,1489 @@
+mod highlight;
+mod session;
+
+use std::ffi::{CStr, CString};
+use std::os::raw::{c_char, c_int, c_void};
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::ptr;
+use std::sync::{LazyLock, Mutex};
+
+use serde_json::Value;
+
+use crate::launch::{
+    resolve_launch, resolved_launch_from_json, resolved_launch_to_json, ResolveRequest,
+};
+use crate::session::{
+    DataBreakpoint, ExceptionBreakpointSetting, FunctionBreakpoint, SourceBreakpoint,
+};
+use session::CSession;
+
+static LAST_ERROR: LazyLock<Mutex<CString>> =
+    LazyLock::new(|| Mutex::new(CString::new("").expect("empty string has no NUL")));
+
+pub(crate) fn set_last_error(message: impl Into<String>) {
+    let message = message.into();
+    let c_string = CString::new(message).unwrap_or_else(|_| {
+        CString::new("invalid error message (embedded NUL byte)").expect("static error text")
+    });
+    if let Ok(mut guard) = LAST_ERROR.lock() {
+        *guard = c_string;
+    }
+}
+
+pub(crate) fn clear_last_error() {
+    if let Ok(mut guard) = LAST_ERROR.lock() {
+        *guard = CString::new("").expect("empty string has no NUL");
+    }
+}
+
+pub(crate) fn c_str_to_rust<'a>(ptr: *const c_char, field: &str) -> Result<&'a str, String> {
+    if ptr.is_null() {
+        return Err(format!("{field} must not be null"));
+    }
+    unsafe { CStr::from_ptr(ptr) }
+        .to_str()
+        .map_err(|err| format!("invalid UTF-8 in {field}: {err}"))
+}
+
+pub(crate) fn write_json_to_buffer(json: &str, out: *mut c_char, cap: usize) -> Result<(), String> {
+    if out.is_null() {
+        return Err("json_out must not be null".into());
+    }
+    if cap == 0 {
+        return Err("json_out buffer capacity must be greater than zero".into());
+    }
+    if json.len() + 1 > cap {
+        return Err(format!(
+            "json_out buffer too small: need {} bytes, have {cap}",
+            json.len() + 1
+        ));
+    }
+    unsafe {
+        ptr::copy_nonoverlapping(json.as_ptr(), out as *mut u8, json.len());
+        *out.add(json.len()) = 0;
+    }
+    Ok(())
+}
+
+fn session_from_ptr(session: *mut c_void) -> Option<&'static mut CSession> {
+    if session.is_null() {
+        set_last_error("session pointer is null");
+        return None;
+    }
+    Some(unsafe { &mut *(session as *mut CSession) })
+}
+
+/// Return the most recent error message, or an empty string when none is set.
+///
+/// The returned pointer is valid until the next call into the daptor C API
+/// on any thread.
+#[no_mangle]
+pub extern "C" fn tui_debug_last_error() -> *const c_char {
+    LAST_ERROR.lock().map(|guard| guard.as_ptr()).unwrap_or(ptr::null())
+}
+
+/// Launch a debug session for `program`.
+///
+/// Returns an opaque session pointer on success, or null on error.
+///
+fn parse_program_args_json(args_json: *const c_char) -> Result<Vec<String>, String> {
+    if args_json.is_null() {
+        return Ok(Vec::new());
+    }
+
+    let args_json = match c_str_to_rust(args_json, "args_json") {
+        Ok(value) => value,
+        Err(err) => return Err(err),
+    };
+    if args_json.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let parsed: Value =
+        serde_json::from_str(args_json).map_err(|err| format!("invalid args_json: {err}"))?;
+    let items =
+        parsed.as_array().ok_or_else(|| "args_json must be a JSON array of strings".to_string())?;
+    Ok(items.iter().filter_map(|item| item.as_str().map(str::to_string)).collect())
+}
+
+/// After a successful launch, call [`tui_debug_sync_snapshot`] once to obtain
+/// the stop-on-entry snapshot captured during initialization.
+#[no_mangle]
+pub extern "C" fn tui_debug_session_launch(
+    program: *const c_char,
+    args_json: *const c_char,
+) -> *mut c_void {
+    clear_last_error();
+
+    if program.is_null() {
+        set_last_error("program must not be null");
+        return ptr::null_mut();
+    }
+
+    let program_str = match unsafe { CStr::from_ptr(program) }.to_str() {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(format!("invalid UTF-8 in program path: {err}"));
+            return ptr::null_mut();
+        }
+    };
+
+    let args = match parse_program_args_json(args_json) {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err);
+            return ptr::null_mut();
+        }
+    };
+
+    match CSession::launch(program_str, &args) {
+        Ok(session) => Box::into_raw(Box::new(session)) as *mut c_void,
+        Err(err) => {
+            set_last_error(err.to_string());
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Launch a native binary debug session via lldb-dap.
+#[no_mangle]
+pub extern "C" fn tui_debug_session_launch_lldb(
+    program: *const c_char,
+    args_json: *const c_char,
+) -> *mut c_void {
+    clear_last_error();
+
+    if program.is_null() {
+        set_last_error("program must not be null");
+        return ptr::null_mut();
+    }
+
+    let program_str = match unsafe { CStr::from_ptr(program) }.to_str() {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(format!("invalid UTF-8 in program path: {err}"));
+            return ptr::null_mut();
+        }
+    };
+
+    let args = match parse_program_args_json(args_json) {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err);
+            return ptr::null_mut();
+        }
+    };
+
+    match CSession::launch_lldb(program_str, &args) {
+        Ok(session) => Box::into_raw(Box::new(session)) as *mut c_void,
+        Err(err) => {
+            set_last_error(err.to_string());
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Launch a native binary debug session via rr record + replay (reverse debugging).
+#[no_mangle]
+pub extern "C" fn tui_debug_session_launch_rr(
+    program: *const c_char,
+    args_json: *const c_char,
+) -> *mut c_void {
+    clear_last_error();
+
+    if program.is_null() {
+        set_last_error("program must not be null");
+        return ptr::null_mut();
+    }
+
+    let program_str = match unsafe { CStr::from_ptr(program) }.to_str() {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(format!("invalid UTF-8 in program path: {err}"));
+            return ptr::null_mut();
+        }
+    };
+
+    let args = match parse_program_args_json(args_json) {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err);
+            return ptr::null_mut();
+        }
+    };
+
+    match CSession::launch_rr(program_str, &args) {
+        Ok(session) => Box::into_raw(Box::new(session)) as *mut c_void,
+        Err(err) => {
+            set_last_error(format!("{err:#}"));
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Resolve a launch profile into JSON written to `json_out`.
+///
+/// `config_path` may be null to use built-in defaults only.
+/// `request_json` describes the CLI target and optional overrides.
+///
+/// Returns `0` on success and `-1` on error.
+#[no_mangle]
+pub extern "C" fn tui_debug_resolve_launch(
+    config_path: *const c_char,
+    request_json: *const c_char,
+    json_out: *mut c_char,
+    cap: usize,
+) -> c_int {
+    clear_last_error();
+
+    if request_json.is_null() {
+        set_last_error("request_json must not be null");
+        return -1;
+    }
+
+    let request_text = match c_str_to_rust(request_json, "request_json") {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err);
+            return -1;
+        }
+    };
+
+    let request: ResolveRequest = match serde_json::from_str(request_text) {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(format!("invalid request_json: {err}"));
+            return -1;
+        }
+    };
+
+    let config_path = if config_path.is_null() {
+        None
+    } else {
+        match c_str_to_rust(config_path, "config_path") {
+            Ok(value) => Some(std::path::Path::new(value)),
+            Err(err) => {
+                set_last_error(err);
+                return -1;
+            }
+        }
+    };
+
+    let resolved = match resolve_launch(config_path, &request) {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(format!("{err:#}"));
+            return -1;
+        }
+    };
+
+    let json = match resolved_launch_to_json(&resolved) {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err.to_string());
+            return -1;
+        }
+    };
+
+    match write_json_to_buffer(&json, json_out, cap) {
+        Ok(()) => 0,
+        Err(err) => {
+            set_last_error(err);
+            -1
+        }
+    }
+}
+
+/// Launch a debug session from a resolved launch profile JSON blob.
+#[no_mangle]
+pub extern "C" fn tui_debug_session_launch_resolved(resolved_json: *const c_char) -> *mut c_void {
+    clear_last_error();
+
+    if resolved_json.is_null() {
+        set_last_error("resolved_json must not be null");
+        return ptr::null_mut();
+    }
+
+    let resolved_text = match unsafe { CStr::from_ptr(resolved_json) }.to_str() {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(format!("invalid UTF-8 in resolved_json: {err}"));
+            return ptr::null_mut();
+        }
+    };
+
+    let resolved = match resolved_launch_from_json(resolved_text) {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err.to_string());
+            return ptr::null_mut();
+        }
+    };
+
+    match CSession::launch_resolved(resolved) {
+        Ok(session) => Box::into_raw(Box::new(session)) as *mut c_void,
+        Err(err) => {
+            set_last_error(format!("{err:#}"));
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Free a session created by [`tui_debug_session_launch`].
+#[no_mangle]
+pub unsafe extern "C" fn tui_debug_session_free(session: *mut c_void) {
+    if session.is_null() {
+        return;
+    }
+    drop(Box::from_raw(session as *mut CSession));
+}
+
+/// Poll for the next session event.
+///
+/// Writes JSON into `json_out` when an event is available.
+///
+/// Returns `0` on success, `1` when no event is ready, and `-1` on error.
+#[no_mangle]
+pub extern "C" fn tui_debug_poll(session: *mut c_void, json_out: *mut c_char, cap: usize) -> c_int {
+    clear_last_error();
+
+    let Some(session) = session_from_ptr(session) else {
+        return -1;
+    };
+
+    if json_out.is_null() {
+        set_last_error("json_out must not be null");
+        return -1;
+    }
+
+    if cap == 0 {
+        set_last_error("json_out buffer capacity must be greater than zero");
+        return -1;
+    }
+
+    match session.poll_json() {
+        Ok(Some(json)) => {
+            if json.len() + 1 > cap {
+                set_last_error(format!(
+                    "json_out buffer too small: need {} bytes, have {cap}",
+                    json.len() + 1
+                ));
+                return -1;
+            }
+
+            unsafe {
+                ptr::copy_nonoverlapping(json.as_ptr(), json_out as *mut u8, json.len());
+                *json_out.add(json.len()) = 0;
+            }
+            0
+        }
+        Ok(None) => 1,
+        Err(err) => {
+            set_last_error(err.to_string());
+            -1
+        }
+    }
+}
+
+/// Execute a debugger command described as JSON, e.g. `{"op":"continue"}`.
+#[no_mangle]
+pub extern "C" fn tui_debug_command(session: *mut c_void, cmd_json: *const c_char) -> c_int {
+    clear_last_error();
+
+    let Some(session) = session_from_ptr(session) else {
+        return -1;
+    };
+
+    if cmd_json.is_null() {
+        set_last_error("cmd_json must not be null");
+        return -1;
+    }
+
+    let cmd_str = match unsafe { CStr::from_ptr(cmd_json) }.to_str() {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(format!("invalid UTF-8 in cmd_json: {err}"));
+            return -1;
+        }
+    };
+
+    match catch_unwind(AssertUnwindSafe(|| session.command(cmd_str))) {
+        Ok(Ok(())) => 0,
+        Ok(Err(err)) => {
+            set_last_error(err.to_string());
+            -1
+        }
+        Err(_) => {
+            set_last_error("internal debugger command panic");
+            -1
+        }
+    }
+}
+
+/// Refresh debugger state and write a snapshot as JSON into `json_out`.
+///
+/// Returns the cached stop-on-entry snapshot from launch when still available,
+/// otherwise fetches a fresh snapshot from the debug adapter.
+///
+/// JSON shape: `{"type":"snapshot","snapshot":{...}}`
+///
+/// Returns `0` on success and `-1` on error.
+#[no_mangle]
+pub extern "C" fn tui_debug_sync_snapshot(
+    session: *mut c_void,
+    json_out: *mut c_char,
+    cap: usize,
+) -> c_int {
+    clear_last_error();
+
+    let Some(session) = session_from_ptr(session) else {
+        return -1;
+    };
+
+    match session.sync_snapshot_json() {
+        Ok(json) => match write_json_to_buffer(&json, json_out, cap) {
+            Ok(()) => 0,
+            Err(err) => {
+                set_last_error(err);
+                -1
+            }
+        },
+        Err(err) => {
+            set_last_error(err.to_string());
+            -1
+        }
+    }
+}
+
+/// Drain buffered program console output into `json_out` as a JSON array.
+///
+/// Each entry has `category` and `text` fields.
+///
+/// Returns `0` on success and `-1` on error.
+#[no_mangle]
+pub extern "C" fn tui_debug_drain_console(
+    session: *mut c_void,
+    json_out: *mut c_char,
+    cap: usize,
+) -> c_int {
+    clear_last_error();
+
+    let Some(session) = session_from_ptr(session) else {
+        return -1;
+    };
+
+    match session.drain_console_json() {
+        Ok(json) => match write_json_to_buffer(&json, json_out, cap) {
+            Ok(()) => 0,
+            Err(err) => {
+                set_last_error(err);
+                -1
+            }
+        },
+        Err(err) => {
+            set_last_error(err.to_string());
+            -1
+        }
+    }
+}
+
+/// Drain newly captured HTTP exchanges into `json_out`.
+///
+/// JSON shape: `{"proxy_address":"127.0.0.1:PORT","intercept_enabled":false,"exchanges":[...]}`
+///
+/// Returns `0` when data was written, `1` when nothing new is available, and `-1` on error.
+#[no_mangle]
+pub extern "C" fn tui_debug_drain_network(
+    session: *mut c_void,
+    json_out: *mut c_char,
+    cap: usize,
+) -> c_int {
+    clear_last_error();
+
+    let Some(session) = session_from_ptr(session) else {
+        return -1;
+    };
+
+    match session.drain_network_json() {
+        Ok(json) => {
+            if json.is_empty() {
+                return 1;
+            }
+            match write_json_to_buffer(&json, json_out, cap) {
+                Ok(()) => 0,
+                Err(err) => {
+                    set_last_error(err);
+                    -1
+                }
+            }
+        }
+        Err(err) => {
+            set_last_error(err.to_string());
+            -1
+        }
+    }
+}
+
+/// Send a real HTTP request from the Compose tab and return captured exchange JSON.
+///
+/// `session` may be null to send without an active debug session.
+///
+/// Returns `0` on success, and `-1` on error.
+#[no_mangle]
+pub extern "C" fn tui_debug_send_network_compose(
+    session: *mut c_void,
+    method: *const c_char,
+    url: *const c_char,
+    headers: *const c_char,
+    body: *const c_char,
+    timeout_ms: i32,
+    json_out: *mut c_char,
+    cap: usize,
+) -> c_int {
+    clear_last_error();
+
+    let method = match c_str_to_rust(method, "method") {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err);
+            return -1;
+        }
+    };
+    let url = match c_str_to_rust(url, "url") {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err);
+            return -1;
+        }
+    };
+    let headers = match c_str_to_rust(headers, "headers") {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err);
+            return -1;
+        }
+    };
+    let body = match c_str_to_rust(body, "body") {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err);
+            return -1;
+        }
+    };
+
+    let json = if session.is_null() {
+        match crate::network::send_compose_request(None, method, url, headers, body, timeout_ms) {
+            Ok(exchange) => {
+                let drain = crate::network::NetworkDrain {
+                    proxy_address: String::new(),
+                    intercept_enabled: false,
+                    exchanges: vec![exchange],
+                };
+                match serde_json::to_string(&drain) {
+                    Ok(json) => json,
+                    Err(err) => {
+                        set_last_error(err.to_string());
+                        return -1;
+                    }
+                }
+            }
+            Err(err) => {
+                set_last_error(err.to_string());
+                return -1;
+            }
+        }
+    } else if let Some(session) = session_from_ptr(session) {
+        match session.send_network_compose_json(method, url, headers, body, timeout_ms) {
+            Ok(json) => json,
+            Err(err) => {
+                set_last_error(err.to_string());
+                return -1;
+            }
+        }
+    } else {
+        return -1;
+    };
+
+    match write_json_to_buffer(&json, json_out, cap) {
+        Ok(()) => 0,
+        Err(err) => {
+            set_last_error(err);
+            -1
+        }
+    }
+}
+
+/// Return the active network capture proxy address, if any.
+///
+/// Returns `0` on success, `1` when no proxy is active, and `-1` on error.
+#[no_mangle]
+pub extern "C" fn tui_debug_network_proxy_address(
+    session: *mut c_void,
+    address_out: *mut c_char,
+    cap: usize,
+) -> c_int {
+    clear_last_error();
+
+    let Some(session) = session_from_ptr(session) else {
+        return -1;
+    };
+
+    match session.network_proxy_address() {
+        Some(address) => match write_json_to_buffer(&address, address_out, cap) {
+            Ok(()) => 0,
+            Err(err) => {
+                set_last_error(err);
+                -1
+            }
+        },
+        None => 1,
+    }
+}
+
+/// Write raw bytes to the debuggee stdin (integrated terminal PTY).
+///
+/// Returns `0` on success and `-1` on error.
+#[no_mangle]
+pub extern "C" fn tui_debug_terminal_write(
+    session: *mut c_void,
+    bytes: *const u8,
+    len: usize,
+) -> c_int {
+    clear_last_error();
+
+    let Some(session) = session_from_ptr(session) else {
+        return -1;
+    };
+
+    if bytes.is_null() && len > 0 {
+        set_last_error("bytes must not be null when len > 0");
+        return -1;
+    }
+
+    let payload = if len == 0 { &[] } else { unsafe { std::slice::from_raw_parts(bytes, len) } };
+
+    match session.terminal_write(payload) {
+        Ok(()) => 0,
+        Err(err) => {
+            set_last_error(err.to_string());
+            -1
+        }
+    }
+}
+
+/// Evaluate an expression in the given stack frame.
+///
+/// `context` is typically `"repl"` or `"watch"`. Result is written to `result_out`.
+///
+/// Returns `0` on success and `-1` on error.
+#[no_mangle]
+pub extern "C" fn tui_debug_evaluate(
+    session: *mut c_void,
+    expression: *const c_char,
+    frame_id: i64,
+    context: *const c_char,
+    result_out: *mut c_char,
+    cap: usize,
+) -> c_int {
+    clear_last_error();
+
+    let Some(session) = session_from_ptr(session) else {
+        return -1;
+    };
+
+    let expression = match c_str_to_rust(expression, "expression") {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err);
+            return -1;
+        }
+    };
+
+    let context = match c_str_to_rust(context, "context") {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err);
+            return -1;
+        }
+    };
+
+    match session.evaluate(expression, frame_id, context) {
+        Ok(result) => match write_json_to_buffer(&result, result_out, cap) {
+            Ok(()) => 0,
+            Err(err) => {
+                set_last_error(err);
+                -1
+            }
+        },
+        Err(err) => {
+            set_last_error(err.to_string());
+            -1
+        }
+    }
+}
+
+/// Request REPL completions for `text` at `column` (1-based) in `frame_id`.
+///
+/// On success, writes a JSON array of completion items to `result_out`.
+///
+/// Returns `0` on success and `-1` on error.
+#[no_mangle]
+pub extern "C" fn tui_debug_completions(
+    session: *mut c_void,
+    text: *const c_char,
+    column: i64,
+    frame_id: i64,
+    result_out: *mut c_char,
+    cap: usize,
+) -> c_int {
+    clear_last_error();
+
+    let Some(session) = session_from_ptr(session) else {
+        return -1;
+    };
+
+    let text = match c_str_to_rust(text, "text") {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err);
+            return -1;
+        }
+    };
+
+    match session.completions(text, column, frame_id) {
+        Ok(result) => match write_json_to_buffer(&result, result_out, cap) {
+            Ok(()) => 0,
+            Err(err) => {
+                set_last_error(err);
+                -1
+            }
+        },
+        Err(err) => {
+            set_last_error(err.to_string());
+            -1
+        }
+    }
+}
+
+/// Set breakpoints for `path`. `lines_json` is a JSON array of line numbers (`[1,5]`) or
+/// breakpoint objects (`[{"line":24,"condition":"x > 1","hitCondition":">= 5"}]`).
+/// On success, writes adapter results to `results_out` as
+/// `[{"line":24,"verified":true,"hitCount":3}]` when `results_out` is non-null.
+#[no_mangle]
+pub extern "C" fn tui_debug_set_breakpoints(
+    session: *mut c_void,
+    path: *const c_char,
+    lines_json: *const c_char,
+    results_out: *mut c_char,
+    results_cap: usize,
+) -> c_int {
+    clear_last_error();
+
+    let Some(session) = session_from_ptr(session) else {
+        return -1;
+    };
+
+    let path = match c_str_to_rust(path, "path") {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err);
+            return -1;
+        }
+    };
+
+    let lines_json = match c_str_to_rust(lines_json, "lines_json") {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err);
+            return -1;
+        }
+    };
+
+    let parsed: Value = match serde_json::from_str(lines_json) {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(format!("invalid lines_json: {err}"));
+            return -1;
+        }
+    };
+
+    let breakpoints: Vec<SourceBreakpoint> = match parsed {
+        Value::Array(items) => items
+            .into_iter()
+            .filter_map(|item| {
+                if let Some(line) = item.as_u64() {
+                    return Some(SourceBreakpoint {
+                        line: line as u32,
+                        condition: None,
+                        hit_condition: None,
+                    });
+                }
+                if !item.is_object() {
+                    return None;
+                }
+                let line = item.get("line").and_then(|value| value.as_u64())? as u32;
+                let condition = item
+                    .get("condition")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+                    .filter(|value| !value.is_empty());
+                let hit_condition = item
+                    .get("hitCondition")
+                    .or_else(|| item.get("hit_condition"))
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+                    .filter(|value| !value.is_empty());
+                Some(SourceBreakpoint { line, condition, hit_condition })
+            })
+            .collect(),
+        _ => {
+            set_last_error("lines_json must be a JSON array of line numbers or breakpoint objects");
+            return -1;
+        }
+    };
+
+    match session.set_breakpoints(path, &breakpoints) {
+        Ok(results_json) => {
+            if !results_out.is_null() && results_cap > 0 {
+                if let Err(err) = write_json_to_buffer(&results_json, results_out, results_cap) {
+                    set_last_error(err);
+                    return -1;
+                }
+            }
+            0
+        }
+        Err(err) => {
+            set_last_error(err.to_string());
+            -1
+        }
+    }
+}
+
+/// Resolve a variable to a DAP `dataId` for `setDataBreakpoints`.
+/// Writes `{"dataId":"...","description":"...","accessTypes":["write"]}` to `json_out`.
+#[no_mangle]
+pub extern "C" fn tui_debug_data_breakpoint_info(
+    session: *mut c_void,
+    variables_reference: i64,
+    frame_id: i64,
+    name: *const c_char,
+    json_out: *mut c_char,
+    cap: usize,
+) -> c_int {
+    clear_last_error();
+
+    let Some(session) = session_from_ptr(session) else {
+        return -1;
+    };
+
+    let name = if name.is_null() {
+        None
+    } else {
+        match c_str_to_rust(name, "name") {
+            Ok(value) => Some(value),
+            Err(err) => {
+                set_last_error(err);
+                return -1;
+            }
+        }
+    };
+
+    match session.data_breakpoint_info(variables_reference, frame_id, name.as_deref()) {
+        Ok(json) => match write_json_to_buffer(&json, json_out, cap) {
+            Ok(()) => 0,
+            Err(err) => {
+                set_last_error(err);
+                -1
+            }
+        },
+        Err(err) => {
+            set_last_error(err.to_string());
+            -1
+        }
+    }
+}
+
+/// Replace all function breakpoints. `breakpoints_json` is a JSON array of
+/// `{"name":"main","condition":"...","hitCondition":"..."}`.
+/// On success, writes adapter results to `results_out` when non-null.
+#[no_mangle]
+pub extern "C" fn tui_debug_set_function_breakpoints(
+    session: *mut c_void,
+    breakpoints_json: *const c_char,
+    results_out: *mut c_char,
+    results_cap: usize,
+) -> c_int {
+    clear_last_error();
+
+    let Some(session) = session_from_ptr(session) else {
+        return -1;
+    };
+
+    let breakpoints_json = match c_str_to_rust(breakpoints_json, "breakpoints_json") {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err);
+            return -1;
+        }
+    };
+
+    let parsed: Value = match serde_json::from_str(breakpoints_json) {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(format!("invalid breakpoints_json: {err}"));
+            return -1;
+        }
+    };
+
+    let breakpoints: Vec<FunctionBreakpoint> = match parsed {
+        Value::Array(items) => items
+            .into_iter()
+            .filter_map(|item| {
+                if !item.is_object() {
+                    return None;
+                }
+                let name = item
+                    .get("name")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+                    .filter(|value| !value.is_empty())?;
+                let condition = item
+                    .get("condition")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+                    .filter(|value| !value.is_empty());
+                let hit_condition = item
+                    .get("hitCondition")
+                    .or_else(|| item.get("hit_condition"))
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+                    .filter(|value| !value.is_empty());
+                Some(FunctionBreakpoint { name, condition, hit_condition })
+            })
+            .collect(),
+        _ => {
+            set_last_error("breakpoints_json must be a JSON array");
+            return -1;
+        }
+    };
+
+    match session.set_function_breakpoints(&breakpoints) {
+        Ok(results_json) => {
+            if !results_out.is_null() && results_cap > 0 {
+                if let Err(err) = write_json_to_buffer(&results_json, results_out, results_cap) {
+                    set_last_error(err);
+                    return -1;
+                }
+            }
+            0
+        }
+        Err(err) => {
+            set_last_error(err.to_string());
+            -1
+        }
+    }
+}
+
+/// Enable exception breakpoint filters. `filters_json` is a JSON array of filter ids
+/// (`["uncaught","raised"]`) or objects (`[{"filter":"cxx-throw","condition":"std::runtime_error"}]`).
+#[no_mangle]
+pub extern "C" fn tui_debug_set_exception_breakpoints(
+    session: *mut c_void,
+    filters_json: *const c_char,
+) -> c_int {
+    clear_last_error();
+
+    let Some(session) = session_from_ptr(session) else {
+        return -1;
+    };
+
+    let filters_json = match c_str_to_rust(filters_json, "filters_json") {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err);
+            return -1;
+        }
+    };
+
+    let parsed: Value = match serde_json::from_str(filters_json) {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(format!("invalid filters_json: {err}"));
+            return -1;
+        }
+    };
+
+    let settings = match parse_exception_breakpoint_settings(&parsed) {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err);
+            return -1;
+        }
+    };
+
+    match session.set_exception_breakpoints(&settings) {
+        Ok(()) => 0,
+        Err(err) => {
+            set_last_error(err.to_string());
+            -1
+        }
+    }
+}
+
+fn parse_exception_breakpoint_settings(
+    parsed: &Value,
+) -> Result<Vec<ExceptionBreakpointSetting>, String> {
+    let items = parsed.as_array().ok_or_else(|| "filters_json must be a JSON array".to_string())?;
+
+    let mut settings = Vec::new();
+    for item in items {
+        if let Some(filter) = item.as_str() {
+            if !filter.is_empty() {
+                settings.push(ExceptionBreakpointSetting {
+                    filter: filter.to_string(),
+                    condition: None,
+                });
+            }
+            continue;
+        }
+
+        let Some(object) = item.as_object() else {
+            return Err("filters_json entries must be strings or objects".to_string());
+        };
+        let filter = object
+            .get("filter")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "filters_json object entries require a non-empty filter".to_string())?;
+        let condition = object
+            .get("condition")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        settings.push(ExceptionBreakpointSetting { filter: filter.to_string(), condition });
+    }
+
+    Ok(settings)
+}
+
+/// Replace all data breakpoints. `breakpoints_json` is a JSON array of
+/// `{"dataId":"...","description":"x","accessType":"write","condition":"..."}`.
+/// On success, writes adapter results to `results_out` when non-null.
+#[no_mangle]
+pub extern "C" fn tui_debug_set_data_breakpoints(
+    session: *mut c_void,
+    breakpoints_json: *const c_char,
+    results_out: *mut c_char,
+    results_cap: usize,
+) -> c_int {
+    clear_last_error();
+
+    let Some(session) = session_from_ptr(session) else {
+        return -1;
+    };
+
+    let breakpoints_json = match c_str_to_rust(breakpoints_json, "breakpoints_json") {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err);
+            return -1;
+        }
+    };
+
+    let parsed: Value = match serde_json::from_str(breakpoints_json) {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(format!("invalid breakpoints_json: {err}"));
+            return -1;
+        }
+    };
+
+    let breakpoints: Vec<DataBreakpoint> = match parsed {
+        Value::Array(items) => items
+            .into_iter()
+            .filter_map(|item| {
+                if !item.is_object() {
+                    return None;
+                }
+                let data_id = item
+                    .get("dataId")
+                    .or_else(|| item.get("data_id"))
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+                    .filter(|value| !value.is_empty())?;
+                let description = item
+                    .get("description")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+                    .unwrap_or_default();
+                let access_type = item
+                    .get("accessType")
+                    .or_else(|| item.get("access_type"))
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| "write".to_string());
+                let condition = item
+                    .get("condition")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+                    .filter(|value| !value.is_empty());
+                Some(DataBreakpoint { data_id, description, access_type, condition })
+            })
+            .collect(),
+        _ => {
+            set_last_error("breakpoints_json must be a JSON array");
+            return -1;
+        }
+    };
+
+    match session.set_data_breakpoints(&breakpoints) {
+        Ok(results_json) => {
+            if !results_out.is_null() && results_cap > 0 {
+                if let Err(err) = write_json_to_buffer(&results_json, results_out, results_cap) {
+                    set_last_error(err);
+                    return -1;
+                }
+            }
+            0
+        }
+        Err(err) => {
+            set_last_error(err.to_string());
+            -1
+        }
+    }
+}
+
+/// Fetch variables for a DAP `variablesReference` into `json_out` as a JSON array.
+#[no_mangle]
+pub extern "C" fn tui_debug_fetch_variables(
+    session: *mut c_void,
+    variables_reference: i64,
+    scope_name: *const c_char,
+    json_out: *mut c_char,
+    cap: usize,
+) -> c_int {
+    clear_last_error();
+
+    let Some(session) = session_from_ptr(session) else {
+        return -1;
+    };
+
+    let scope = if scope_name.is_null() {
+        None
+    } else {
+        match c_str_to_rust(scope_name, "scope_name") {
+            Ok(name) => Some(name),
+            Err(err) => {
+                set_last_error(err);
+                return -1;
+            }
+        }
+    };
+
+    match session.fetch_variables_json(variables_reference, scope.as_deref()) {
+        Ok(json) => match write_json_to_buffer(&json, json_out, cap) {
+            Ok(()) => 0,
+            Err(err) => {
+                set_last_error(err);
+                -1
+            }
+        },
+        Err(err) => {
+            set_last_error(err.to_string());
+            -1
+        }
+    }
+}
+
+/// Set a variable value in the given scope (`variablesReference`).
+#[no_mangle]
+pub extern "C" fn tui_debug_set_variable(
+    session: *mut c_void,
+    variables_reference: i64,
+    name: *const c_char,
+    value: *const c_char,
+    result_out: *mut c_char,
+    cap: usize,
+) -> c_int {
+    clear_last_error();
+
+    let Some(session) = session_from_ptr(session) else {
+        return -1;
+    };
+
+    let name = match c_str_to_rust(name, "name") {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err);
+            return -1;
+        }
+    };
+
+    let value = match c_str_to_rust(value, "value") {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err);
+            return -1;
+        }
+    };
+
+    match session.set_variable(variables_reference, name, value) {
+        Ok(json) => match write_json_to_buffer(&json, result_out, cap) {
+            Ok(()) => 0,
+            Err(err) => {
+                set_last_error(err);
+                -1
+            }
+        },
+        Err(err) => {
+            set_last_error(err.to_string());
+            -1
+        }
+    }
+}
+
+/// Fetch source text for a DAP `sourceReference` into `source_out`.
+#[no_mangle]
+pub extern "C" fn tui_debug_fetch_source(
+    session: *mut c_void,
+    source_reference: i64,
+    source_out: *mut c_char,
+    cap: usize,
+) -> c_int {
+    clear_last_error();
+
+    let Some(session) = session_from_ptr(session) else {
+        return -1;
+    };
+
+    match session.fetch_source(source_reference) {
+        Ok(source) => match write_json_to_buffer(&source, source_out, cap) {
+            Ok(()) => 0,
+            Err(err) => {
+                set_last_error(err);
+                -1
+            }
+        },
+        Err(err) => {
+            set_last_error(err.to_string());
+            -1
+        }
+    }
+}
+
+/// Fetch possible step-in targets for a stack frame into `json_out` as a JSON array.
+#[no_mangle]
+pub extern "C" fn tui_debug_fetch_step_in_targets(
+    session: *mut c_void,
+    frame_id: i64,
+    json_out: *mut c_char,
+    cap: usize,
+) -> c_int {
+    clear_last_error();
+
+    let Some(session) = session_from_ptr(session) else {
+        return -1;
+    };
+
+    match session.fetch_step_in_targets_json(frame_id) {
+        Ok(json) => match write_json_to_buffer(&json, json_out, cap) {
+            Ok(()) => 0,
+            Err(err) => {
+                set_last_error(err);
+                -1
+            }
+        },
+        Err(err) => {
+            set_last_error(err.to_string());
+            -1
+        }
+    }
+}
+
+/// Fetch possible goto targets for a source location into `json_out` as a JSON array.
+#[no_mangle]
+pub extern "C" fn tui_debug_fetch_goto_targets(
+    session: *mut c_void,
+    path: *const c_char,
+    line: i64,
+    column: i64,
+    source_reference: i64,
+    json_out: *mut c_char,
+    cap: usize,
+) -> c_int {
+    clear_last_error();
+
+    let Some(session) = session_from_ptr(session) else {
+        return -1;
+    };
+
+    let path = match c_str_to_rust(path, "path") {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err);
+            return -1;
+        }
+    };
+
+    match session.fetch_goto_targets_json(&path, line, column, source_reference) {
+        Ok(json) => match write_json_to_buffer(&json, json_out, cap) {
+            Ok(()) => 0,
+            Err(err) => {
+                set_last_error(err);
+                -1
+            }
+        },
+        Err(err) => {
+            set_last_error(err.to_string());
+            -1
+        }
+    }
+}
+
+/// Read memory via DAP `readMemory` into `json_out` as JSON.
+#[no_mangle]
+pub extern "C" fn tui_debug_read_memory(
+    session: *mut c_void,
+    memory_reference: *const c_char,
+    offset: i64,
+    count: i64,
+    json_out: *mut c_char,
+    cap: usize,
+) -> c_int {
+    clear_last_error();
+
+    let Some(session) = session_from_ptr(session) else {
+        return -1;
+    };
+
+    let memory_reference = match c_str_to_rust(memory_reference, "memory_reference") {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err);
+            return -1;
+        }
+    };
+
+    match session.read_memory_json(memory_reference, offset, count) {
+        Ok(json) => match write_json_to_buffer(&json, json_out, cap) {
+            Ok(()) => 0,
+            Err(err) => {
+                set_last_error(err);
+                -1
+            }
+        },
+        Err(err) => {
+            set_last_error(err.to_string());
+            -1
+        }
+    }
+}
+
+/// Write memory via DAP `writeMemory`. `data` is lowercase hex (two digits per byte).
+#[no_mangle]
+pub extern "C" fn tui_debug_write_memory(
+    session: *mut c_void,
+    memory_reference: *const c_char,
+    offset: i64,
+    data: *const c_char,
+    json_out: *mut c_char,
+    cap: usize,
+) -> c_int {
+    clear_last_error();
+
+    let Some(session) = session_from_ptr(session) else {
+        return -1;
+    };
+
+    let memory_reference = match c_str_to_rust(memory_reference, "memory_reference") {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err);
+            return -1;
+        }
+    };
+    let data = match c_str_to_rust(data, "data") {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err);
+            return -1;
+        }
+    };
+
+    match session.write_memory_json(memory_reference, offset, data) {
+        Ok(json) => match write_json_to_buffer(&json, json_out, cap) {
+            Ok(()) => 0,
+            Err(err) => {
+                set_last_error(err);
+                -1
+            }
+        },
+        Err(err) => {
+            set_last_error(err.to_string());
+            -1
+        }
+    }
+}
+
+/// Disassemble instructions via DAP `disassemble` into `json_out` as a JSON array.
+#[no_mangle]
+pub extern "C" fn tui_debug_disassemble(
+    session: *mut c_void,
+    memory_reference: *const c_char,
+    instruction_offset: i64,
+    offset: i64,
+    instruction_count: i64,
+    json_out: *mut c_char,
+    cap: usize,
+) -> c_int {
+    clear_last_error();
+
+    let Some(session) = session_from_ptr(session) else {
+        return -1;
+    };
+
+    let memory_reference = match c_str_to_rust(memory_reference, "memory_reference") {
+        Ok(value) => value,
+        Err(err) => {
+            set_last_error(err);
+            return -1;
+        }
+    };
+
+    match session.disassemble_json(memory_reference, instruction_offset, offset, instruction_count)
+    {
+        Ok(json) => match write_json_to_buffer(&json, json_out, cap) {
+            Ok(()) => 0,
+            Err(err) => {
+                set_last_error(err);
+                -1
+            }
+        },
+        Err(err) => {
+            set_last_error(err.to_string());
+            -1
+        }
+    }
+}
+
+#[cfg(test)]
+mod exception_breakpoint_settings_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parse_exception_breakpoint_settings_accepts_strings_and_objects() {
+        let parsed = json!([
+            "uncaught",
+            { "filter": "cxx-throw", "condition": "std::runtime_error" }
+        ]);
+        let settings = parse_exception_breakpoint_settings(&parsed).expect("parse settings");
+        assert_eq!(settings.len(), 2);
+        assert_eq!(settings[0].filter, "uncaught");
+        assert!(settings[0].condition.is_none());
+        assert_eq!(settings[1].filter, "cxx-throw");
+        assert_eq!(settings[1].condition.as_deref(), Some("std::runtime_error"));
+    }
+}

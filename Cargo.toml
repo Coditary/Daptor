@@ -1,11 +1,27 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/tui-debug-core",
-    "crates/tui-debug-cli",
+    "crates/daptor-core",
+    "crates/daptor-cli",
 ]
 
 [workspace.package]
 edition = "2021"
 version = "0.1.0"
 license = "MIT"
+
+[workspace.lints.clippy]
+not_unsafe_ptr_arg_deref = "allow"
+large_enum_variant = "allow"
+type_complexity = "allow"
+needless_update = "allow"
+missing_safety_doc = "allow"
+collapsible_if = "allow"
+collapsible_match = "allow"
+needless_borrow = "allow"
+needless_option_as_deref = "allow"
+manual_ok_err = "allow"
+question_mark = "allow"
+single_match = "allow"
+unnecessary_cast = "allow"
+unnecessary_sort_by = "allow"

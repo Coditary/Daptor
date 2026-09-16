@@ -19,9 +19,9 @@ std::filesystem::path home_directory() {
 std::filesystem::path config_directory() {
     const char* xdg = std::getenv("XDG_CONFIG_HOME");
     if (xdg != nullptr && xdg[0] != '\0') {
-        return std::filesystem::path(xdg) / "tui-debug";
+        return std::filesystem::path(xdg) / "daptor";
     }
-    return home_directory() / ".config" / "tui-debug";
+    return home_directory() / ".config" / "daptor";
 }
 
 std::filesystem::path expand_user_path(std::filesystem::path path) {

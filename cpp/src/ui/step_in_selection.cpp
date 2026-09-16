@@ -5,7 +5,7 @@
 
 #if __has_include(<nlohmann/json.hpp>)
 #include <nlohmann/json.hpp>
-#define TUI_DEBUG_UI_HAS_NLOHMANN_JSON 1
+#define DAPTOR_UI_HAS_NLOHMANN_JSON 1
 #endif
 
 namespace tui_debug_ui {
@@ -98,7 +98,7 @@ std::vector<StepInTargetSpan> build_step_in_target_spans(const std::string& line
     error_out.clear();
     const std::vector<StepInTargetSpan> parsed = find_step_in_targets_on_line(line_text);
 
-#ifdef TUI_DEBUG_UI_HAS_NLOHMANN_JSON
+#ifdef DAPTOR_UI_HAS_NLOHMANN_JSON
     try {
         const nlohmann::json root = nlohmann::json::parse(targets_json);
         if (!root.is_array()) {

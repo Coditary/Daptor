@@ -229,6 +229,33 @@ std::optional<std::string> parse_memory_address_reference(const std::string& inp
     return "0x" + hex;
 }
 
+std::optional<std::uint64_t> parse_memory_address_u64(const std::string& input) {
+    const std::optional<std::string> reference = parse_memory_address_reference(input);
+    if (!reference.has_value()) {
+        return std::nullopt;
+    }
+
+    std::string hex = *reference;
+    if (hex.rfind("0x", 0) == 0 || hex.rfind("0X", 0) == 0) {
+        hex = hex.substr(2);
+    }
+    if (hex.empty()) {
+        return std::nullopt;
+    }
+
+    try {
+        return std::stoull(hex, nullptr, 16);
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+std::string format_memory_address(std::uint64_t address) {
+    std::ostringstream out;
+    out << "0x" << std::hex << address;
+    return out.str();
+}
+
 std::optional<std::string> extract_address_from_eval_result(const std::string& result) {
     std::string trimmed;
     for (char ch : result) {
@@ -261,6 +288,74 @@ std::optional<std::string> extract_address_from_eval_result(const std::string& r
         return std::nullopt;
     }
     return "0x" + hex;
+}
+
+std::size_t memory_search_match_byte_length(const std::string& query) {
+    if (query.empty()) {
+        return 0;
+    }
+
+    std::string query_hex;
+    bool query_is_hex = true;
+    for (char ch : query) {
+        if (std::isxdigit(static_cast<unsigned char>(ch))) {
+            query_hex.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+            continue;
+        }
+        if (!std::isspace(static_cast<unsigned char>(ch))) {
+            query_is_hex = false;
+            break;
+        }
+    }
+
+    if (query_is_hex && !query_hex.empty()) {
+        if (query_hex.size() % 2 != 0) {
+            query_hex.insert(0, "0");
+        }
+        return query_hex.size() / 2;
+    }
+
+    std::size_t length = 0;
+    for (unsigned char ch : query) {
+        if (!std::isspace(ch)) {
+            ++length;
+        }
+    }
+    return length;
+}
+
+std::optional<MemoryDumpRowLayout> memory_dump_row_layout(const std::string& line) {
+    if (!is_memory_dump_row(line)) {
+        return std::nullopt;
+    }
+
+    const std::size_t hex_start = line.find("  ", 2);
+    const std::size_t ascii_bar = line.find("  |");
+    const std::size_t ascii_pipe = line.find('|', ascii_bar);
+    if (hex_start == std::string::npos || ascii_bar == std::string::npos || ascii_pipe == std::string::npos ||
+        ascii_pipe + 1 >= line.size()) {
+        return std::nullopt;
+    }
+
+    return MemoryDumpRowLayout{static_cast<int>(hex_start + 2), static_cast<int>(ascii_pipe + 1)};
+}
+
+int memory_dump_hex_column(int byte_in_row) {
+    int column = 0;
+    for (int byte = 0; byte < byte_in_row; ++byte) {
+        column += 2;
+        if (byte + 1 < 16) {
+            column += ((byte + 1) % 4 == 0) ? 2 : 1;
+        }
+    }
+    return column;
+}
+
+int memory_dump_hex_width(int byte_count) {
+    if (byte_count <= 0) {
+        return 0;
+    }
+    return memory_dump_hex_column(byte_count - 1) + 2;
 }
 
 std::vector<std::size_t> find_memory_search_matches(const std::string& hex_data, const std::string& query) {

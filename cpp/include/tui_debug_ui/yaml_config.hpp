@@ -7,7 +7,7 @@
 
 namespace tui_debug_ui {
 
-/// Minimal YAML subset parser for tui-debug config files.
+/// Minimal YAML subset parser for daptor config files.
 struct YamlNode {
     enum class Kind { Null, Scalar, Sequence, Mapping } kind = Kind::Null;
     std::string scalar;

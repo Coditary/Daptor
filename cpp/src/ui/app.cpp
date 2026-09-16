@@ -58,7 +58,7 @@
 
 #if __has_include(<nlohmann/json.hpp>)
 #include <nlohmann/json.hpp>
-#define TUI_DEBUG_UI_HAS_NLOHMANN_JSON 1
+#define DAPTOR_UI_HAS_NLOHMANN_JSON 1
 #endif
 
 namespace tui_debug_ui {
@@ -102,7 +102,7 @@ std::string repl_completion_ghost_suffix(const std::string& typed, const std::st
 }
 
 std::vector<tui_debug_ui::ReplCompletionCandidate> parse_repl_completions(const std::string& json) {
-#if defined(TUI_DEBUG_UI_HAS_NLOHMANN_JSON)
+#if defined(DAPTOR_UI_HAS_NLOHMANN_JSON)
     try {
         const nlohmann::json root = nlohmann::json::parse(json);
         if (!root.is_array() || root.empty()) {
@@ -693,6 +693,12 @@ class DebugChromeRoot : public tuinator::Widget {
                 return true;
             }
             if (debug_app_ != nullptr && debug_app_->handle_memory_toolbar_input_key(event)) {
+                return true;
+            }
+            if (debug_app_ != nullptr && debug_app_->handle_memory_list_navigation_key(event)) {
+                return true;
+            }
+            if (debug_app_ != nullptr && debug_app_->handle_memory_activate_key(event)) {
                 return true;
             }
             if (debug_app_ != nullptr && debug_app_->handle_memory_input_key(event)) {
@@ -1554,8 +1560,7 @@ void DebugApp::handle_launch_complete() {
             resolve_watches_from_locals();
         } else if (model_.session_state == "exited" || model_.session_state == "Exited") {
             model_.status_message =
-                "Program exited before stopping — press Restart, or rebuild: "
-                "examples/native/build.sh";
+                "Program exited before stopping — press Restart, or rebuild the debug target";
         }
         sync_breakpoints_list_panel();
         sync_breakpoints_to_panel();
@@ -1686,7 +1691,7 @@ void DebugApp::refresh_network_panel() {
         return filtered;
     };
 
-    const char* force_mock = std::getenv("TUI_DEBUG_NETWORK_MOCK");
+    const char* force_mock = std::getenv("DAPTOR_NETWORK_MOCK");
     if ((mode_ == SessionMode::Mock ||
          (force_mock != nullptr && force_mock[0] != '\0' && std::strcmp(force_mock, "0") != 0)) &&
         !model_.network_capture_live) {
@@ -1898,7 +1903,7 @@ void DebugApp::handle_session_event(const SessionIoEvent& event) {
     case SessionIoEventKind::MemoryReady: {
         SidebarSlot* slot = slot_by_id(event.slot_id);
         if (slot != nullptr && event.success) {
-#if TUI_DEBUG_UI_HAS_NLOHMANN_JSON
+#if DAPTOR_UI_HAS_NLOHMANN_JSON
             const auto parsed = nlohmann::json::parse(event.payload, nullptr, false);
             if (parsed.is_object()) {
                 const std::string address = parsed.value("address", std::string{});
@@ -1908,15 +1913,42 @@ void DebugApp::handle_session_event(const SessionIoEvent& event) {
                 slot->cached_memory_hex_data = data;
                 slot->cached_memory_response_address = address;
                 slot->cached_memory_lines = format_memory_hex_dump(address, data);
-                if (slot->memory != nullptr && !address.empty()) {
+                if (slot->memory != nullptr && !address.empty() && !slot->memory->is_address_input_focused()) {
                     slot->memory->set_address_value(address);
                 }
+                if (!slot->memory_search_query.empty()) {
+                    slot->memory_search_matches =
+                        find_memory_search_matches(slot->cached_memory_hex_data, slot->memory_search_query);
+                    if (slot->memory_search_matches.empty()) {
+                        slot->memory_search_match_index = -1;
+                    } else if (slot->memory_search_match_index < 0 ||
+                               slot->memory_search_match_index >=
+                                   static_cast<int>(slot->memory_search_matches.size())) {
+                        slot->memory_search_match_index = 0;
+                    }
+                }
                 sync_memory_slot(*slot);
+                apply_memory_search_highlight(*slot);
             }
 #endif
         } else if (slot != nullptr) {
-            slot->cached_memory_lines = {"(failed to read memory)"};
-            sync_memory_slot(*slot);
+            const std::string failed_reference = event.detail;
+            if (!slot->cached_memory_hex_data.empty() && !slot->cached_memory_lines.empty()) {
+                slot->memory_view_reference = slot->cached_memory_reference;
+                if (slot->memory != nullptr) {
+                    if (!slot->cached_memory_response_address.empty()) {
+                        slot->memory->set_address_value(slot->cached_memory_response_address);
+                    }
+                    sync_memory_slot(*slot);
+                }
+                model_.status_message = "Failed to read memory at " + failed_reference +
+                                        " — kept previous dump (address not readable?)";
+            } else {
+                slot->cached_memory_lines = {"(failed to read memory)"};
+                sync_memory_slot(*slot);
+                model_.status_message = "Failed to read memory at " + failed_reference;
+            }
+            sync_status_bar();
         }
         request_repaint();
         break;
@@ -2652,6 +2684,7 @@ void DebugApp::sync_memory_slot(SidebarSlot& slot) {
     } else {
         slot.memory->set_lines(slot.cached_memory_lines);
     }
+    apply_memory_search_highlight(slot);
 }
 
 void DebugApp::sync_disassembly_slot(SidebarSlot& slot) {
@@ -2807,6 +2840,55 @@ void DebugApp::request_memory_fetch_for_slot(SidebarSlot& slot, const std::strin
     session_io_->request_memory_fetch(reference, offset, 256, slot.config.id);
 }
 
+bool DebugApp::try_reveal_memory_address_in_loaded_view(std::uint64_t slot_id, const std::string& address) {
+    SidebarSlot* slot = slot_by_id(slot_id);
+    if (slot == nullptr || slot->memory == nullptr || slot->cached_memory_hex_data.empty() ||
+        slot->cached_memory_lines.empty()) {
+        return false;
+    }
+
+    const std::optional<std::uint64_t> target = parse_memory_address_u64(address);
+    if (!target.has_value()) {
+        return false;
+    }
+
+    std::uint64_t base = 0;
+    if (!slot->cached_memory_response_address.empty()) {
+        if (const std::optional<std::uint64_t> parsed_base =
+                parse_memory_address_u64(slot->cached_memory_response_address)) {
+            base = *parsed_base;
+        } else {
+            return false;
+        }
+    } else if (const std::optional<std::uint64_t> first_row = parse_memory_row_address(slot->cached_memory_lines[0])) {
+        base = *first_row;
+    } else {
+        return false;
+    }
+
+    const std::uint64_t view_bytes = slot->cached_memory_hex_data.size();
+    if (*target < base || *target >= base + view_bytes) {
+        return false;
+    }
+
+    constexpr std::uint64_t kRowSize = 16;
+    const std::uint64_t row_start = (*target / kRowSize) * kRowSize;
+    const int row_index = static_cast<int>((row_start - base) / kRowSize);
+    if (row_index < 0 || row_index >= static_cast<int>(slot->cached_memory_lines.size())) {
+        return false;
+    }
+
+    memory_toolbar_focused_ = false;
+    slot->memory->set_address_value(format_memory_address(row_start));
+    slot->memory->blur_toolbar_inputs();
+    slot->memory->set_selected_row(row_index);
+    apply_focus();
+    model_.status_message = "Jumped to memory row " + format_memory_address(row_start);
+    sync_status_bar();
+    request_repaint();
+    return true;
+}
+
 void DebugApp::navigate_memory_view(std::uint64_t slot_id, const std::string& reference, std::int64_t offset) {
     SidebarSlot* slot = slot_by_id(slot_id);
     if (slot == nullptr || reference.empty()) {
@@ -2817,8 +2899,11 @@ void DebugApp::navigate_memory_view(std::uint64_t slot_id, const std::string& re
     slot->cached_memory_read_offset = offset;
     slot->memory_search_matches.clear();
     slot->memory_search_match_index = -1;
+    slot->memory_search_match_length = 0;
     if (slot->memory != nullptr) {
         slot->memory->set_address_value(reference);
+        slot->memory->clear_search_highlight();
+        slot->memory->clear_search_match_counter();
         slot->memory->blur_toolbar_inputs();
     }
     request_memory_fetch_for_slot(*slot, reference, offset);
@@ -2839,6 +2924,9 @@ void DebugApp::submit_memory_address(std::uint64_t slot_id, const std::string& i
     }
 
     if (const std::optional<std::string> reference = parse_memory_address_reference(trimmed)) {
+        if (try_reveal_memory_address_in_loaded_view(slot_id, *reference)) {
+            return;
+        }
         navigate_memory_view(slot_id, *reference, 0);
         return;
     }
@@ -2859,7 +2947,78 @@ void DebugApp::submit_memory_address(std::uint64_t slot_id, const std::string& i
     sync_status_bar();
 }
 
-void DebugApp::submit_memory_search(std::uint64_t slot_id, const std::string& query, bool forward) {
+void DebugApp::apply_memory_search_highlight(SidebarSlot& slot) {
+    if (slot.memory == nullptr) {
+        return;
+    }
+
+    if (slot.memory_search_match_index < 0 || slot.memory_search_matches.empty() ||
+        slot.memory_search_match_length == 0) {
+        slot.memory->clear_search_highlight();
+        slot.memory->clear_search_match_counter();
+        return;
+    }
+
+    const std::size_t byte_offset =
+        slot.memory_search_matches[static_cast<std::size_t>(slot.memory_search_match_index)];
+    slot.memory->set_search_highlight(byte_offset, slot.memory_search_match_length);
+    slot.memory->set_search_match_counter(slot.memory_search_match_index + 1,
+                                          static_cast<int>(slot.memory_search_matches.size()));
+    const int row = static_cast<int>(byte_offset / 16);
+    slot.memory->set_selected_row(row);
+}
+
+void DebugApp::preview_memory_search(std::uint64_t slot_id, const std::string& query) {
+    SidebarSlot* slot = slot_by_id(slot_id);
+    if (slot == nullptr || slot->memory == nullptr) {
+        return;
+    }
+
+    const std::string trimmed = trim_whitespace(query);
+    if (trimmed.empty()) {
+        slot->memory_search_query.clear();
+        slot->memory_search_matches.clear();
+        slot->memory_search_match_index = -1;
+        slot->memory_search_match_length = 0;
+        slot->memory->clear_search_highlight();
+        slot->memory->clear_search_match_counter();
+        request_repaint();
+        return;
+    }
+
+    if (trimmed != slot->memory_search_query) {
+        slot->memory_search_match_index = -1;
+    }
+    slot->memory_search_query = trimmed;
+    slot->memory_search_match_length = memory_search_match_byte_length(trimmed);
+    slot->memory_search_matches = find_memory_search_matches(slot->cached_memory_hex_data, trimmed);
+    if (slot->memory_search_matches.empty()) {
+        slot->memory_search_match_index = -1;
+        slot->memory->clear_search_highlight();
+        slot->memory->clear_search_match_counter();
+        model_.status_message = "No matches for \"" + trimmed + "\" in loaded memory";
+        sync_status_bar();
+        request_repaint();
+        return;
+    }
+
+    if (slot->memory_search_match_index < 0) {
+        slot->memory_search_match_index = 0;
+    }
+
+    memory_focus_slot_id_ = slot_id;
+    apply_memory_search_highlight(*slot);
+    const std::size_t byte_offset =
+        slot->memory_search_matches[static_cast<std::size_t>(slot->memory_search_match_index)];
+    model_.status_message = "Match " + std::to_string(slot->memory_search_match_index + 1) + "/" +
+                            std::to_string(slot->memory_search_matches.size()) + " at byte " +
+                            std::to_string(byte_offset);
+    sync_status_bar();
+    request_repaint();
+}
+
+void DebugApp::submit_memory_search(std::uint64_t slot_id, const std::string& query,
+                                    MemorySearchNavigation navigation) {
     SidebarSlot* slot = slot_by_id(slot_id);
     if (slot == nullptr || slot->memory == nullptr) {
         return;
@@ -2870,39 +3029,52 @@ void DebugApp::submit_memory_search(std::uint64_t slot_id, const std::string& qu
         return;
     }
 
-    if (trimmed != slot->memory_search_query) {
+    const bool query_changed = trimmed != slot->memory_search_query;
+    if (query_changed) {
         slot->memory_search_match_index = -1;
     }
     slot->memory_search_query = trimmed;
+    slot->memory_search_match_length = memory_search_match_byte_length(trimmed);
     slot->memory_search_matches = find_memory_search_matches(slot->cached_memory_hex_data, trimmed);
     if (slot->memory_search_matches.empty()) {
         slot->memory_search_match_index = -1;
+        slot->memory->clear_search_highlight();
+        slot->memory->clear_search_match_counter();
         model_.status_message = "No matches for \"" + trimmed + "\" in loaded memory";
         sync_status_bar();
         request_repaint();
         return;
     }
 
-    if (forward) {
+    switch (navigation) {
+    case MemorySearchNavigation::Confirm:
+        if (slot->memory_search_match_index < 0) {
+            slot->memory_search_match_index = 0;
+        }
+        break;
+    case MemorySearchNavigation::Next:
         slot->memory_search_match_index =
             (slot->memory_search_match_index + 1) % static_cast<int>(slot->memory_search_matches.size());
-    } else {
+        break;
+    case MemorySearchNavigation::Previous:
         slot->memory_search_match_index =
             slot->memory_search_match_index <= 0
                 ? static_cast<int>(slot->memory_search_matches.size()) - 1
                 : slot->memory_search_match_index - 1;
+        break;
     }
+
+    memory_focus_slot_id_ = slot_id;
+    if (navigation == MemorySearchNavigation::Confirm) {
+        memory_toolbar_focused_ = false;
+        slot->memory->blur_toolbar_inputs();
+        model_.focus = Focus::Memory;
+        apply_focus();
+    }
+    apply_memory_search_highlight(*slot);
 
     const std::size_t byte_offset =
         slot->memory_search_matches[static_cast<std::size_t>(slot->memory_search_match_index)];
-    const int row = static_cast<int>(byte_offset / 16);
-
-    memory_focus_slot_id_ = slot_id;
-    memory_toolbar_focused_ = false;
-    slot->memory->blur_toolbar_inputs();
-    model_.focus = Focus::Memory;
-    apply_focus();
-    slot->memory->set_selected_row(row);
     model_.status_message = "Match " + std::to_string(slot->memory_search_match_index + 1) + "/" +
                             std::to_string(slot->memory_search_matches.size()) + " at byte " +
                             std::to_string(byte_offset);
@@ -2927,19 +3099,45 @@ void DebugApp::wire_memory_panel(MemoryPanel& panel, SidebarSlot& slot) {
         submit_memory_address(slot_id, value);
     });
     panel.set_on_search_submit([this, slot_id = slot.config.id](const std::string& value) {
-        submit_memory_search(slot_id, value, true);
+        submit_memory_search(slot_id, value, MemorySearchNavigation::Confirm);
+    });
+    panel.set_on_search_change([this, slot_id = slot.config.id](const std::string& value) {
+        preview_memory_search(slot_id, value);
     });
     panel.set_on_activate([this, slot_id = slot.config.id](int row) { begin_memory_row_edit(slot_id, row); });
     panel.set_on_submit([this, slot_id = slot.config.id](int row, const std::string& hex) {
         submit_memory_write(slot_id, row, hex);
     });
-    panel.set_on_inline_edit_cancel([this]() {
+    panel.set_on_inline_edit_cancel([this, slot_id = slot.config.id]() {
         memory_write_active_ = false;
         memory_write_row_ = -1;
+        if (SidebarSlot* target = slot_by_id(slot_id); target != nullptr && target->memory != nullptr) {
+            target->memory->clear_inline_edit();
+            if (target->memory->list_widget() != nullptr) {
+                target->memory->list_widget()->set_focused(true);
+            }
+        }
+        model_.focus = Focus::Memory;
         model_.status_message = "Memory edit cancelled";
+        apply_focus();
         sync_status_bar();
+        request_repaint();
     });
     panel.set_on_toolbar_interact([this, slot_id = slot.config.id]() { activate_memory_toolbar(slot_id); });
+    panel.set_on_toolbar_cancel([this, slot_id = slot.config.id]() {
+        memory_toolbar_focused_ = false;
+        if (SidebarSlot* target = slot_by_id(slot_id); target != nullptr && target->memory != nullptr) {
+            preview_memory_search(slot_id, target->memory->search_value());
+        }
+        model_.focus = Focus::Memory;
+        model_.status_message = "Memory input cancelled";
+        sync_status_bar();
+        apply_focus();
+        request_repaint();
+    });
+    panel.set_on_row_selected([this, slot_id = slot.config.id](int row) {
+        sync_memory_address_from_selected_row(slot_id, row);
+    });
 }
 
 void DebugApp::begin_memory_row_edit(std::uint64_t slot_id, int row_index) {
@@ -6479,7 +6677,12 @@ void DebugApp::cycle_focused_layout_leaf(int delta) {
 }
 
 bool DebugApp::handle_tab_navigation_key(const tuinator::KeyPress& key) {
-    if (key.key != tuinator::Key::Tab) {
+    int delta = 0;
+    if (key.key == tuinator::Key::BackTab) {
+        delta = -1;
+    } else if (key.key == tuinator::Key::Tab) {
+        delta = key.shift ? -1 : 1;
+    } else {
         return false;
     }
 
@@ -6491,8 +6694,6 @@ bool DebugApp::handle_tab_navigation_key(const tuinator::KeyPress& key) {
     if (model_.focus == Focus::Memory && memory_toolbar_focused_) {
         return false;
     }
-
-    const int delta = key.shift ? -1 : 1;
     if (key.ctrl) {
         cycle_focused_layout_leaf(delta);
         return true;
@@ -6583,7 +6784,16 @@ bool DebugApp::is_scope_input_focused() const {
     return (scopes_panel_ != nullptr && scopes_panel_->has_active_inline_edit()) || scope_prompt_active();
 }
 
-bool DebugApp::is_memory_input_focused() const { return memory_write_active_ || memory_toolbar_focused_; }
+bool DebugApp::is_memory_input_focused() const {
+    if (memory_write_active_ || memory_toolbar_focused_) {
+        return true;
+    }
+    SidebarSlot* slot = const_cast<DebugApp*>(this)->memory_slot_for_focus();
+    if (slot == nullptr || slot->memory == nullptr) {
+        return false;
+    }
+    return slot->memory->has_inline_edit() || slot->memory->is_toolbar_text_input_focused();
+}
 
 bool DebugApp::should_block_app_quit_key(const tuinator::KeyPress& key) const {
     if (step_in_selection_active()) {
@@ -6653,7 +6863,11 @@ void DebugApp::blur_scope_input() {
 void DebugApp::blur_memory_input() {
     memory_write_active_ = false;
     memory_write_row_ = -1;
-    if (SidebarSlot* slot = slot_by_id(memory_write_slot_id_); slot != nullptr && slot->memory != nullptr) {
+    SidebarSlot* slot = slot_by_id(memory_write_slot_id_);
+    if (slot == nullptr || slot->memory == nullptr) {
+        slot = memory_slot_for_focus();
+    }
+    if (slot != nullptr && slot->memory != nullptr) {
         slot->memory->clear_inline_edit();
         if (slot->memory->list_widget() != nullptr) {
             slot->memory->list_widget()->set_focused(true);
@@ -6666,8 +6880,12 @@ void DebugApp::blur_memory_input() {
 
 void DebugApp::blur_memory_toolbar_inputs() {
     memory_toolbar_focused_ = false;
-    if (SidebarSlot* slot = active_slot_for_focus(); slot != nullptr && slot->memory != nullptr) {
-        slot->memory->blur_toolbar_inputs();
+    if (SidebarSlot* slot = memory_slot_for_focus(); slot != nullptr && slot->memory != nullptr) {
+        if (slot->memory->is_toolbar_active()) {
+            slot->memory->cancel_toolbar_inputs();
+        } else {
+            slot->memory->blur_toolbar_inputs();
+        }
     }
     model_.focus = Focus::Memory;
     apply_focus();
@@ -6675,6 +6893,20 @@ void DebugApp::blur_memory_toolbar_inputs() {
 }
 
 void DebugApp::blur_active_memory_input() {
+    SidebarSlot* slot = memory_slot_for_focus();
+    if (slot != nullptr && slot->memory != nullptr) {
+        if (memory_toolbar_focused_ || slot->memory->is_toolbar_active() ||
+            slot->memory->is_toolbar_text_input_focused()) {
+            blur_memory_toolbar_inputs();
+            return;
+        }
+        if (memory_write_active_ || slot->memory->has_inline_edit()) {
+            blur_memory_input();
+            model_.status_message = "Memory edit cancelled";
+            sync_status_bar();
+            return;
+        }
+    }
     if (memory_toolbar_focused_) {
         blur_memory_toolbar_inputs();
         return;
@@ -6733,6 +6965,18 @@ bool DebugApp::handle_global_key(const tuinator::KeyPress& key) {
     if (key.ctrl && key.character == 'c') {
         if (app_ != nullptr) {
             app_->quit();
+        }
+        return true;
+    }
+
+    if (model_.focus == Focus::Memory && (key.character == 'n' || key.character == 'N')) {
+        if (SidebarSlot* slot = memory_slot_for_focus(); slot != nullptr && slot->memory != nullptr) {
+            const std::string query = slot->memory->search_value();
+            if (!query.empty()) {
+                submit_memory_search(slot->config.id, query,
+                                     key.character == 'n' ? MemorySearchNavigation::Next
+                                                          : MemorySearchNavigation::Previous);
+            }
         }
         return true;
     }
@@ -6807,16 +7051,6 @@ bool DebugApp::handle_global_key(const tuinator::KeyPress& key) {
             model_.status_message = "Find: text or hex bytes in loaded memory";
             sync_status_bar();
             request_repaint();
-        }
-        return true;
-    }
-
-    if (model_.focus == Focus::Memory && (key.character == 'n' || key.character == 'N')) {
-        if (SidebarSlot* slot = memory_slot_for_focus(); slot != nullptr && slot->memory != nullptr) {
-            const std::string query = slot->memory->search_value();
-            if (!query.empty()) {
-                submit_memory_search(slot->config.id, query, key.character == 'n');
-            }
         }
         return true;
     }
@@ -7583,6 +7817,7 @@ void DebugApp::apply_focus() {
 
 void DebugApp::sync_focus_from_ui() {
     Focus detected = model_.focus;
+    const bool previous_memory_toolbar_focused = memory_toolbar_focused_;
 
     if (breakpoints_panel_ != nullptr && breakpoints_panel_->list_widget() != nullptr &&
         breakpoints_panel_->list_widget()->is_focused()) {
@@ -7704,7 +7939,8 @@ void DebugApp::sync_focus_from_ui() {
         }
     }
 
-    if (!focus_changed && !repl_deactivated) {
+    const bool memory_toolbar_changed = previous_memory_toolbar_focused != memory_toolbar_focused_;
+    if (!focus_changed && !repl_deactivated && !memory_toolbar_changed) {
         return;
     }
 
@@ -9874,6 +10110,66 @@ bool DebugApp::handle_scope_input_key(const tuinator::Event& event) {
     return scopes_panel_->handle_inline_edit_key(event);
 }
 
+void DebugApp::sync_memory_address_from_selected_row(std::uint64_t slot_id, int row_index) {
+    SidebarSlot* slot = slot_by_id(slot_id);
+    if (slot == nullptr || slot->memory == nullptr || row_index < 0 ||
+        row_index >= static_cast<int>(slot->cached_memory_lines.size())) {
+        return;
+    }
+    if (slot->memory->is_address_input_focused()) {
+        return;
+    }
+
+    const std::optional<std::uint64_t> address = parse_memory_row_address(slot->cached_memory_lines[row_index]);
+    if (!address.has_value()) {
+        return;
+    }
+
+    slot->memory->set_address_value(format_memory_address(*address));
+}
+
+bool DebugApp::handle_memory_activate_key(const tuinator::Event& event) {
+    if (model_.focus != Focus::Memory) {
+        return false;
+    }
+
+    SidebarSlot* slot = memory_slot_for_focus();
+    if (slot == nullptr || slot->memory == nullptr) {
+        return false;
+    }
+    if (memory_toolbar_focused_ || slot->memory->is_toolbar_active() || slot->memory->has_inline_edit()) {
+        return false;
+    }
+
+    if (!slot->memory->handle_list_activate_key(event)) {
+        return false;
+    }
+
+    request_repaint();
+    return true;
+}
+
+bool DebugApp::handle_memory_list_navigation_key(const tuinator::Event& event) {
+    if (model_.focus != Focus::Memory) {
+        return false;
+    }
+
+    SidebarSlot* slot = memory_slot_for_focus();
+    if (slot == nullptr || slot->memory == nullptr) {
+        return false;
+    }
+    if (memory_toolbar_focused_ || slot->memory->is_toolbar_active() || slot->memory->has_inline_edit()) {
+        return false;
+    }
+
+    if (!slot->memory->handle_list_navigation_key(event)) {
+        return false;
+    }
+
+    request_repaint();
+    return true;
+}
+
 bool DebugApp::handle_memory_toolbar_input_key(const tuinator::Event& event) {
     SidebarSlot* slot = memory_slot_for_focus();
     if (slot == nullptr || slot->memory == nullptr) {
@@ -9885,13 +10181,28 @@ bool DebugApp::handle_memory_toolbar_input_key(const tuinator::Event& event) {
     if (!slot->memory->is_toolbar_active()) {
         memory_toolbar_focused_ = true;
         slot->memory->focus_address_input();
+    } else {
+        memory_toolbar_focused_ = true;
     }
     return slot->memory->handle_toolbar_input_key(event);
 }
 
 bool DebugApp::handle_memory_input_key(const tuinator::Event& event) {
-    if (SidebarSlot* slot = memory_slot_for_focus(); slot != nullptr && slot->memory != nullptr &&
-                              slot->memory->has_inline_edit()) {
+    SidebarSlot* slot = memory_slot_for_focus();
+    if (slot == nullptr || slot->memory == nullptr) {
+        return false;
+    }
+
+    if (const auto* key = std::get_if<tuinator::KeyPress>(&event)) {
+        if (key->key == tuinator::Key::Escape && slot->memory->has_inline_edit()) {
+            blur_memory_input();
+            model_.status_message = "Memory edit cancelled";
+            sync_status_bar();
+            return true;
+        }
+    }
+
+    if (slot->memory->has_inline_edit()) {
         return slot->memory->handle_inline_edit_key(event);
     }
     return false;

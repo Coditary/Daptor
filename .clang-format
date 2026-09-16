@@ -1,0 +1,9 @@
+BasedOnStyle: LLVM
+IndentWidth: 4
+ColumnLimit: 100
+FixNamespaceComments: false
+AllowShortFunctionsOnSingleLine: Empty
+AllowShortIfStatementsOnASingleLine: Never
+BreakBeforeBraces: Attach
+SortIncludes: CaseSensitive
+IncludeBlocks: Preserve

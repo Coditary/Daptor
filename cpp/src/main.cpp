@@ -27,8 +27,8 @@ void print_usage(const char* argv0) {
     std::fprintf(stderr, "  --workspace <path>  Override workspace root\n");
     std::fprintf(stderr, "\n");
     std::fprintf(stderr, "Launch adapters and profiles are configured in definitions.yaml.\n");
-    std::fprintf(stderr, "Copy examples/config/definitions.example.yaml to ~/.config/tui-debug/definitions.yaml\n");
-    std::fprintf(stderr, "tui-debug-ui 0.1.0\n");
+    std::fprintf(stderr, "See config/definitions.yaml in the repository for a starter template.\n");
+    std::fprintf(stderr, "daptor 0.1.0\n");
 }
 
 }  // namespace
@@ -98,7 +98,7 @@ int main(int argc, char* argv[]) {
 
     if (!isatty(STDIN_FILENO)) {
         std::fprintf(stderr,
-                     "tui-debug-ui requires an interactive terminal.\n"
+                     "daptor requires an interactive terminal.\n"
                      "Run it directly in a TTY, not via a pipe or background job.\n");
         return EXIT_FAILURE;
     }

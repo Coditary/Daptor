@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://tui-debug.dev/schemas/theme.schema.json",
-  "title": "tui-debug theme",
+  "$id": "https://daptor.dev/schemas/theme.schema.json",
+  "title": "daptor theme",
   "type": "object",
   "additionalProperties": false,
   "properties": {

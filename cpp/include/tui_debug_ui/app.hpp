@@ -74,7 +74,7 @@ struct SourceFileTab {
     int scroll_y = 0;
 };
 
-/// Tuinator application wrapper for the tui-debug shell.
+/// Tuinator application wrapper for the daptor shell.
 class DebugApp {
   public:
     explicit DebugApp(const std::string& program_path, SessionMode mode = SessionMode::Rust,
@@ -127,6 +127,9 @@ class DebugApp {
     bool handle_scope_input_key(const tuinator::Event& event);
     bool handle_memory_input_key(const tuinator::Event& event);
     bool handle_memory_toolbar_input_key(const tuinator::Event& event);
+    bool handle_memory_list_navigation_key(const tuinator::Event& event);
+    bool handle_memory_activate_key(const tuinator::Event& event);
+    void sync_memory_address_from_selected_row(std::uint64_t slot_id, int row_index);
     bool handle_watch_input_key(const tuinator::Event& event);
     bool handle_repl_input_key(const tuinator::Event& event);
     void blur_repl_input();
@@ -386,8 +389,16 @@ class DebugApp {
     void begin_memory_row_edit(std::uint64_t slot_id, int row_index);
     void submit_memory_write(std::uint64_t slot_id, int row_index, const std::string& hex_input);
     void submit_memory_address(std::uint64_t slot_id, const std::string& input);
-    void submit_memory_search(std::uint64_t slot_id, const std::string& query, bool forward);
+    enum class MemorySearchNavigation {
+        Confirm,
+        Next,
+        Previous,
+    };
+    void submit_memory_search(std::uint64_t slot_id, const std::string& query, MemorySearchNavigation navigation);
+    void preview_memory_search(std::uint64_t slot_id, const std::string& query);
+    void apply_memory_search_highlight(SidebarSlot& slot);
     void navigate_memory_view(std::uint64_t slot_id, const std::string& reference, std::int64_t offset);
+    bool try_reveal_memory_address_in_loaded_view(std::uint64_t slot_id, const std::string& address);
     void request_memory_fetch_for_slot(SidebarSlot& slot, const std::string& reference, std::int64_t offset);
     void wire_disassembly_panel(DisassemblyPanel& panel, SidebarSlot& slot);
     void wire_runtime_source_panel(RuntimeSourcePanel& panel, SidebarSlot& slot);

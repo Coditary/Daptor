@@ -23,7 +23,7 @@ struct AppConfig {
     bool loaded_from_file = false;
 };
 
-/// Loads `config.yaml` from the XDG config directory or `TUI_DEBUG_CONFIG`.
+/// Loads `config.yaml` from the XDG config directory or `DAPTOR_CONFIG`.
 [[nodiscard]] AppConfig load_app_config();
 
 }  // namespace tui_debug_ui

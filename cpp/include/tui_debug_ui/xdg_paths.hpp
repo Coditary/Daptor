@@ -4,7 +4,7 @@
 
 namespace tui_debug_ui {
 
-/// Returns the tui-debug config directory, e.g. `~/.config/tui-debug`.
+/// Returns the daptor config directory, e.g. `~/.config/daptor`.
 [[nodiscard]] std::filesystem::path config_directory();
 
 /// Expands a leading `~/` in `path` using `$HOME`.

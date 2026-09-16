@@ -1,0 +1,131 @@
+# Copy to ~/.config/daptor/definitions.yaml
+
+default_profile: python
+
+adapters:
+  python:
+    command: python3
+    args: ["-m", "debugpy.adapter"]
+    initialize:
+      adapterID: debugpy
+    launch:
+      type: debugpy
+      request: launch
+      stopOnEntry: true
+      justMyCode: false
+      console: integratedTerminal
+      redirectOutput: false
+    ui:
+      debugpy_launch_defaults: true
+
+  native:
+    command: lldb-dap
+    args: []
+    initialize:
+      adapterID: lldb-dap
+    launch:
+      type: lldb
+      request: launch
+      stopOnEntry: false
+    ui:
+      lldb_stdio: true
+      line_buffered_console: true
+      lldb_goto_line_fallback: true
+      assume_function_breakpoints: true
+      show_reverse_continue_hint: true
+
+  go:
+    command: dlv
+    args: ["dap", "--log"]
+    initialize:
+      adapterID: go
+    launch:
+      type: go
+      request: launch
+      mode: debug
+      stopOnEntry: true
+
+profiles:
+  python:
+    adapter: python
+    priority: 10
+    match:
+      extensions: [".py"]
+    resolve:
+      program: ${target}
+
+  go:
+    adapter: go
+    priority: 10
+    match:
+      extensions: [".go"]
+    resolve:
+      package: ${go_package:${target}}
+      program: ${package}
+    launch:
+      mode: debug
+    workspace: ${workspace}
+
+  go-mod:
+    adapter: go
+    priority: 8
+    match:
+      files: [go.mod]
+    resolve:
+      package: .
+      program: ${package}
+    launch:
+      mode: debug
+    workspace: ${workspace}
+
+  go-binary:
+    adapter: go
+    priority: 15
+    match:
+      executable: true
+      go_binary: true
+    resolve:
+      program: ${target}
+    launch:
+      mode: exec
+    workspace: ${workspace}
+
+  go-build:
+    adapter: go
+    priority: 12
+    match:
+      extensions: [".go"]
+    resolve:
+      package: ${go_package:${target}}
+      binary: ${workspace}/bin/${name:${package}}
+      program: ${binary}
+    prelaunch:
+      - go build -o ${binary} ${package}
+    launch:
+      mode: exec
+    workspace: ${workspace}
+
+  native:
+    adapter: native
+    priority: 5
+    match:
+      executable: true
+    resolve:
+      program: ${binary_probe:${target}}
+
+  cpp:
+    adapter: native
+    priority: 11
+    match:
+      extensions: [".cpp", ".cc", ".cxx"]
+    resolve:
+      binary: ${binary_probe:${target}}
+      program: ${binary}
+    prelaunch:
+      - g++ -g -O0 -std=c++17 -Wall -Wextra -o ${binary} ${target}
+
+  rr:
+    backend: rr
+    priority: 0
+    resolve:
+      program: ${binary_probe:${target}}

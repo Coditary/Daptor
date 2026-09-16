@@ -11,7 +11,7 @@ namespace tui_debug_ui {
 namespace {
 
 std::filesystem::path config_path_from_env() {
-    const char* env = std::getenv("TUI_DEBUG_CONFIG");
+    const char* env = std::getenv("DAPTOR_CONFIG");
     if (env == nullptr || env[0] == '\0') {
         return {};
     }

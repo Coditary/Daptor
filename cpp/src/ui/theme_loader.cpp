@@ -10,13 +10,13 @@
 
 #if __has_include(<nlohmann/json.hpp>)
 #include <nlohmann/json.hpp>
-#define TUI_DEBUG_UI_HAS_NLOHMANN_JSON 1
+#define DAPTOR_UI_HAS_NLOHMANN_JSON 1
 #endif
 
 namespace tui_debug_ui {
 namespace {
 
-#ifdef TUI_DEBUG_UI_HAS_NLOHMANN_JSON
+#ifdef DAPTOR_UI_HAS_NLOHMANN_JSON
 using Json = nlohmann::json;
 
 std::optional<tuinator::Rgb> parse_rgb_array(const Json& value) {
@@ -345,7 +345,7 @@ bool apply_theme_json(LoadedTheme& result, const Json& root) {
 #endif
 
 std::filesystem::path theme_path_from_env() {
-    const char* env = std::getenv("TUI_DEBUG_THEME");
+    const char* env = std::getenv("DAPTOR_THEME");
     if (env == nullptr || env[0] == '\0') {
         return {};
     }
@@ -362,7 +362,7 @@ LoadedTheme load_theme_file(const std::filesystem::path& path) {
         .loaded_from_file = false,
     };
 
-#ifdef TUI_DEBUG_UI_HAS_NLOHMANN_JSON
+#ifdef DAPTOR_UI_HAS_NLOHMANN_JSON
     if (path.empty()) {
         return result;
     }

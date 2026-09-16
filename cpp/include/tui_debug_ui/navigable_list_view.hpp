@@ -88,6 +88,13 @@ class NavigableListView : public tuinator::ListView {
     /// Replace items and reset scroll so the first row stays visible.
     void assign_items(std::vector<std::string> items, bool preserve_selection_and_scroll = false);
     void set_variable_row_show_edit(std::vector<bool> show_edit);
+    struct MemorySearchHighlight {
+        std::size_t start_byte = 0;
+        std::size_t length = 0;
+        static constexpr int kBytesPerRow = 16;
+    };
+    void set_memory_search_highlight(const std::optional<MemorySearchHighlight>& highlight);
+    void clear_memory_search_highlight();
 
     using ActivateCallback = std::function<void(int index)>;
     using RowClickCallback = std::function<bool(int index, const std::string& item, int local_x)>;
@@ -130,6 +137,8 @@ class NavigableListView : public tuinator::ListView {
     void clamp_scroll_offset();
     void paint_read_only(tuinator::PaintContext& ctx) const;
     void paint_plain_interactive(tuinator::PaintContext& ctx) const;
+    void paint_memory_dump_row(tuinator::Canvas& canvas, int row, const std::string& item, bool show_row_marker,
+                               int max_width) const;
     void paint_themed(tuinator::PaintContext& ctx) const;
     void paint_themed_row(tuinator::Canvas& canvas, int row, int index, const std::string& item,
                           const std::string& prefix, bool selected, int max_width) const;
@@ -177,6 +186,7 @@ class NavigableListView : public tuinator::ListView {
     InlineEditChangeCallback on_inline_edit_change_;
     InlineEditSubmitCallback on_inline_edit_submit_;
     InlineEditCancelCallback on_inline_edit_cancel_;
+    std::optional<MemorySearchHighlight> memory_search_highlight_;
 };
 
 }  // namespace tui_debug_ui

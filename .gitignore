@@ -5,11 +5,10 @@
 .tmp
 .cargo-target
 
-# Example build outputs
-/examples/native/reverse_demo
-/examples/native/interactive_demo
-/examples/native/exception_demo
-/examples/native/dap_panels_demo
+# Native test fixture build outputs
+/crates/daptor-core/tests/fixtures/native/reverse_demo
+/crates/daptor-core/tests/fixtures/native/interactive_demo
+/crates/daptor-core/tests/fixtures/native/cpp_step_demo
 
 # Python
 __pycache__/

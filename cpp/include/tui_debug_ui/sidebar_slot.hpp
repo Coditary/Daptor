@@ -45,6 +45,7 @@ struct SidebarSlot {
     std::string memory_search_query;
     std::vector<std::size_t> memory_search_matches;
     int memory_search_match_index = -1;
+    std::size_t memory_search_match_length = 0;
     std::int64_t cached_memory_read_offset = 0;
     std::int64_t cached_runtime_source_reference = 0;
     bool tab_label_customized = false;

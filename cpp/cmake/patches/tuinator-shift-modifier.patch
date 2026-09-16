@@ -1,0 +1,22 @@
+--- a/include/tuinator/core/event.hpp
++++ b/include/tuinator/core/event.hpp
+@@ -34,6 +34,7 @@ struct KeyPress {
+     char character = '\0';
+     bool alt = false;
+     bool ctrl = false;
++    bool shift = false;
+ };
+ 
+ struct Resize {
+--- a/src/backend/curses_backend.cpp
++++ b/src/backend/curses_backend.cpp
+@@ -781,6 +781,9 @@ std::optional<Event> CursesBackend::read_event(bool block) {
+     press.key = Key::Unknown;
+     if (ch >= 32 && ch <= 126) {
+         press.character = static_cast<char>(ch);
++        if (ch >= 'A' && ch <= 'Z') {
++            press.shift = true;
++        }
+     }
+ 
+     return press;

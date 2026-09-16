@@ -5,7 +5,7 @@
 
 #if __has_include(<nlohmann/json.hpp>)
 #include <nlohmann/json.hpp>
-#define TUI_DEBUG_UI_HAS_NLOHMANN_JSON 1
+#define DAPTOR_UI_HAS_NLOHMANN_JSON 1
 #endif
 
 namespace tui_debug_ui {
@@ -49,7 +49,7 @@ void set_execution_from_frame(DebugUiModel& model, const StackFrameInfo& frame) 
     }
 }
 
-#ifdef TUI_DEBUG_UI_HAS_NLOHMANN_JSON
+#ifdef DAPTOR_UI_HAS_NLOHMANN_JSON
 using Json = nlohmann::json;
 
 std::int64_t json_int64_or(const Json& object, const char* key, std::int64_t default_value) {
@@ -493,7 +493,7 @@ bool manual_apply_poll_json(DebugUiModel& model, const std::string& json) {
 }  // namespace
 
 std::vector<BreakpointHitUpdate> parse_breakpoint_hits_from_poll_json(const std::string& json) {
-#ifdef TUI_DEBUG_UI_HAS_NLOHMANN_JSON
+#ifdef DAPTOR_UI_HAS_NLOHMANN_JSON
     try {
         const Json root = Json::parse(json);
         if (!root.is_object() || !root.contains("snapshot") || !root.at("snapshot").is_object()) {
@@ -528,7 +528,7 @@ std::vector<BreakpointHitUpdate> parse_breakpoint_hits_from_poll_json(const std:
 }
 
 bool apply_poll_json(DebugUiModel& model, const std::string& json) {
-#ifdef TUI_DEBUG_UI_HAS_NLOHMANN_JSON
+#ifdef DAPTOR_UI_HAS_NLOHMANN_JSON
     try {
         const Json root = Json::parse(json);
         return apply_poll_json_impl(model, root);
@@ -551,7 +551,7 @@ NetworkExchangeState parse_network_exchange_state(const std::string& state) {
 }
 
 bool apply_compose_send_json(NetworkExchange& exchange_out, const std::string& json) {
-#ifdef TUI_DEBUG_UI_HAS_NLOHMANN_JSON
+#ifdef DAPTOR_UI_HAS_NLOHMANN_JSON
     try {
         const Json root = Json::parse(json);
         if (!root.is_object() || !root.contains("exchanges") || !root["exchanges"].is_array() ||
@@ -590,7 +590,7 @@ bool apply_compose_send_json(NetworkExchange& exchange_out, const std::string& j
 }
 
 bool apply_network_json(DebugUiModel& model, const std::string& json) {
-#ifdef TUI_DEBUG_UI_HAS_NLOHMANN_JSON
+#ifdef DAPTOR_UI_HAS_NLOHMANN_JSON
     try {
         const Json root = Json::parse(json);
         if (!root.is_object()) {
@@ -643,7 +643,7 @@ bool apply_network_json(DebugUiModel& model, const std::string& json) {
 }
 
 bool apply_console_json(DebugUiModel& model, const std::string& json) {
-#ifdef TUI_DEBUG_UI_HAS_NLOHMANN_JSON
+#ifdef DAPTOR_UI_HAS_NLOHMANN_JSON
     try {
         const Json root = Json::parse(json);
         if (!root.is_array()) {
@@ -668,7 +668,7 @@ bool apply_console_json(DebugUiModel& model, const std::string& json) {
 }
 
 std::vector<VariableInfo> parse_variables_json(const std::string& json) {
-#ifdef TUI_DEBUG_UI_HAS_NLOHMANN_JSON
+#ifdef DAPTOR_UI_HAS_NLOHMANN_JSON
     try {
         const Json root = Json::parse(json);
         if (!root.is_array()) {
@@ -695,7 +695,7 @@ std::vector<VariableInfo> parse_variables_json(const std::string& json) {
 }
 
 std::optional<std::string> parse_set_variable_result_value(const std::string& json) {
-#ifdef TUI_DEBUG_UI_HAS_NLOHMANN_JSON
+#ifdef DAPTOR_UI_HAS_NLOHMANN_JSON
     try {
         const Json root = Json::parse(json);
         if (root.contains("value") && root.at("value").is_string()) {
@@ -710,7 +710,7 @@ std::optional<std::string> parse_set_variable_result_value(const std::string& js
 }
 
 bool apply_scope_variables_batch(DebugUiModel& model, const std::string& signature, const std::string& json) {
-#ifdef TUI_DEBUG_UI_HAS_NLOHMANN_JSON
+#ifdef DAPTOR_UI_HAS_NLOHMANN_JSON
     try {
         const Json root = Json::parse(json);
         if (root.value("signature", std::string{}) != signature) {

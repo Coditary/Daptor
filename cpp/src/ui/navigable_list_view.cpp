@@ -1,6 +1,7 @@
 #include "tui_debug_ui/navigable_list_view.hpp"
 
 #include "tui_debug_ui/dap_ui_theme.hpp"
+#include "tui_debug_ui/dap_view_formatters.hpp"
 #include "tui_debug_ui/ui_icons.hpp"
 
 #include <tuinator/render/paint_context.hpp>
@@ -572,6 +573,8 @@ bool NavigableListView::handle_inline_row_edit_key(const tuinator::KeyPress& key
         return true;
     }
     case tuinator::Key::Escape:
+        inline_row_edit_ = {};
+        mark_dirty();
         if (on_inline_edit_cancel_ != nullptr) {
             on_inline_edit_cancel_();
         }
@@ -619,6 +622,16 @@ bool NavigableListView::handle_inline_row_edit_key(const tuinator::KeyPress& key
 
 void NavigableListView::set_variable_row_show_edit(std::vector<bool> show_edit) {
     variable_row_show_edit_ = std::move(show_edit);
+    mark_dirty();
+}
+
+void NavigableListView::set_memory_search_highlight(const std::optional<MemorySearchHighlight>& highlight) {
+    memory_search_highlight_ = highlight;
+    mark_dirty();
+}
+
+void NavigableListView::clear_memory_search_highlight() {
+    memory_search_highlight_.reset();
     mark_dirty();
 }
 
@@ -712,27 +725,58 @@ void NavigableListView::paint_plain_interactive(tuinator::PaintContext& ctx) con
     }
 
     const bool show_selection = is_focused();
+    const bool show_search_highlight = memory_search_highlight_.has_value();
     const int max_width = std::max(0, bounds().width);
     const int action_reserve = row_action_reserve_width();
     for (int index = 0; index < static_cast<int>(items().size()); ++index) {
         const bool selected = show_selection && index == selected_index();
-        const std::string prefix = selected ? "> " : (show_selection ? "  " : "");
-        const tuinator::Style& style = selected ? selected_style_ : item_style_;
+        const bool search_target_row = show_search_highlight && index == selected_index();
+        const bool show_row_marker = selected || search_target_row;
+        const std::string prefix =
+            show_row_marker ? "> " : ((show_selection || show_search_highlight) ? "  " : "");
         const std::string& item = items()[static_cast<std::size_t>(index)];
 
         if (inline_row_edit_active_row(index)) {
+            const tuinator::Style& style = selected ? selected_style_ : item_style_;
             canvas.draw_text({0, index}, prefix, style);
             paint_inline_row_edit(canvas, index, inline_row_edit_.prefix, max_width);
             paint_row_actions(canvas, index, index, item, max_width);
             continue;
         }
 
+        if (show_search_highlight && is_memory_dump_row(item)) {
+            paint_memory_dump_row(canvas, index, item, show_row_marker, max_width);
+            paint_row_actions(canvas, index, index, item, max_width);
+            continue;
+        }
+
+        const tuinator::Style& style = selected ? selected_style_ : item_style_;
         const int prefix_width = static_cast<int>(prefix.size());
         const int content_width = std::max(0, max_width - prefix_width - action_reserve);
         const std::size_t bytes = tuinator::text_byte_length_for_width(item, content_width);
         canvas.draw_text({0, index}, prefix + item.substr(0, bytes), style);
         paint_row_actions(canvas, index, index, item, max_width);
     }
+}
+
+void NavigableListView::paint_memory_dump_row(tuinator::Canvas& canvas, int row, const std::string& item,
+                                              bool show_row_marker, int max_width) const {
+    const std::string prefix = show_row_marker ? "> " : "  ";
+    const int prefix_width = static_cast<int>(prefix.size());
+    const int action_reserve = row_action_reserve_width();
+    const int content_width = std::max(0, max_width - prefix_width - action_reserve);
+    const std::size_t visible_bytes = tuinator::text_byte_length_for_width(item, content_width);
+    const std::string visible_line = prefix + item.substr(0, visible_bytes);
+
+    if (show_row_marker) {
+        const int highlight_width = tuinator::text_display_width(visible_line);
+        if (highlight_width > 0) {
+            canvas.fill_rect({0, row, highlight_width, 1}, ' ', selected_style_);
+        }
+    }
+
+    const tuinator::Style& style = show_row_marker ? selected_style_ : item_style_;
+    canvas.draw_text({0, row}, visible_line, style);
 }
 
 void NavigableListView::paint_themed(tuinator::PaintContext& ctx) const {

@@ -1,13 +1,13 @@
 cmake_minimum_required(VERSION 3.20)
-project(tui-debug-ui VERSION 0.1.0 LANGUAGES CXX)
+project(daptor VERSION 0.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # /tmp is often quota-limited; keep compiler temporaries in the repo tree.
-set(TUI_DEBUG_TMPDIR "${CMAKE_SOURCE_DIR}/.tmp")
-file(MAKE_DIRECTORY "${TUI_DEBUG_TMPDIR}")
+set(DAPTOR_TMPDIR "${CMAKE_SOURCE_DIR}/.tmp")
+file(MAKE_DIRECTORY "${DAPTOR_TMPDIR}")
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(-pipe)
 endif()
@@ -17,9 +17,9 @@ endif()
 include(cmake/Tuinator.cmake)
 include(cmake/Corrosion.cmake)
 
-set(TUI_DEBUG_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../include")
+set(DAPTOR_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../include")
 
-add_executable(tui-debug-ui
+add_executable(daptor
     src/main.cpp
     src/ui/app.cpp
     src/ui/debug_ui_model.cpp
@@ -75,24 +75,24 @@ add_executable(tui-debug-ui
     src/ui/compose_templates.cpp
 )
 
-target_include_directories(tui-debug-ui
+target_include_directories(daptor
     PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/include"
-        "${TUI_DEBUG_INCLUDE_DIR}"
+        "${DAPTOR_INCLUDE_DIR}"
 )
 
-target_link_libraries(tui-debug-ui
+target_link_libraries(daptor
     PRIVATE
         tuinator::tuinator
-        tui_debug_core
-        ${TUI_DEBUG_NCURSES_LIBRARIES}
+        daptor_core
+        ${DAPTOR_NCURSES_LIBRARIES}
 )
 
-target_include_directories(tui-debug-ui
+target_include_directories(daptor
     PRIVATE
-        ${TUI_DEBUG_NCURSES_INCLUDE_DIRS}
+        ${DAPTOR_NCURSES_INCLUDE_DIRS}
 )
 
 if(TARGET nlohmann_json::nlohmann_json)
-    target_link_libraries(tui-debug-ui PRIVATE nlohmann_json::nlohmann_json)
+    target_link_libraries(daptor PRIVATE nlohmann_json::nlohmann_json)
 endif()
