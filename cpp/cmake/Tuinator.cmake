@@ -7,7 +7,7 @@
 #   3. Pinned git fetch + local patches.
 
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(DAPTOR_NCURSES REQUIRED ncursesw)
+pkg_check_modules(DAPTOR_NCURSES REQUIRED IMPORTED_TARGET ncursesw)
 
 include(FetchContent)
 

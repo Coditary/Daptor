@@ -9,7 +9,7 @@ The build artifact is `cpp/build/daptor`.
 - CMake 3.20+
 - C++20 compiler
 - [Rust toolchain](https://rustup.rs/) (`cargo`, `rustc`)
-- **ncursesw** development files (Fedora: `ncurses-devel`, Debian/Ubuntu: `libncurses-dev`)
+- **ncursesw** development files (Fedora: `ncurses-devel`, Debian/Ubuntu: `libncurses-dev`, macOS: `brew install ncurses`)
 - `pkg-config`
 
 Optional: clone [Tuinator](https://github.com/Coditary/Tuinator) next to this repo as `Coditary-Bundle/Tuinator` to avoid fetching it on every configure.

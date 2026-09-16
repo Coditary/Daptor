@@ -85,12 +85,7 @@ target_link_libraries(daptor
     PRIVATE
         tuinator::tuinator
         daptor_core
-        ${DAPTOR_NCURSES_LIBRARIES}
-)
-
-target_include_directories(daptor
-    PRIVATE
-        ${DAPTOR_NCURSES_INCLUDE_DIRS}
+        PkgConfig::DAPTOR_NCURSES
 )
 
 if(TARGET nlohmann_json::nlohmann_json)
