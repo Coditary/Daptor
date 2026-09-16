@@ -151,10 +151,10 @@ impl DebuggeeTerminal {
         }
 
         let mut master_fd: libc::c_int = -1;
-        let ws = winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
+        let mut ws = winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
 
         let pid = unsafe {
-            libc::forkpty(&mut master_fd, std::ptr::null_mut(), std::ptr::null_mut(), &ws)
+            libc::forkpty(&mut master_fd, std::ptr::null_mut(), std::ptr::null_mut(), &mut ws)
         };
         if pid < 0 {
             bail!("forkpty failed: {}", std::io::Error::last_os_error());
