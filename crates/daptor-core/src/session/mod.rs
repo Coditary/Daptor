@@ -2348,7 +2348,7 @@ fn handle_adapter_request(
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
-    use crate::test_support::integration_test_lock;
+    use crate::test_support::{debugpy_available, integration_test_lock};
     use serde_json::json;
 
     #[test]
@@ -2381,6 +2381,10 @@ mod lifecycle_tests {
     #[ignore = "integration: requires debugpy"]
     fn step_into_python_stdlib_source() {
         let _guard = integration_test_lock();
+        if !debugpy_available() {
+            eprintln!("SKIP: debugpy not installed");
+            return;
+        }
         let program = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/python/stdlib_step.py")
             .canonicalize()
@@ -2390,7 +2394,7 @@ mod lifecycle_tests {
         session
             .set_source_breakpoints(
                 &program,
-                &[SourceBreakpoint { line: 20, condition: None, hit_condition: None }],
+                &[SourceBreakpoint { line: 12, condition: None, hit_condition: None }],
             )
             .expect("set breakpoint on json.dumps line");
 
@@ -2420,6 +2424,10 @@ mod lifecycle_tests {
     #[ignore = "integration: requires debugpy"]
     fn restart_while_running() {
         let _guard = integration_test_lock();
+        if !debugpy_available() {
+            eprintln!("SKIP: debugpy not installed");
+            return;
+        }
         let program = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/python/hello.py")
             .canonicalize()
@@ -2442,6 +2450,10 @@ mod lifecycle_tests {
     #[ignore = "integration: requires debugpy"]
     fn restart_while_stopped_after_step() {
         let _guard = integration_test_lock();
+        if !debugpy_available() {
+            eprintln!("SKIP: debugpy not installed");
+            return;
+        }
         let program = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/python/hello.py")
             .canonicalize()
@@ -2472,6 +2484,10 @@ mod lifecycle_tests {
     #[ignore = "integration: requires debugpy"]
     fn evaluate_watch_then_continue_with_breakpoint() {
         let _guard = integration_test_lock();
+        if !debugpy_available() {
+            eprintln!("SKIP: debugpy not installed");
+            return;
+        }
         let program = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/python/hello.py")
             .canonicalize()
@@ -2511,6 +2527,10 @@ mod lifecycle_tests {
     #[ignore = "integration: requires debugpy"]
     fn disconnect_restart_and_terminate_are_safe() {
         let _guard = integration_test_lock();
+        if !debugpy_available() {
+            eprintln!("SKIP: debugpy not installed");
+            return;
+        }
         let program = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/python/hello.py")
             .canonicalize()

@@ -6,7 +6,15 @@ static INTEGRATION_LOCK: Mutex<()> = Mutex::new(());
 
 /// Hold while spawning debug adapters or rr — they conflict when run in parallel.
 pub fn integration_test_lock() -> MutexGuard<'static, ()> {
-    INTEGRATION_LOCK.lock().expect("integration test lock poisoned")
+    INTEGRATION_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+pub fn debugpy_available() -> bool {
+    Command::new("python3")
+        .args(["-c", "import debugpy"])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
 }
 
 pub fn native_fixtures_dir() -> PathBuf {

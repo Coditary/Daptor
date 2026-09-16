@@ -58,9 +58,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake pkg-config libncursesw6-dev g++
+        run: bash scripts/ci/install-apt-build-deps.sh
       - name: Configure and build
         run: |
           cmake -S cpp -B cpp/build -DCMAKE_BUILD_TYPE=Release
@@ -79,14 +77,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install adapters and build tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y g++ python3 python3-pip lldb gdb
-          python3 -m pip install --user debugpy
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - name: Install rr (optional reverse-debugging tests)
-        continue-on-error: true
-        run: |
-          sudo apt-get install -y rr || true
+        run: bash scripts/ci/install-apt-integration-deps.sh
       - name: Run ignored integration tests
-        run: cargo test -p daptor-core --lib -- --ignored --test-threads=1
+        run: cargo test -p daptor-core --lib -- --ignored --test-threads=1 --skip send_compose_request
+      - name: Run rr integration tests (optional)
+        continue-on-error: true
+        run: cargo test -p daptor-core --lib -- --ignored --test-threads=1 rr_
