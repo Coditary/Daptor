@@ -31,6 +31,25 @@ pub fn ensure_gdb_available() -> Result<()> {
     Ok(())
 }
 
+/// Whether rr can record on this host (binary present + Linux perf settings).
+pub fn rr_record_available() -> bool {
+    ensure_rr_available().is_ok() && ensure_gdb_available().is_ok() && linux_allows_rr_record()
+}
+
+#[cfg(target_os = "linux")]
+fn linux_allows_rr_record() -> bool {
+    std::fs::read_to_string("/proc/sys/kernel/perf_event_paranoid")
+        .ok()
+        .and_then(|value| value.trim().parse::<i32>().ok())
+        .map(|value| value <= 1)
+        .unwrap_or(false)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn linux_allows_rr_record() -> bool {
+    true
+}
+
 pub fn pick_replay_port(preferred: u16) -> Result<u16> {
     if TcpListener::bind(("127.0.0.1", preferred)).is_ok() {
         return Ok(preferred);

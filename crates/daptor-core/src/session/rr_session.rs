@@ -360,14 +360,15 @@ fn map_stop_reason(stop: &MiStopReason) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rr::rr_record_available;
     use crate::test_support::{ensure_native_binary, integration_test_lock};
 
     #[test]
     #[ignore = "integration: requires rr and gdb"]
     fn launch_rr_reverse_demo() {
         let _guard = integration_test_lock();
-        if ensure_rr_available().is_err() || ensure_gdb_available().is_err() {
-            eprintln!("skipping launch_rr_reverse_demo: rr and gdb must be installed");
+        if !rr_record_available() {
+            eprintln!("SKIP: rr record unavailable (missing tools or perf_event_paranoid > 1)");
             return;
         }
 
@@ -391,8 +392,8 @@ mod tests {
     #[ignore = "integration: requires rr and gdb"]
     fn rr_locals_populated_after_step() {
         let _guard = integration_test_lock();
-        if ensure_rr_available().is_err() || ensure_gdb_available().is_err() {
-            eprintln!("skipping rr_locals_populated_after_step: rr and gdb must be installed");
+        if !rr_record_available() {
+            eprintln!("SKIP: rr record unavailable (missing tools or perf_event_paranoid > 1)");
             return;
         }
 
@@ -414,8 +415,8 @@ mod tests {
     #[ignore = "integration: requires rr and gdb"]
     fn rr_step_back_reverses_line() {
         let _guard = integration_test_lock();
-        if ensure_rr_available().is_err() || ensure_gdb_available().is_err() {
-            eprintln!("skipping rr_step_back_reverses_line: rr and gdb must be installed");
+        if !rr_record_available() {
+            eprintln!("SKIP: rr record unavailable (missing tools or perf_event_paranoid > 1)");
             return;
         }
 
